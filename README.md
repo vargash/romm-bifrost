@@ -95,23 +95,40 @@ bifrost status
 # Scan library for anomalies (read-only)
 bifrost scan
 
-# Preview symlink operations without touching the filesystem
-bifrost sync --dry-run
-
-# Create ROM, BIOS and asset symlinks
+# Preview symlink operations without touching the filesystem (default)
 bifrost sync
 
-# Generate/update gamelist.xml files (merge-safe)
+# Apply ROM, BIOS and asset symlink changes
+bifrost sync --apply
+
+# Preview gamelist.xml changes (default)
 bifrost gamelist
 
-# Sync save files with RomM
-bifrost saves sync
+# Apply gamelist.xml changes
+bifrost gamelist --apply
+
+# Register current machine in RomM and persist device_id
+bifrost device-enroll
+
+# Preview save sync operations
+bifrost save-sync
+
+# Apply save sync operations (optionally filtered)
+bifrost save-sync --apply --only-file "Game.srm"
+
+# Preview/apply state sync (sister flow)
+bifrost state-sync
+bifrost state-sync --apply --only-file "Game.state1"
+
+# Debug local save discovery
+bifrost debug saves
 ```
 
 Current implementation status:
 
-- Implemented in F0/F1: config loading/validation, RomM API client foundation, `bifrost status`, `bifrost scan`
-- Not implemented yet: `sync`, `gamelist`, `saves sync`
+- Implemented (foundation): config loading/validation, RomM API client, setup (token + pairing), `bifrost status`, `bifrost scan`
+- Implemented (embryonic but usable): `bifrost sync` (dry-run/apply), `bifrost gamelist` (dry-run/apply), `bifrost save-sync` (preview/apply, `--only-file`, device enrollment flow), `bifrost state-sync` (preview/apply, `--only-file`)
+- Supporting commands implemented: `bifrost device-enroll`, `bifrost debug saves`
 
 ---
 
