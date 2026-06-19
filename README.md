@@ -51,6 +51,14 @@ No files are ever copied or duplicated. RomM is the single source of truth.
 ```bash
 git clone https://github.com/yourusername/romm-bifrost.git
 cd romm-bifrost
+./install.sh
+```
+
+This installs Bifrost with `pipx` and exposes the `bifrost` command globally.
+
+If you prefer a local editable installation for development:
+
+```bash
 pip install -e .
 ```
 
@@ -71,6 +79,8 @@ bifrost setup
 ```
 
 The setup command now stores your RomM URL and Client API Token in `~/.config/bifrost/config.toml` with secure permissions (`600`) and verifies connectivity via `/api/heartbeat`.
+
+`bifrost setup` is safely re-runnable: existing values are loaded as defaults so you can press Enter to keep current settings and only change one or two values.
 
 Non-interactive setup is also supported:
 
@@ -109,6 +119,12 @@ bifrost gamelist --apply
 
 # Register current machine in RomM and persist device_id
 bifrost device-enroll
+
+# Show current config values
+bifrost config show
+
+# Update one config value
+bifrost config set romm.url http://192.168.1.x:8080
 
 # Preview save sync operations
 bifrost save-sync

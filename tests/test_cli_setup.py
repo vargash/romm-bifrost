@@ -345,3 +345,103 @@ def test_setup_allows_explicit_path_overrides(tmp_path: Path) -> None:
     assert cfg.esde.roms_path == "~/Emulation/roms"
     assert cfg.emudeck.bios_path == "~/Emulation/bios"
     assert cfg.emudeck.media_path == "~/Emulation/tools/downloaded_media"
+
+
+def test_setup_wizard_reuses_existing_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config_file = tmp_path / "config.toml"
+    existing = AppConfig(
+        romm=RommConfig(url="http://romm.local", client_token="rmm_old", device_id="device-1"),
+        nas=NasConfig(library_path="/data/library", resources_path="/data/resources"),
+        esde=EsdeConfig(roms_path="~/Emulation/roms"),
+        emudeck=EmudeckConfig(
+            bios_path="~/Emulation/bios",
+            media_path="~/Emulation/tools/downloaded_media",
+        ),
+    )
+    save_config(existing, config_file)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/heartbeat":
+            return httpx.Response(200, json={"status": "ok"})
+        return httpx.Response(404, json={})
+
+    original_init = httpx.Client.__init__
+
+    def patched_init(self: httpx.Client, *args: Any, **kwargs: Any) -> None:
+        kwargs["transport"] = httpx.MockTransport(handler)
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "__init__", patched_init)
+
+    confirm_answers = iter([False, True, False])
+
+    def fake_confirm(*_: Any, **__: Any) -> bool:
+        return next(confirm_answers)
+
+    def fake_prompt(_message: str, default: str | None = None, **_: Any) -> str:
+        return default or ""
+
+    monkeypatch.setattr("bifrost.cli.Confirm.ask", fake_confirm)
+    monkeypatch.setattr("bifrost.cli.Prompt.ask", fake_prompt)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["setup", "--config", str(config_file)])
+
+    assert result.exit_code == EXIT_OK
+    cfg = load_config(config_file)
+    assert cfg.romm.url == "http://romm.local"
+    assert cfg.romm.client_token == "rmm_old"
+    assert cfg.romm.device_id == "device-1"
+    assert cfg.nas.library_path == "/data/library"
+    assert cfg.emudeck.media_path == "~/Emulation/tools/downloaded_media"
+
+
+def test_setup_wizard_can_change_selected_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config_file = tmp_path / "config.toml"
+    existing = AppConfig(
+        romm=RommConfig(url="http://romm.local", client_token="rmm_old"),
+        nas=NasConfig(library_path="/data/library", resources_path="/data/resources"),
+        esde=EsdeConfig(roms_path="~/Emulation/roms"),
+        emudeck=EmudeckConfig(
+            bios_path="~/Emulation/bios",
+            media_path="~/Emulation/tools/downloaded_media",
+        ),
+    )
+    save_config(existing, config_file)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/heartbeat":
+            return httpx.Response(200, json={"status": "ok"})
+        return httpx.Response(404, json={})
+
+    original_init = httpx.Client.__init__
+
+    def patched_init(self: httpx.Client, *args: Any, **kwargs: Any) -> None:
+        kwargs["transport"] = httpx.MockTransport(handler)
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "__init__", patched_init)
+
+    confirm_answers = iter([False, True, True])
+
+    def fake_confirm(*_: Any, **__: Any) -> bool:
+        return next(confirm_answers)
+
+    def fake_prompt(message: str, default: str | None = None, **_: Any) -> str:
+        if message == "NAS library path":
+            return "/new/library"
+        return default or ""
+
+    monkeypatch.setattr("bifrost.cli.Confirm.ask", fake_confirm)
+    monkeypatch.setattr("bifrost.cli.Prompt.ask", fake_prompt)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["setup", "--config", str(config_file)])
+
+    assert result.exit_code == EXIT_OK
+    cfg = load_config(config_file)
+    assert cfg.nas.library_path == "/new/library"
+    assert cfg.nas.resources_path == "/data/resources"
+    assert cfg.romm.client_token == "rmm_old"

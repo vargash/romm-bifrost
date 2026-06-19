@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=69", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
 name = "romm-bifrost"
@@ -29,13 +29,6 @@ dev = [
 
 [project.scripts]
 bifrost = "bifrost.cli:main"
-
-[tool.setuptools]
-include-package-data = true
-
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["bifrost*"]
 
 [tool.pytest.ini_options]
 addopts = "-q --cov=bifrost --cov-report=term-missing"

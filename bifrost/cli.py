@@ -10,6 +10,7 @@ from typing import Any
 
 import click
 from rich.console import Console
+from rich.prompt import Confirm, Prompt
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 from rich.table import Table
 
@@ -51,6 +52,32 @@ def main() -> None:
 @main.group(help="Debug helpers for inspecting local paths and RomM discovery.")
 def debug() -> None:
     """Debug command group."""
+
+
+@main.group(help="View and update Bifrost configuration values.")
+def config() -> None:
+    """Configuration command group."""
+
+
+def _flatten_config(prefix: str, value: Any, out: dict[str, str]) -> None:
+    """Flatten nested config values into dot-path keys."""
+
+    if isinstance(value, dict):
+        for key in sorted(value):
+            path = f"{prefix}.{key}" if prefix else key
+            _flatten_config(path, value[key], out)
+        return
+    out[prefix] = str(value)
+
+
+def _resolve_interactive_base_config(existing_config: AppConfig | None) -> AppConfig:
+    """Return defaults used by setup wizard when no config is available."""
+
+    if existing_config is not None:
+        return existing_config
+    return AppConfig(
+        romm=RommConfig(url="http://localhost:8080", client_token="rmm_placeholder", device_id="")
+    )
 
 
 def _collect_save_debug_rows(root: Path) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
@@ -171,6 +198,100 @@ def debug_saves(config_path: Path | None, limit: int) -> None:
     else:
         console.print("[yellow]No save files discovered under the configured root.[/yellow]")
 
+    raise SystemExit(EXIT_OK)
+
+
+@config.command(name="show", help="Print current configuration values.")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=None,
+    help="Override config file path (default: ~/.config/bifrost/config.toml).",
+)
+def config_show(config_path: Path | None) -> None:
+    """Print loaded config values in a key/value table."""
+
+    console = Console()
+    resolved_path = config_path or default_config_path()
+
+    try:
+        loaded = load_config(resolved_path)
+    except ConfigError as exc:
+        console.print(f"[red]Configuration error:[/red] {exc}")
+        raise SystemExit(EXIT_CONFIG_ERROR) from exc
+
+    flattened: dict[str, str] = {}
+    _flatten_config("", loaded.model_dump(mode="python"), flattened)
+
+    table = Table(title="Bifrost Config")
+    table.add_column("Key")
+    table.add_column("Value")
+    table.add_row("config.path", str(resolved_path))
+    for key in sorted(flattened):
+        table.add_row(key, flattened[key])
+    console.print(table)
+    raise SystemExit(EXIT_OK)
+
+
+@config.command(name="set", help="Update one configuration value using dot notation.")
+@click.argument("key", type=str)
+@click.argument("value", type=str)
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=None,
+    help="Override config file path (default: ~/.config/bifrost/config.toml).",
+)
+def config_set(key: str, value: str, config_path: Path | None) -> None:
+    """Set a config value and persist it to disk."""
+
+    console = Console()
+    resolved_path = config_path or default_config_path()
+
+    try:
+        loaded = load_config(resolved_path)
+    except ConfigError as exc:
+        console.print(f"[red]Configuration error:[/red] {exc}")
+        raise SystemExit(EXIT_CONFIG_ERROR) from exc
+
+    key_path = [part for part in key.strip().split(".") if part]
+    if len(key_path) < 2:
+        console.print("[red]Configuration error:[/red] key must use dot notation (for example romm.url).")
+        raise SystemExit(EXIT_CONFIG_ERROR)
+
+    dumped = loaded.model_dump(mode="python")
+    cursor: Any = dumped
+    for part in key_path[:-1]:
+        if not isinstance(cursor, dict) or part not in cursor:
+            console.print(f"[red]Configuration error:[/red] Unknown key: {key}")
+            raise SystemExit(EXIT_CONFIG_ERROR)
+        cursor = cursor[part]
+
+    leaf = key_path[-1]
+    if not isinstance(cursor, dict) or leaf not in cursor:
+        console.print(f"[red]Configuration error:[/red] Unknown key: {key}")
+        raise SystemExit(EXIT_CONFIG_ERROR)
+
+    normalized_value = value
+    if key == "romm.url":
+        normalized_value = value.strip().rstrip("/")
+    if key == "romm.client_token" and not value.startswith("rmm_"):
+        console.print("[red]Configuration error:[/red] RomM token must start with 'rmm_'.")
+        raise SystemExit(EXIT_CONFIG_ERROR)
+
+    cursor[leaf] = normalized_value
+
+    try:
+        updated = AppConfig.model_validate(dumped)
+    except Exception as exc:
+        console.print(f"[red]Configuration error:[/red] Invalid value for {key}: {exc}")
+        raise SystemExit(EXIT_CONFIG_ERROR) from exc
+
+    save_path = save_config(updated, resolved_path)
+    console.print(f"[green]Updated[/green] {key} = {normalized_value}")
+    console.print(f"[green]Configuration saved:[/green] {save_path}")
     raise SystemExit(EXIT_OK)
 
 
@@ -915,14 +1036,16 @@ def device_enroll(
         raise SystemExit(EXIT_CONFIG_ERROR)
 
     hostname_value = (hostname or sys_platform.node() or "bifrost").strip()
-    device_name_value = (name or click.prompt("Device name", default=f"Bifrost on {hostname_value}")).strip()
-    platform_value = (platform or click.prompt("Device platform", default=sys_platform.system().lower())).strip()
-    client_value = (client_name or click.prompt("Client name", default="bifrost")).strip()
-    client_version_value = (
-        client_version or click.prompt("Client version", default="0.1.0")
+    device_name_value = (
+        name or Prompt.ask("Device name", default=f"Bifrost on {hostname_value}")
     ).strip()
-    hostname_reported = (hostname or click.prompt("Hostname", default=hostname_value)).strip()
-    sync_mode_value = (sync_mode or click.prompt("Sync mode", default=config.sync.sync_mode)).strip()
+    platform_value = (
+        platform or Prompt.ask("Device platform", default=sys_platform.system().lower())
+    ).strip()
+    client_value = (client_name or Prompt.ask("Client name", default="bifrost")).strip()
+    client_version_value = (client_version or Prompt.ask("Client version", default="0.1.0")).strip()
+    hostname_reported = (hostname or Prompt.ask("Hostname", default=hostname_value)).strip()
+    sync_mode_value = (sync_mode or Prompt.ask("Sync mode", default=config.sync.sync_mode)).strip()
 
     try:
         with RommApiClient(config) as client:
@@ -1036,7 +1159,7 @@ def setup(
     emudeck_bios_path: str | None,
     emudeck_media_path: str | None,
 ) -> None:
-    """Run setup using manual token or device pairing flow."""
+    """Run setup using wizard defaults or CLI options."""
 
     console = Console()
     resolved_path = config_path or default_config_path()
@@ -1051,82 +1174,169 @@ def setup(
                 "Path values will use defaults unless provided now."
             )
 
-    url_value = (romm_url or click.prompt("RomM URL")).strip().rstrip("/")
+    use_interactive_wizard = not any(
+        [
+            romm_url,
+            client_token,
+            pair,
+            pair_code,
+            configure_paths,
+            nas_library_path,
+            nas_resources_path,
+            esde_roms_path,
+            emudeck_bios_path,
+            emudeck_media_path,
+            skip_verify,
+        ]
+    )
+
+    base_config = _resolve_interactive_base_config(existing_config)
+    default_url = base_config.romm.url or "http://localhost:8080"
+
+    if use_interactive_wizard:
+        console.print("[bold cyan]Bifrost Setup[/bold cyan]")
+        url_value = Prompt.ask("RomM URL", default=default_url).strip().rstrip("/")
+
+        use_pairing = Confirm.ask("Use Device Pairing code", default=False)
+        if use_pairing:
+            code_value = Prompt.ask("RomM Pairing Code (8 digits)").strip()
+            if not PAIRING_CODE_PATTERN.fullmatch(code_value):
+                console.print(
+                    "[red]Configuration error:[/red] Pairing code must be 8 alphanumeric characters,"
+                    " optionally formatted with a hyphen (AAAA-BBBB)."
+                )
+                raise SystemExit(EXIT_CONFIG_ERROR)
+            normalized_code = code_value.replace("-", "").upper()
+            try:
+                token_value = exchange_pairing_code(url_value, normalized_code)
+            except (NetworkError, ApiError) as exc:
+                console.print(f"[red]API error:[/red] {exc}")
+                raise SystemExit(EXIT_API_ERROR) from exc
+            console.print("[green]Pairing exchange completed.[/green]")
+        else:
+            existing_token = existing_config.romm.client_token if existing_config is not None else ""
+            keep_existing_token = bool(existing_token) and Confirm.ask(
+                "Keep existing RomM Client Token",
+                default=True,
+            )
+            if keep_existing_token:
+                token_value = existing_token
+            else:
+                token_value = Prompt.ask("RomM Client Token", password=True).strip()
+
+        should_prompt_paths = Confirm.ask(
+            "Update NAS/ES-DE/EmuDeck paths",
+            default=existing_config is None,
+        )
+        if should_prompt_paths:
+            nas_library_value = Prompt.ask(
+                "NAS library path",
+                default=base_config.nas.library_path,
+            )
+            nas_resources_value = Prompt.ask(
+                "NAS resources path",
+                default=base_config.nas.resources_path,
+            )
+            esde_roms_value = Prompt.ask(
+                "ES-DE ROMs path",
+                default=base_config.esde.roms_path,
+            )
+            emudeck_bios_value = Prompt.ask(
+                "EmuDeck BIOS path",
+                default=base_config.emudeck.bios_path,
+            )
+            emudeck_media_value = Prompt.ask(
+                "EmuDeck media path",
+                default=base_config.emudeck.media_path,
+            )
+        else:
+            nas_library_value = base_config.nas.library_path
+            nas_resources_value = base_config.nas.resources_path
+            esde_roms_value = base_config.esde.roms_path
+            emudeck_bios_value = base_config.emudeck.bios_path
+            emudeck_media_value = base_config.emudeck.media_path
+    else:
+        url_value = (romm_url or Prompt.ask("RomM URL", default=default_url)).strip().rstrip("/")
+
+        if pair and client_token:
+            console.print("[red]Configuration error:[/red] Use either --pair or --token, not both.")
+            raise SystemExit(EXIT_CONFIG_ERROR)
+
+        if not pair and pair_code:
+            console.print("[red]Configuration error:[/red] --pair-code requires --pair.")
+            raise SystemExit(EXIT_CONFIG_ERROR)
+
+        if pair:
+            code_value = (pair_code or Prompt.ask("RomM Pairing Code (8 digits)")).strip()
+            if not PAIRING_CODE_PATTERN.fullmatch(code_value):
+                console.print(
+                    "[red]Configuration error:[/red] Pairing code must be 8 alphanumeric characters,"
+                    " optionally formatted with a hyphen (AAAA-BBBB)."
+                )
+                raise SystemExit(EXIT_CONFIG_ERROR)
+            normalized_code = code_value.replace("-", "").upper()
+            try:
+                token_value = exchange_pairing_code(url_value, normalized_code)
+            except (NetworkError, ApiError) as exc:
+                console.print(f"[red]API error:[/red] {exc}")
+                raise SystemExit(EXIT_API_ERROR) from exc
+            console.print("[green]Pairing exchange completed.[/green]")
+        else:
+            token_value = (
+                client_token
+                or Prompt.ask(
+                    "RomM Client Token",
+                    password=True,
+                )
+            ).strip()
+
+        if configure_paths:
+            nas_library_value = (
+                nas_library_path
+                if nas_library_path is not None
+                else Prompt.ask("NAS library path", default=base_config.nas.library_path)
+            )
+            nas_resources_value = (
+                nas_resources_path
+                if nas_resources_path is not None
+                else Prompt.ask("NAS resources path", default=base_config.nas.resources_path)
+            )
+            esde_roms_value = (
+                esde_roms_path
+                if esde_roms_path is not None
+                else Prompt.ask("ES-DE ROMs path", default=base_config.esde.roms_path)
+            )
+            emudeck_bios_value = (
+                emudeck_bios_path
+                if emudeck_bios_path is not None
+                else Prompt.ask("EmuDeck BIOS path", default=base_config.emudeck.bios_path)
+            )
+            emudeck_media_value = (
+                emudeck_media_path
+                if emudeck_media_path is not None
+                else Prompt.ask("EmuDeck media path", default=base_config.emudeck.media_path)
+            )
+        else:
+            nas_library_value = nas_library_path or base_config.nas.library_path
+            nas_resources_value = nas_resources_path or base_config.nas.resources_path
+            esde_roms_value = esde_roms_path or base_config.esde.roms_path
+            emudeck_bios_value = emudeck_bios_path or base_config.emudeck.bios_path
+            emudeck_media_value = emudeck_media_path or base_config.emudeck.media_path
 
     if not url_value:
         console.print("[red]Configuration error:[/red] RomM URL cannot be empty.")
         raise SystemExit(EXIT_CONFIG_ERROR)
 
-    if pair and client_token:
-        console.print("[red]Configuration error:[/red] Use either --pair or --token, not both.")
-        raise SystemExit(EXIT_CONFIG_ERROR)
-
-    if not pair and pair_code:
-        console.print("[red]Configuration error:[/red] --pair-code requires --pair.")
-        raise SystemExit(EXIT_CONFIG_ERROR)
-
-    if pair:
-        code_value = (pair_code or click.prompt("RomM Pairing Code (8 digits)")).strip()
-        if not PAIRING_CODE_PATTERN.fullmatch(code_value):
-            console.print(
-                "[red]Configuration error:[/red] Pairing code must be 8 alphanumeric characters,"
-                " optionally formatted with a hyphen (AAAA-BBBB)."
-            )
-            raise SystemExit(EXIT_CONFIG_ERROR)
-        normalized_code = code_value.replace("-", "").upper()
-        try:
-            token_value = exchange_pairing_code(url_value, normalized_code)
-        except (NetworkError, ApiError) as exc:
-            console.print(f"[red]API error:[/red] {exc}")
-            raise SystemExit(EXIT_API_ERROR) from exc
-        console.print("[green]Pairing exchange completed.[/green]")
-    else:
-        token_value = (client_token or click.prompt("RomM Client Token", hide_input=True)).strip()
-
     if not token_value.startswith("rmm_"):
         console.print("[red]Configuration error:[/red] RomM token must start with 'rmm_'.")
         raise SystemExit(EXIT_CONFIG_ERROR)
 
-    base_config = existing_config or AppConfig(
-        romm=RommConfig(url=url_value, client_token=token_value, device_id="")
-    )
-
-    should_prompt_paths = configure_paths
-    if should_prompt_paths:
-        nas_library_value = (
-            nas_library_path
-            if nas_library_path is not None
-            else click.prompt("NAS library path", default=base_config.nas.library_path)
-        )
-        nas_resources_value = (
-            nas_resources_path
-            if nas_resources_path is not None
-            else click.prompt("NAS resources path", default=base_config.nas.resources_path)
-        )
-        esde_roms_value = (
-            esde_roms_path
-            if esde_roms_path is not None
-            else click.prompt("ES-DE ROMs path", default=base_config.esde.roms_path)
-        )
-        emudeck_bios_value = (
-            emudeck_bios_path
-            if emudeck_bios_path is not None
-            else click.prompt("EmuDeck BIOS path", default=base_config.emudeck.bios_path)
-        )
-        emudeck_media_value = (
-            emudeck_media_path
-            if emudeck_media_path is not None
-            else click.prompt("EmuDeck media path", default=base_config.emudeck.media_path)
-        )
-    else:
-        nas_library_value = nas_library_path or base_config.nas.library_path
-        nas_resources_value = nas_resources_path or base_config.nas.resources_path
-        esde_roms_value = esde_roms_path or base_config.esde.roms_path
-        emudeck_bios_value = emudeck_bios_path or base_config.emudeck.bios_path
-        emudeck_media_value = emudeck_media_path or base_config.emudeck.media_path
-
     config = AppConfig(
-        romm=RommConfig(url=url_value, client_token=token_value, device_id=""),
+        romm=RommConfig(
+            url=url_value,
+            client_token=token_value,
+            device_id=base_config.romm.device_id,
+        ),
         nas=NasConfig(
             library_path=nas_library_value,
             resources_path=nas_resources_value,
