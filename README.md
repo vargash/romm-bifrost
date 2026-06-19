@@ -54,6 +54,14 @@ cd romm-bifrost
 pip install -e .
 ```
 
+For development tooling:
+
+```bash
+pip install -e .[dev]
+```
+
+For a full, reproducible setup from fresh clone to passing checks, see [`docs/development_setup.md`](docs/development_setup.md).
+
 ---
 
 ## Setup
@@ -62,7 +70,19 @@ pip install -e .
 bifrost setup
 ```
 
-Bifrost will ask for your RomM URL and authenticate via a **Client API Token** — no username or password is ever stored. You can either paste a token generated in the RomM web UI, or use the Device Pairing flow (8-digit code).
+The setup command now stores your RomM URL and Client API Token in `~/.config/bifrost/config.toml` with secure permissions (`600`) and verifies connectivity via `/api/heartbeat`.
+
+Non-interactive setup is also supported:
+
+```bash
+bifrost setup --url http://192.168.1.x:8080 --token rmm_your-token
+```
+
+Device Pairing flow is supported as well:
+
+```bash
+bifrost setup --pair --url http://192.168.1.x:8080 --pair-code MCM9-FDSQ
+```
 
 ---
 
@@ -87,6 +107,11 @@ bifrost gamelist
 # Sync save files with RomM
 bifrost saves sync
 ```
+
+Current implementation status:
+
+- Implemented in F0/F1: config loading/validation, RomM API client foundation, `bifrost status`, `bifrost scan`
+- Not implemented yet: `sync`, `gamelist`, `saves sync`
 
 ---
 

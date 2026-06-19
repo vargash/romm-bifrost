@@ -1,0 +1,45 @@
+# Bifrost configuration file example
+# Copy to ~/.config/bifrost/config.toml and update values.
+
+[romm]
+url = "http://192.168.1.x:8080"
+client_token = "rmm_your-token-here"
+device_id = ""
+
+[nas]
+library_path = "/path/to/romm/library"
+resources_path = "/path/to/romm/resources"
+roms_subpath = "roms"
+bios_subpath = "bios"
+
+[esde]
+roms_path = "~/ROMs"
+gamelists_path = "~/.emulationstation/gamelists"
+custom_systems_path = "~/.emulationstation/custom_systems"
+
+[emudeck]
+bios_path = "~/BIOS"
+media_path = "/Emulation/tools/downloaded_media"
+saves_path = "~/saves"
+
+[assets.folder_map]
+backcovers = "backcovers"
+bezels = "bezels"
+boxes = "box3dfront"
+covers = "covers"
+fanart = "fanart"
+manuals = "manuals"
+marquees = "marquees"
+miximages = "miximages"
+screenshots = "screenshots"
+titlescreens = "titlescreens"
+videos = "videos"
+
+[sync]
+conflict_strategy = "ask"
+sync_mode = "push_pull"
+
+[output]
+format = "table"
+verbose = false
+log_file = ""
