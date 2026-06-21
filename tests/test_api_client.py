@@ -4,12 +4,15 @@ import httpx
 import pytest
 
 from bifrost.api.client import RetryConfig, RommApiClient
-from bifrost.config import AppConfig, RommConfig
+from bifrost.config import AppConfig, CacheConfig, RommConfig
 from bifrost.errors import ApiError, AuthenticationError
 
 
 def make_config() -> AppConfig:
-    return AppConfig(romm=RommConfig(url="http://romm.local", client_token="rmm_token"))
+    return AppConfig(
+        romm=RommConfig(url="http://romm.local", client_token="rmm_token"),
+        cache=CacheConfig(enabled=False),
+    )
 
 
 def test_heartbeat_success_with_json() -> None:

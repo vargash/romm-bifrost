@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ from bifrost.api.models import (
     SyncNegotiatePayload,
     SyncNegotiateResponse,
 )
+from bifrost.cache import BifrostCache, merge_by_id
 from bifrost.config import AppConfig
 from bifrost.errors import ApiError, AuthenticationError, NetworkError
 
@@ -173,13 +175,18 @@ class RommApiClient:
         timeout_seconds: float = 10.0,
         retry: RetryConfig | None = None,
         transport: httpx.BaseTransport | None = None,
+        no_cache: bool = False,
     ) -> None:
         self._config = config
         self._retry = retry or RetryConfig()
         self._platforms_cache: list[PlatformSummary] | None = None
         self._roms_cache: list[RomSummary] | None = None
         self._roms_raw_cache: list[dict[str, Any]] | None = None
+        self._firmware_cache: list[dict[str, Any]] | None = None
         self._collection_info: dict[str, str] = {}
+        self._cache: BifrostCache | None = (
+            BifrostCache(config.cache) if config.cache.enabled and not no_cache else None
+        )
         self._client = httpx.Client(
             base_url=config.romm.url,
             timeout=timeout_seconds,
@@ -242,6 +249,61 @@ class RommApiClient:
     def _request_bytes(self, method: str, endpoint: str, **kwargs: Any) -> bytes:
         response = self._request(method, endpoint, **kwargs)
         return response.content
+
+    def _fetch_platforms_delta(self, since: datetime) -> list[Any]:
+        """Fetch platforms updated after `since` (no pagination needed for platforms)."""
+        data = self._request_json(
+            "GET", "/api/platforms", params={"updated_after": since.isoformat()}
+        )
+        items = _extract_list_payload(data)
+        return items if items is not None else []
+
+    def _fetch_roms_delta(self, since: datetime) -> list[dict[str, Any]]:
+        """Fetch ROMs updated after `since` using offset pagination."""
+        since_str = since.isoformat()
+        limit = 1000
+        offset = 0
+        raw_items: list[Any] = []
+
+        while True:
+            payload = self._request_json(
+                "GET",
+                "/api/roms",
+                params={
+                    "updated_after": since_str,
+                    "limit": limit,
+                    "offset": offset,
+                    "with_char_index": False,
+                    "with_filter_values": False,
+                    "with_files": False,
+                },
+            )
+            items_payload: list[Any] | None = None
+            total: int | None = None
+
+            if isinstance(payload, dict):
+                candidate = payload.get("items")
+                total_candidate = payload.get("total")
+                if isinstance(candidate, list) and isinstance(total_candidate, int):
+                    items_payload = candidate
+                    total = total_candidate
+                else:
+                    items_payload = _extract_list_payload(payload) or []
+                    total = len(raw_items) + len(items_payload)
+            elif isinstance(payload, list):
+                items_payload = payload
+                total = len(raw_items) + len(payload)
+
+            if not items_payload:
+                break
+
+            raw_items.extend(items_payload)
+
+            if total is not None and len(raw_items) >= total:
+                break
+            offset += limit
+
+        return [item for item in raw_items if isinstance(item, dict)]
 
     def upload_save_file(
         self,
@@ -451,14 +513,54 @@ class RommApiClient:
         raise ApiError("Unexpected response type for /api/roms")
 
     def list_platforms(self, use_cache: bool = True) -> list[PlatformSummary]:
+        # L1: in-memory
         if use_cache and self._platforms_cache is not None:
             return self._platforms_cache
 
+        # L2: disk cache
+        if use_cache and self._cache is not None:
+            cached = self._cache.get("platforms")
+            if cached is not None:
+                items = [PlatformSummary.model_validate(i) for i in cached]
+                self._platforms_cache = items
+                self._collection_info["platforms"] = "disk_cache"
+                return items
+
+            last_fetched = self._cache.last_fetched_at("platforms")
+            if last_fetched is not None:
+                stale = self._cache.get_stale("platforms")
+                if stale is not None:
+                    try:
+                        delta = self._fetch_platforms_delta(last_fetched)
+                        merged_dicts = merge_by_id(stale, delta)
+                        try:
+                            self._cache.set("platforms", merged_dicts, full_fetch=False)
+                        except OSError:
+                            pass
+                        items = [PlatformSummary.model_validate(i) for i in merged_dicts]
+                        self._platforms_cache = items
+                        self._collection_info["platforms"] = "disk_cache_incremental"
+                        return items
+                    except (ApiError, NetworkError):
+                        pass
+
+        # L3: full HTTP fetch
         data = self._request_json("GET", "/api/platforms")
         items_payload = _extract_list_payload(data)
         if items_payload is None:
             raise ApiError("Unexpected response type for /api/platforms")
         items = [PlatformSummary.model_validate(item) for item in items_payload]
+
+        if use_cache and self._cache is not None:
+            try:
+                self._cache.set(
+                    "platforms",
+                    [i.model_dump(mode="python") for i in items],
+                    full_fetch=True,
+                )
+            except OSError:
+                pass
+
         self._platforms_cache = items
         self._collection_info["platforms"] = "flat"
         return items
@@ -473,9 +575,38 @@ class RommApiClient:
         return items
 
     def list_roms_raw(self, use_cache: bool = True) -> list[dict[str, Any]]:
+        # L1: in-memory
         if use_cache and self._roms_raw_cache is not None:
             return self._roms_raw_cache
 
+        # L2: disk cache
+        if use_cache and self._cache is not None:
+            cached = self._cache.get("roms")
+            if cached is not None:
+                self._roms_raw_cache = cached
+                self._roms_cache = [RomSummary.model_validate(i) for i in cached]
+                self._collection_info["roms"] = "disk_cache"
+                return cached
+
+            last_fetched = self._cache.last_fetched_at("roms")
+            if last_fetched is not None:
+                stale = self._cache.get_stale("roms")
+                if stale is not None:
+                    try:
+                        delta = self._fetch_roms_delta(last_fetched)
+                        merged = merge_by_id(stale, delta)
+                        try:
+                            self._cache.set("roms", merged, full_fetch=False)
+                        except OSError:
+                            pass
+                        self._roms_raw_cache = merged
+                        self._roms_cache = [RomSummary.model_validate(i) for i in merged]
+                        self._collection_info["roms"] = "disk_cache_incremental"
+                        return merged
+                    except (ApiError, NetworkError):
+                        pass
+
+        # L3: full HTTP fetch
         first_payload = self._request_json(
             "GET",
             "/api/roms",
@@ -493,6 +624,11 @@ class RommApiClient:
             fallback_items = _extract_list_payload(first_payload)
             if fallback_items is not None:
                 items = [item for item in fallback_items if isinstance(item, dict)]
+                if use_cache and self._cache is not None:
+                    try:
+                        self._cache.set("roms", items, full_fetch=True)
+                    except OSError:
+                        pass
                 self._roms_raw_cache = items
                 self._roms_cache = [RomSummary.model_validate(item) for item in items]
                 self._collection_info["roms"] = "flat"
@@ -536,19 +672,51 @@ class RommApiClient:
             offset += limit
 
         items = [item for item in raw_items if isinstance(item, dict)]
+        if use_cache and self._cache is not None:
+            try:
+                self._cache.set("roms", items, full_fetch=True)
+            except OSError:
+                pass
         self._roms_raw_cache = items
         self._roms_cache = [RomSummary.model_validate(item) for item in items]
         self._collection_info["roms"] = f"paginated ({pages} pages)"
         return items
 
-    def list_firmware(self, platform_id: int | None = None) -> list[dict[str, Any]]:
+    def list_firmware(
+        self, platform_id: int | None = None, use_cache: bool = True
+    ) -> list[dict[str, Any]]:
+        # Cache only applies to the full list (no platform_id filter).
+        can_cache = platform_id is None
+
+        # L1: in-memory
+        if use_cache and can_cache and self._firmware_cache is not None:
+            return self._firmware_cache
+
+        # L2: disk cache (TTL only — /api/firmware does not support updated_after)
+        if use_cache and can_cache and self._cache is not None:
+            cached = self._cache.get("firmware")
+            if cached is not None:
+                self._firmware_cache = cached
+                self._collection_info["firmware"] = "disk_cache"
+                return cached
+
+        # L3: full HTTP fetch
         params: dict[str, Any] = {}
         if platform_id is not None:
             params["platform_id"] = platform_id
         data = self._request_json("GET", "/api/firmware", params=params)
         if not isinstance(data, list):
             raise ApiError("Unexpected response type for /api/firmware")
-        return [item for item in data if isinstance(item, dict)]
+        items = [item for item in data if isinstance(item, dict)]
+
+        if use_cache and can_cache and self._cache is not None:
+            try:
+                self._cache.set("firmware", items, full_fetch=True)
+            except OSError:
+                pass
+        if can_cache:
+            self._firmware_cache = items
+        return items
 
     def register_device(self, payload: DeviceCreatePayload) -> DeviceCreateResponse:
         data = self._request_json(
@@ -597,6 +765,7 @@ class RommApiClient:
         self._platforms_cache = None
         self._roms_cache = None
         self._roms_raw_cache = None
+        self._firmware_cache = None
         self._collection_info = {}
 
     def collection_info(self, collection: str) -> str | None:

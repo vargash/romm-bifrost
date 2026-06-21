@@ -13,7 +13,7 @@ def test_sync_dry_run_uses_plan_and_prints_summary(monkeypatch, tmp_path: Path):
         pass
 
     class DummyClient:
-        def __init__(self, config):
+        def __init__(self, config, **kwargs):
             self.config = config
 
         def __enter__(self):
@@ -55,7 +55,7 @@ def test_sync_apply_calls_apply_operations(monkeypatch, tmp_path: Path):
         pass
 
     class DummyClient:
-        def __init__(self, config):
+        def __init__(self, config, **kwargs):
             self.config = config
 
         def __enter__(self):

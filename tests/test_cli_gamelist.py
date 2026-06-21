@@ -16,7 +16,7 @@ def test_gamelist_dry_run_outputs_summary(monkeypatch, tmp_path: Path):
         pass
 
     class DummyClient:
-        def __init__(self, config):
+        def __init__(self, config, **kwargs):
             self.config = config
 
         def __enter__(self):
@@ -57,7 +57,7 @@ def test_gamelist_apply_outputs_written_count(monkeypatch, tmp_path: Path):
         pass
 
     class DummyClient:
-        def __init__(self, config):
+        def __init__(self, config, **kwargs):
             self.config = config
 
         def __enter__(self):

@@ -85,6 +85,16 @@ class OutputConfig(BaseModel):
     log_file: str = ""
 
 
+class CacheConfig(BaseModel):
+    """Disk cache settings for RomM API responses."""
+
+    enabled: bool = True
+    ttl_roms_hours: int = 6
+    ttl_platforms_hours: int = 24
+    ttl_firmware_hours: int = 24
+    cache_dir: str = ""
+
+
 class AppConfig(BaseModel):
     """Full Bifrost configuration."""
 
@@ -95,6 +105,7 @@ class AppConfig(BaseModel):
     assets: AssetsConfig = Field(default_factory=AssetsConfig)
     sync: SyncConfig = Field(default_factory=SyncConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
+    cache: CacheConfig = Field(default_factory=CacheConfig)
 
 
 def default_config_path() -> Path:

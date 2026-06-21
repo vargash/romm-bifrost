@@ -10,14 +10,16 @@ from typing import Any
 
 import click
 from rich.console import Console
-from rich.prompt import Confirm, Prompt
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
+from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from bifrost.api.client import RommApiClient, exchange_pairing_code
 from bifrost.api.models import DeviceCreatePayload
+from bifrost.cache import BifrostCache
 from bifrost.config import (
     AppConfig,
+    CacheConfig,
     EmudeckConfig,
     EsdeConfig,
     NasConfig,
@@ -57,6 +59,108 @@ def debug() -> None:
 @main.group(help="View and update Bifrost configuration values.")
 def config() -> None:
     """Configuration command group."""
+
+
+@main.group(name="cache", help="Manage the Bifrost API response cache.")
+def cache_group() -> None:
+    """Cache management command group."""
+
+
+def _format_age(age_seconds: float | None) -> str:
+    if age_seconds is None:
+        return "never"
+    hours = int(age_seconds // 3600)
+    minutes = int((age_seconds % 3600) // 60)
+    if hours > 0:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
+@cache_group.command(name="status", help="Show age and item count for each cached collection.")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=None,
+    help="Override config file path (default: ~/.config/bifrost/config.toml).",
+)
+def cache_status(config_path: Path | None) -> None:
+    console = Console()
+    resolved_path = config_path or default_config_path()
+
+    try:
+        cfg = load_config(resolved_path)
+        cache_cfg = cfg.cache
+    except ConfigError:
+        cache_cfg = CacheConfig()
+
+    bifrost_cache = BifrostCache(cache_cfg)
+    statuses = bifrost_cache.status()
+
+    if not cache_cfg.enabled:
+        console.print("[yellow]Cache is disabled in config (cache.enabled = false).[/yellow]")
+
+    table = Table(title="Bifrost Cache Status")
+    table.add_column("Key")
+    table.add_column("Fetched at")
+    table.add_column("Age")
+    table.add_column("Items")
+    table.add_column("TTL (h)")
+    table.add_column("Status")
+
+    ttl_map = {
+        "platforms": cache_cfg.ttl_platforms_hours,
+        "roms": cache_cfg.ttl_roms_hours,
+        "firmware": cache_cfg.ttl_firmware_hours,
+    }
+    for key, st in sorted(statuses.items()):
+        fetched_str = st.fetched_at.isoformat(timespec="seconds") if st.fetched_at else "—"
+        age_str = _format_age(st.age_seconds)
+        status_str = "[red]expired[/red]" if st.is_expired else "[green]fresh[/green]"
+        table.add_row(
+            key,
+            fetched_str,
+            age_str,
+            str(st.item_count) if st.item_count else "—",
+            str(ttl_map.get(key, 24)),
+            status_str,
+        )
+    console.print(table)
+    raise SystemExit(EXIT_OK)
+
+
+@cache_group.command(name="invalidate", help="Invalidate one or all cached collections.")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=None,
+    help="Override config file path (default: ~/.config/bifrost/config.toml).",
+)
+@click.option(
+    "--key",
+    type=click.Choice(["platforms", "roms", "firmware"]),
+    default=None,
+    help="Invalidate only this key. Omit to invalidate all.",
+)
+def cache_invalidate(config_path: Path | None, key: str | None) -> None:
+    console = Console()
+    resolved_path = config_path or default_config_path()
+
+    try:
+        cfg = load_config(resolved_path)
+        cache_cfg = cfg.cache
+    except ConfigError:
+        cache_cfg = CacheConfig()
+
+    bifrost_cache = BifrostCache(cache_cfg)
+    bifrost_cache.invalidate(key)
+
+    if key:
+        console.print(f"[green]Cache invalidated:[/green] {key}")
+    else:
+        console.print("[green]Cache invalidated:[/green] all keys")
+    raise SystemExit(EXIT_OK)
 
 
 def _flatten_config(prefix: str, value: Any, out: dict[str, str]) -> None:
@@ -405,7 +509,8 @@ def scan(config_path: Path | None) -> None:
     is_flag=True,
     help="Write gamelist.xml files to disk. Without this flag, command runs in dry-run mode.",
 )
-def gamelist(config_path: Path | None, apply: bool) -> None:
+@click.option("--no-cache", "no_cache", is_flag=True, help="Bypass disk cache for this run.")
+def gamelist(config_path: Path | None, apply: bool, no_cache: bool) -> None:
     """Generate merge-safe gamelist.xml plans or files."""
 
     console = Console()
@@ -419,7 +524,7 @@ def gamelist(config_path: Path | None, apply: bool) -> None:
         raise SystemExit(EXIT_CONFIG_ERROR) from exc
 
     try:
-        with RommApiClient(config) as client:
+        with RommApiClient(config, no_cache=no_cache) as client:
             if apply:
                 apply_results = apply_gamelist_plan(config, client)
                 rows = [
@@ -534,7 +639,8 @@ def gamelist(config_path: Path | None, apply: bool) -> None:
     is_flag=True,
     help="Apply filesystem changes. Without this flag, sync runs in dry-run mode.",
 )
-def sync(config_path: Path | None, apply: bool) -> None:
+@click.option("--no-cache", "no_cache", is_flag=True, help="Bypass disk cache for this run.")
+def sync(config_path: Path | None, apply: bool, no_cache: bool) -> None:
     """Create a dry-run plan or apply symlink operations."""
 
     console = Console()
@@ -547,7 +653,7 @@ def sync(config_path: Path | None, apply: bool) -> None:
         raise SystemExit(EXIT_CONFIG_ERROR) from exc
 
     try:
-        with RommApiClient(config) as client:
+        with RommApiClient(config, no_cache=no_cache) as client:
             ops = plan_symlink_operations(config, client)
     except AuthenticationError as exc:
         console.print(f"[red]Authentication error:[/red] {exc}")
@@ -678,11 +784,13 @@ def sync(config_path: Path | None, apply: bool) -> None:
     type=str,
     help="Filter sync to one or more file names/path fragments.",
 )
+@click.option("--no-cache", "no_cache", is_flag=True, help="Bypass disk cache for this run.")
 def save_sync(
     config_path: Path | None,
     device_id: str | None,
     apply: bool,
     only_files: tuple[str, ...],
+    no_cache: bool,
 ) -> None:
     """Scan local saves and preview the RomM sync negotiation."""
 
@@ -696,7 +804,7 @@ def save_sync(
         raise SystemExit(EXIT_CONFIG_ERROR) from exc
 
     try:
-        with RommApiClient(config) as client:
+        with RommApiClient(config, no_cache=no_cache) as client:
             preview = build_save_sync_preview(
                 config,
                 client,
@@ -821,10 +929,12 @@ def save_sync(
     type=str,
     help="Filter sync to one or more file names/path fragments.",
 )
+@click.option("--no-cache", "no_cache", is_flag=True, help="Bypass disk cache for this run.")
 def state_sync(
     config_path: Path | None,
     apply: bool,
     only_files: tuple[str, ...],
+    no_cache: bool,
 ) -> None:
     """Scan local state files and preview/apply state sync actions."""
 
@@ -838,7 +948,7 @@ def state_sync(
         raise SystemExit(EXIT_CONFIG_ERROR) from exc
 
     try:
-        with RommApiClient(config) as client:
+        with RommApiClient(config, no_cache=no_cache) as client:
             preview = build_state_sync_preview(
                 config,
                 client,

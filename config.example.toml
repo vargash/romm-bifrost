@@ -43,3 +43,10 @@ sync_mode = "push_pull"
 format = "table"
 verbose = false
 log_file = ""
+
+[cache]
+enabled = true
+ttl_roms_hours = 6
+ttl_platforms_hours = 24
+ttl_firmware_hours = 24
+cache_dir = ""           # empty = ~/.cache/bifrost (XDG-aware)
