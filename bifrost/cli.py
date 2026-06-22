@@ -34,12 +34,22 @@ from bifrost.config import (
 from bifrost.errors import ApiError, AuthenticationError, ConfigError, NetworkError
 from bifrost.gamelist import apply_gamelist_plan, build_gamelist_plan
 from bifrost.logging_setup import setup_file_logging
+from bifrost.multidisc import (
+    M3uOperation,
+    apply_m3u_operation,
+    evaluate_m3u_operation,
+    plan_m3u_operations,
+)
 from bifrost.preflight import PreflightResult, run_save_preflight, run_sync_preflight
 from bifrost.save_sync import build_save_sync_preview, execute_save_sync_preview
 from bifrost.state_sync import build_state_sync_preview, execute_state_sync_preview
 from bifrost.symlink_manager import (
+    RemoveSymlinkOperation,
     apply_operation,
+    apply_remove_operation,
     evaluate_operation,
+    evaluate_remove_operation,
+    plan_stale_removals,
     plan_symlink_operations,
 )
 
@@ -683,6 +693,7 @@ def sync(config_path: Path | None, apply: bool, no_cache: bool) -> None:
     try:
         with RommApiClient(config, no_cache=no_cache) as client:
             ops = plan_symlink_operations(config, client)
+            m3u_ops = plan_m3u_operations(config, client)
     except AuthenticationError as exc:
         console.print(f"[red]Authentication error:[/red] {exc}")
         raise SystemExit(EXIT_AUTH_ERROR) from exc
@@ -690,9 +701,12 @@ def sync(config_path: Path | None, apply: bool, no_cache: bool) -> None:
         console.print(f"[red]API error:[/red] {exc}")
         raise SystemExit(EXIT_API_ERROR) from exc
 
+    remove_ops = plan_stale_removals(config, ops)
+    all_ops: list[Any] = list(ops) + list(m3u_ops) + list(remove_ops)
+
     results: list[Any]
     if apply:
-        if not ops:
+        if not all_ops:
             results = []
         else:
             results = []
@@ -704,13 +718,25 @@ def sync(config_path: Path | None, apply: bool, no_cache: bool) -> None:
                 TimeRemainingColumn(),
                 console=console,
             ) as progress:
-                task_id = progress.add_task("Applying symlinks", total=len(ops))
-                for op in ops:
-                    results.append(apply_operation(op))
+                task_id = progress.add_task("Applying sync", total=len(all_ops))
+                for op in all_ops:
+                    if isinstance(op, M3uOperation):
+                        results.append(apply_m3u_operation(op))
+                    elif isinstance(op, RemoveSymlinkOperation):
+                        results.append(apply_remove_operation(op))
+                    else:
+                        results.append(apply_operation(op))
                     progress.advance(task_id)
         mode_label = "apply"
     else:
-        results = [evaluate_operation(op) for op in ops]
+        results = []
+        for op in all_ops:
+            if isinstance(op, M3uOperation):
+                results.append(evaluate_m3u_operation(op))
+            elif isinstance(op, RemoveSymlinkOperation):
+                results.append(evaluate_remove_operation(op))
+            else:
+                results.append(evaluate_operation(op))
         mode_label = "dry-run"
 
     counts: dict[str, int] = {}
@@ -730,9 +756,13 @@ def sync(config_path: Path | None, apply: bool, no_cache: bool) -> None:
     summary.add_row("ROM symlinks", str(by_category.get("rom", 0)))
     summary.add_row("BIOS symlinks", str(by_category.get("bios", 0)))
     summary.add_row("Asset dir symlinks", str(by_category.get("asset-dir", 0)))
+    summary.add_row("M3U playlists", str(by_category.get("m3u", 0)))
     summary.add_row("Create", str(counts.get("create", 0)))
     summary.add_row("Replace", str(counts.get("replace", 0)))
     summary.add_row("Already OK", str(counts.get("ok", 0)))
+    summary.add_row("Stale removed", str(counts.get("remove", 0)))
+    summary.add_row("Broken (NAS file missing)", str(counts.get("broken", 0)))
+    summary.add_row("Missing target (skipped)", str(counts.get("missing-target", 0)))
     summary.add_row("Conflicts", str(counts.get("conflict", 0)))
     summary.add_row("Errors", str(counts.get("error", 0)))
     console.print(summary)

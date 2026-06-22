@@ -37,6 +37,8 @@ def test_sync_dry_run_uses_plan_and_prints_summary(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(cli, "load_config", lambda _: DummyConfig())
     monkeypatch.setattr(cli, "RommApiClient", DummyClient)
     monkeypatch.setattr(cli, "plan_symlink_operations", lambda _cfg, _client: [DummyOp()])
+    monkeypatch.setattr(cli, "plan_m3u_operations", lambda _cfg, _client: [])
+    monkeypatch.setattr(cli, "plan_stale_removals", lambda _cfg, _ops: [])
     monkeypatch.setattr(cli, "evaluate_operation", lambda _op: DummyResult("create"))
 
     runner = CliRunner()
@@ -81,6 +83,8 @@ def test_sync_apply_calls_apply_operations(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(cli, "load_config", lambda _: DummyConfig())
     monkeypatch.setattr(cli, "RommApiClient", DummyClient)
     monkeypatch.setattr(cli, "plan_symlink_operations", lambda _cfg, _client: [DummyOp()])
+    monkeypatch.setattr(cli, "plan_m3u_operations", lambda _cfg, _client: [])
+    monkeypatch.setattr(cli, "plan_stale_removals", lambda _cfg, _ops: [])
     monkeypatch.setattr(cli, "run_sync_preflight", lambda _cfg: cli.PreflightResult())
 
     def fake_apply(_op):
