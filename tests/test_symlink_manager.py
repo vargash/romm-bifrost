@@ -194,7 +194,7 @@ def test_apply_operation_replaces_valid_parent_symlink_with_real_dir(tmp_path: P
     # Old flat NAS dir that still exists (valid symlink target).
     old_flat = nas / "resources" / "roms" / "257" / "videos"
     old_flat.mkdir(parents=True)
-    asset_file = nas / "resources" / "roms" / "11" / "1046" / "video_normalized" / "video_normalized.mp4"
+    asset_file = nas / "resources" / "roms" / "11" / "1046" / "video_normalized" / "video-normalized.mp4"
     asset_file.parent.mkdir(parents=True)
     asset_file.write_text("vid")
 

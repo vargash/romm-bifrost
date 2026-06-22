@@ -15,7 +15,7 @@ from bifrost.config import AppConfig
 # whose filename depends on the ROM's numeric id (e.g. "1046.pdf").
 _PREFERRED_ASSET_FILE: dict[str, str] = {
     "cover": "big.png",                          # RomM generates big/small variants for covers
-    "video_normalized": "video_normalized.mp4",  # video, not image
+    "video_normalized": "video-normalized.mp4",  # RomM uses hyphen, not underscore
     "physical": "physical.png",
     "screenshots": "0.png",                      # first screenshot, 0-indexed
 }
