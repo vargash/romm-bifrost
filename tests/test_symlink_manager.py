@@ -147,3 +147,44 @@ def test_apply_operation_returns_error_instead_of_raising_for_filesystem_issue(t
     )
 
     assert result.action == "error"
+
+
+def test_evaluate_operation_returns_broken_for_symlink_with_missing_target(tmp_path: Path):
+    target = tmp_path / "gone.bin"  # never created
+    destination = tmp_path / "dest.bin"
+    destination.symlink_to(target)
+
+    result = evaluate_operation(
+        SymlinkOperation(category="rom", destination=destination, target=target, is_dir=False)
+    )
+
+    assert result.action == "broken"
+    assert "missing" in result.detail.lower()
+
+
+def test_apply_operation_returns_broken_without_modifying_symlink(tmp_path: Path):
+    target = tmp_path / "gone.bin"
+    destination = tmp_path / "dest.bin"
+    destination.symlink_to(target)
+
+    op = SymlinkOperation(category="rom", destination=destination, target=target, is_dir=False)
+    result = apply_operation(op)
+
+    assert result.action == "broken"
+    assert destination.is_symlink()  # symlink untouched
+
+
+def test_apply_operation_returns_missing_target_when_nas_file_absent(tmp_path: Path):
+    nas_dir = tmp_path / "nas" / "roms" / "psx"
+    nas_dir.mkdir(parents=True)
+    target = nas_dir / "Xenogears.chd"  # directory exists but file does not
+
+    roms_dir = tmp_path / "roms" / "psx"
+    roms_dir.mkdir(parents=True)
+    destination = roms_dir / "Xenogears.chd"
+
+    op = SymlinkOperation(category="rom", destination=destination, target=target, is_dir=False)
+    result = apply_operation(op)
+
+    assert result.action == "missing-target"
+    assert not destination.exists() and not destination.is_symlink()
