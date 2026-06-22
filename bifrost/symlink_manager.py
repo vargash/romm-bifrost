@@ -11,8 +11,7 @@ from bifrost.api.client import RommApiClient
 from bifrost.config import AppConfig
 
 # For most RomM asset types the preferred file is <type>.png.
-# Exceptions are listed here explicitly.  Use _MANUAL_ASSET_FILE for types
-# whose filename depends on the ROM's numeric id (e.g. "1046.pdf").
+# Exceptions are listed here explicitly.
 _PREFERRED_ASSET_FILE: dict[str, str] = {
     "cover": "big.png",                          # RomM generates big/small variants for covers
     "video_normalized": "video-normalized.mp4",  # RomM uses hyphen, not underscore
@@ -20,6 +19,31 @@ _PREFERRED_ASSET_FILE: dict[str, str] = {
     "screenshots": "0.png",                      # first screenshot, 0-indexed
 }
 _ROM_ID_NAMED: frozenset[str] = frozenset({"manual"})  # filename is "<rom_id>.pdf"
+
+# Extensions probed at plan time to find the actual image file on the NAS.
+# RomM stores images in their original format, so the extension may differ from the canonical one.
+_IMAGE_EXTENSIONS: tuple[str, ...] = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
+
+
+def _resolve_image_file(target: Path) -> Path:
+    """Return the first existing variant of target with a supported image extension.
+
+    Only probes the NAS when the asset type directory is already accessible.
+    Falls back to the canonical target unchanged if nothing is found.
+    """
+    if target.suffix not in _IMAGE_EXTENSIONS:
+        return target  # non-image asset (video, PDF) — no probing needed
+    if target.exists():
+        return target
+    parent = target.parent
+    if not parent.is_dir():
+        return target  # NAS or asset-type dir unreachable; keep canonical
+    stem = target.stem
+    for ext in _IMAGE_EXTENSIONS:
+        candidate = parent / f"{stem}{ext}"
+        if candidate.exists():
+            return candidate
+    return target  # directory exists but no matching file — will become missing-target
 
 
 @dataclass(frozen=True)
@@ -153,8 +177,6 @@ def plan_symlink_operations(config: AppConfig, client: RommApiClient) -> list[Sy
                 pref_file = f"{rom.id}.pdf"
             else:
                 pref_file = _PREFERRED_ASSET_FILE.get(romm_asset_type, f"{romm_asset_type}.png")
-            ext = Path(pref_file).suffix
-            destination = media_root / slug / esde_folder / f"{rom_stem}{ext}"
             target = (
                 resources_root
                 / str(rom.platform_id)
@@ -162,6 +184,10 @@ def plan_symlink_operations(config: AppConfig, client: RommApiClient) -> list[Sy
                 / romm_asset_type
                 / pref_file
             )
+            # Probe the NAS for the actual image extension (RomM preserves the original format).
+            target = _resolve_image_file(target)
+            ext = target.suffix
+            destination = media_root / slug / esde_folder / f"{rom_stem}{ext}"
             ops.append(
                 SymlinkOperation(
                     category="asset",

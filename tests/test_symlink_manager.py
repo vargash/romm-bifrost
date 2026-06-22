@@ -4,6 +4,7 @@ from bifrost.api.models import PlatformSummary, RomSummary
 from bifrost.config import AppConfig, AssetsConfig, EmudeckConfig, EsdeConfig, NasConfig, RommConfig
 from bifrost.symlink_manager import (
     SymlinkOperation,
+    _resolve_image_file,
     apply_operation,
     evaluate_operation,
     plan_symlink_operations,
@@ -277,6 +278,55 @@ def test_apply_operation_returns_missing_target_when_asset_type_dir_absent(tmp_p
 
     assert result.action == "missing-target"
     assert not destination.is_symlink()
+
+
+def test_resolve_image_file_finds_jpg_when_png_missing(tmp_path: Path):
+    """_resolve_image_file returns the .jpg variant when the canonical .png doesn't exist."""
+    asset_dir = tmp_path / "screenshots"
+    asset_dir.mkdir()
+    jpg = asset_dir / "0.jpg"
+    jpg.write_bytes(b"img")
+
+    result = _resolve_image_file(asset_dir / "0.png")
+    assert result == jpg
+
+
+def test_resolve_image_file_returns_canonical_when_dir_unreachable(tmp_path: Path):
+    """If the asset dir doesn't exist (NAS down), the canonical path is returned unchanged."""
+    target = tmp_path / "nonexistent_dir" / "0.png"
+    assert _resolve_image_file(target) == target
+
+
+def test_resolve_image_file_returns_canonical_when_nothing_found(tmp_path: Path):
+    """If the directory is reachable but has no matching image file, return the canonical path."""
+    asset_dir = tmp_path / "cover"
+    asset_dir.mkdir()
+    # no image files inside
+
+    result = _resolve_image_file(asset_dir / "big.png")
+    assert result == asset_dir / "big.png"
+
+
+def test_plan_symlink_operations_resolves_jpg_screenshot(tmp_path: Path):
+    """plan_symlink_operations picks up the actual .jpg when .png is absent."""
+    config = make_config(tmp_path)
+    config = config.model_copy(
+        update={"assets": AssetsConfig(folder_map={"screenshots": "screenshots"})}
+    )
+
+    # Create a NAS screenshot directory with a .jpg file.
+    resources = tmp_path / "nas" / "romm" / "resources" / "roms" / "1" / "10" / "screenshots"
+    resources.mkdir(parents=True)
+    (resources / "0.jpg").write_bytes(b"img")
+
+    ops = plan_symlink_operations(config, StubClient())
+    asset_op = next(
+        (op for op in ops if op.category == "asset" and op.destination.parent.name == "screenshots"),
+        None,
+    )
+    assert asset_op is not None
+    assert asset_op.target.name == "0.jpg"
+    assert asset_op.destination.suffix == ".jpg"
 
 
 def test_apply_operation_creates_symlink_when_nas_asset_root_absent(tmp_path: Path):
