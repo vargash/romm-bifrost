@@ -26,6 +26,21 @@ class PlatformSummary(BaseModel):
     name: str | None = None
 
 
+class SsMetadata(BaseModel):
+    """Asset paths scraped from ScreenScraper, as stored by RomM under resources/."""
+
+    bezel_path: str | None = None
+    box2d_back_path: str | None = None
+    box3d_path: str | None = None
+    fanart_path: str | None = None
+    logo_path: str | None = None
+    marquee_path: str | None = None
+    miximage_path: str | None = None
+    physical_path: str | None = None
+    title_screen_path: str | None = None
+    video_normalized_path: str | None = None
+
+
 class RomSummary(BaseModel):
     """Subset of ROM fields needed by early modules."""
 
@@ -35,6 +50,15 @@ class RomSummary(BaseModel):
     full_path: str | None = None
     platform_id: int | None = None
     name: str | None = None
+    # Cover (URL-style path, e.g. /assets/romm/resources/roms/<pid>/<rid>/cover/big.png?ts=...)
+    path_cover_large: str | None = None
+    # Manual PDF
+    has_manual: bool = False
+    path_manual: str | None = None
+    # Screenshots (URL-style paths, first element = 0.jpg / 0.png)
+    merged_screenshots: list[str] = Field(default_factory=list)
+    # Per-type asset paths scraped from ScreenScraper
+    ss_metadata: SsMetadata | None = None
 
 
 class StatsReturn(BaseModel):
