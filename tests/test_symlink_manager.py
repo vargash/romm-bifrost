@@ -188,6 +188,37 @@ def test_apply_operation_replaces_broken_parent_symlink_with_real_dir(tmp_path: 
     assert covers_dir.is_dir() and not covers_dir.is_symlink()
 
 
+def test_apply_operation_replaces_valid_parent_symlink_with_real_dir(tmp_path: Path):
+    """A VALID parent directory symlink (pointing to existing NAS dir) is also replaced."""
+    nas = tmp_path / "nas"
+    # Old flat NAS dir that still exists (valid symlink target).
+    old_flat = nas / "resources" / "roms" / "257" / "videos"
+    old_flat.mkdir(parents=True)
+    asset_file = nas / "resources" / "roms" / "11" / "1046" / "video_normalized" / "video_normalized.mp4"
+    asset_file.parent.mkdir(parents=True)
+    asset_file.write_text("vid")
+
+    media_psx = tmp_path / "media" / "psx"
+    media_psx.mkdir(parents=True)
+    videos_dir = media_psx / "videos"
+    # Valid symlink to old flat NAS directory — mkdir(exist_ok=True) would silently succeed
+    # and the file would land inside the NAS tree, not locally.
+    videos_dir.symlink_to(old_flat)
+    assert videos_dir.is_symlink() and videos_dir.exists()
+
+    op = SymlinkOperation(
+        category="asset",
+        destination=videos_dir / "Final Fantasy VII.mp4",
+        target=asset_file,
+        is_dir=False,
+    )
+    result = apply_operation(op)
+
+    assert result.action == "create"
+    assert (videos_dir / "Final Fantasy VII.mp4").is_symlink()
+    assert videos_dir.is_dir() and not videos_dir.is_symlink()  # now a real directory
+
+
 def test_evaluate_operation_returns_broken_for_symlink_with_missing_target(tmp_path: Path):
     target = tmp_path / "gone.bin"  # never created
     destination = tmp_path / "dest.bin"

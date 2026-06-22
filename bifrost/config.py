@@ -64,7 +64,7 @@ class AssetsConfig(BaseModel):
             "fanart": "fanart",
             "box3d": "box3dfront",
             "box2d_back": "backcovers",
-            "marquee": "marquees",
+            "logo": "marquees",
             "miximage": "miximages",
             "title_screen": "titlescreens",
             "video_normalized": "videos",
@@ -142,7 +142,7 @@ _FOLDER_MAP_LEGACY: dict[str, str] = {
     "bezels": "bezel",
     "boxes": "box3d",
     "covers": "cover",
-    "marquees": "marquee",
+    "marquees": "logo",      # ES-DE marquees = RomM logo, not marquee
     "miximages": "miximage",
     "titlescreens": "title_screen",
     "videos": "video_normalized",

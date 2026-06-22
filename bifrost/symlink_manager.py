@@ -236,9 +236,11 @@ def plan_stale_removals(
                 remove_ops.append(RemoveSymlinkOperation(category="bios", destination=item))
 
     # Old asset-dir directory symlinks (legacy flat NAS structure).
-    # These are directory-level symlinks like downloaded_media/psx/covers → NAS/roms/<id>/covers.
+    # These are directory-level symlinks like downloaded_media/psx/covers → NAS/resources/roms/<id>/covers.
+    # They point under resources_root, not nas_root, so we check against resources_root.
     # The new per-game approach creates file symlinks inside real directories, so these must go.
     media_root = _normalize_path(config.emudeck.media_path)
+    resources_root = _normalize_path(config.nas.resources_path)
     planned_asset_parents: set[Path] = {
         op.destination.parent for op in ops if op.category == "asset"
     }
@@ -247,7 +249,7 @@ def plan_stale_removals(
             continue
         for item in slug_dir.iterdir():
             if item.is_symlink() and item not in planned_asset_parents:
-                if not item.exists() or _is_bifrost_symlink(item, nas_root):
+                if not item.exists() or _is_bifrost_symlink(item, resources_root):
                     remove_ops.append(RemoveSymlinkOperation(category="asset-dir", destination=item))
 
     return remove_ops
@@ -300,19 +302,18 @@ def apply_operation(op: SymlinkOperation) -> OperationResult:
     if not op.target.exists() and op.target.parent.is_dir():
         return OperationResult(op, "missing-target", "NAS target does not exist")
 
+    parent = op.destination.parent
+    if parent.is_symlink():
+        # Replace any legacy directory-level symlink (broken or valid) with a real directory
+        # so per-ROM asset files land locally instead of inside the NAS tree.
+        try:
+            parent.unlink()
+        except OSError as exc:
+            return OperationResult(op, "error", f"Failed to remove stale parent symlink: {exc}")
     try:
-        op.destination.parent.mkdir(parents=True, exist_ok=True)
+        parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        if exc.errno == errno.EEXIST and op.destination.parent.is_symlink():
-            # Parent is a broken symlink left over from the old asset-dir approach.
-            # Remove it so we can create a real directory in its place.
-            try:
-                op.destination.parent.unlink()
-                op.destination.parent.mkdir(parents=True, exist_ok=True)
-            except OSError as inner:
-                return OperationResult(op, "error", f"Failed to replace stale parent symlink: {inner}")
-        else:
-            return OperationResult(op, "error", f"Failed to create parent directory: {exc}")
+        return OperationResult(op, "error", f"Failed to create parent directory: {exc}")
 
     if action == "replace" and op.destination.is_symlink():
         try:
