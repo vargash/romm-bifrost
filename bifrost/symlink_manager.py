@@ -8,42 +8,58 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from bifrost.api.client import RommApiClient
+from bifrost.api.models import RomSummary, SsMetadata
 from bifrost.config import AppConfig
 
-# For most RomM asset types the preferred file is <type>.png.
-# Exceptions are listed here explicitly.
-_PREFERRED_ASSET_FILE: dict[str, str] = {
-    "cover": "big.png",                          # RomM generates big/small variants for covers
-    "video_normalized": "video-normalized.mp4",  # RomM uses hyphen, not underscore
-    "physical": "physical.png",
-    "screenshots": "0.png",                      # first screenshot, 0-indexed
+# Maps folder_map keys to the corresponding field name in SsMetadata.
+_SS_METADATA_PATH_FIELD: dict[str, str] = {
+    "bezel": "bezel_path",
+    "box2d_back": "box2d_back_path",
+    "box3d": "box3d_path",
+    "fanart": "fanart_path",
+    "logo": "logo_path",
+    "marquee": "marquee_path",
+    "miximage": "miximage_path",
+    "physical": "physical_path",
+    "title_screen": "title_screen_path",
+    "video_normalized": "video_normalized_path",
 }
-_ROM_ID_NAMED: frozenset[str] = frozenset({"manual"})  # filename is "<rom_id>.pdf"
-
-# Extensions probed at plan time to find the actual image file on the NAS.
-# RomM stores images in their original format, so the extension may differ from the canonical one.
-_IMAGE_EXTENSIONS: tuple[str, ...] = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
 
 
-def _resolve_image_file(target: Path) -> Path:
-    """Return the first existing variant of target with a supported image extension.
+def _resource_relative_path(raw: str | None) -> str | None:
+    """Extract the resources-relative path ('roms/<pid>/<rid>/...') from any RomM path format.
 
-    Only probes the NAS when the asset type directory is already accessible.
-    Falls back to the canonical target unchanged if nothing is found.
+    Handles both bare relative paths ('roms/11/1047/bezel/bezel.png') and the URL-style
+    paths used by path_cover_large / merged_screenshots
+    ('/assets/romm/resources/roms/11/1047/cover/big.png?ts=...').
     """
-    if target.suffix not in _IMAGE_EXTENSIONS:
-        return target  # non-image asset (video, PDF) — no probing needed
-    if target.exists():
-        return target
-    parent = target.parent
-    if not parent.is_dir():
-        return target  # NAS or asset-type dir unreachable; keep canonical
-    stem = target.stem
-    for ext in _IMAGE_EXTENSIONS:
-        candidate = parent / f"{stem}{ext}"
-        if candidate.exists():
-            return candidate
-    return target  # directory exists but no matching file — will become missing-target
+    if not raw:
+        return None
+    path = raw.split("?")[0]  # strip query string
+    idx = path.find("/roms/")
+    if idx >= 0:
+        return path[idx + 1:]  # strip leading slash → "roms/..."
+    return path if path.startswith("roms/") else None
+
+
+def _asset_relative_path(rom: RomSummary, romm_asset_type: str) -> str | None:
+    """Return the resources-relative path for the given asset type, or None if absent.
+
+    Reads from the API response rather than guessing filenames, so the path and
+    extension are always authoritative and no NAS probing is needed.
+    """
+    if romm_asset_type == "cover":
+        return _resource_relative_path(rom.path_cover_large)
+    if romm_asset_type == "manual":
+        return _resource_relative_path(rom.path_manual) if rom.has_manual else None
+    if romm_asset_type == "screenshots":
+        first = rom.merged_screenshots[0] if rom.merged_screenshots else None
+        return _resource_relative_path(first)
+    ss_field = _SS_METADATA_PATH_FIELD.get(romm_asset_type)
+    if ss_field and rom.ss_metadata:
+        raw = getattr(rom.ss_metadata, ss_field, None)
+        return _resource_relative_path(raw)
+    return None
 
 
 @dataclass(frozen=True)
@@ -117,7 +133,7 @@ def plan_symlink_operations(config: AppConfig, client: RommApiClient) -> list[Sy
 
     roms_root = _normalize_path(config.nas.library_path) / config.nas.roms_subpath
     bios_root = _normalize_path(config.nas.library_path) / config.nas.bios_subpath
-    resources_root = _normalize_path(config.nas.resources_path) / "roms"
+    resources_base = _normalize_path(config.nas.resources_path)
 
     esde_roms_root = _normalize_path(config.esde.roms_path)
     emudeck_bios_root = _normalize_path(config.emudeck.bios_path)
@@ -173,19 +189,10 @@ def plan_symlink_operations(config: AppConfig, client: RommApiClient) -> list[Sy
             continue
         rom_stem = Path(rom.fs_name).stem
         for romm_asset_type, esde_folder in config.assets.folder_map.items():
-            if romm_asset_type in _ROM_ID_NAMED:
-                pref_file = f"{rom.id}.pdf"
-            else:
-                pref_file = _PREFERRED_ASSET_FILE.get(romm_asset_type, f"{romm_asset_type}.png")
-            target = (
-                resources_root
-                / str(rom.platform_id)
-                / str(rom.id)
-                / romm_asset_type
-                / pref_file
-            )
-            # Probe the NAS for the actual image extension (RomM preserves the original format).
-            target = _resolve_image_file(target)
+            rel = _asset_relative_path(rom, romm_asset_type)
+            if not rel:
+                continue  # asset not present for this ROM according to the API
+            target = resources_base / rel
             ext = target.suffix
             destination = media_root / slug / esde_folder / f"{rom_stem}{ext}"
             ops.append(

@@ -1,71 +1,52 @@
 from pathlib import Path
 
-from bifrost.api.models import PlatformSummary, RomSummary
+from bifrost.api.models import PlatformSummary, RomSummary, SsMetadata
 from bifrost.config import AppConfig, AssetsConfig, EmudeckConfig, EsdeConfig, NasConfig, RommConfig
 from bifrost.symlink_manager import (
     SymlinkOperation,
-    _resolve_image_file,
+    _asset_relative_path,
+    _resource_relative_path,
     apply_operation,
     evaluate_operation,
     plan_symlink_operations,
 )
 
 
+def _make_rom(**kwargs) -> RomSummary:
+    defaults = dict(
+        id=10,
+        name="Super Mario Bros",
+        fs_name="Super Mario Bros.nes",
+        fs_path="roms/nes",
+        full_path="roms/nes/Super Mario Bros.nes",
+        platform_id=1,
+        path_cover_large="/assets/romm/resources/roms/1/10/cover/big.png",
+        merged_screenshots=["/assets/romm/resources/roms/1/10/screenshots/0.jpg"],
+        has_manual=True,
+        path_manual="roms/1/10/manual/10.pdf",
+        ss_metadata=SsMetadata(
+            box3d_path="roms/1/10/box3d/box3d.png",
+            fanart_path="roms/1/10/fanart/fanart.png",
+            video_normalized_path="roms/1/10/video_normalized/video-normalized.mp4",
+        ),
+    )
+    defaults.update(kwargs)
+    return RomSummary(**defaults)
+
+
 class StubClient:
     def list_platforms(self):
-        return [
-            PlatformSummary(id=1, name="NES", slug="nes", fs_slug="nes", rom_count=2),
-        ]
+        return [PlatformSummary(id=1, name="NES", fs_slug="nes")]
 
     def list_roms(self):
-        return [
-            RomSummary(
-                id=10,
-                name="Super Mario Bros",
-                fs_name="Super Mario Bros.nes",
-                fs_path="roms/nes",
-                full_path="roms/nes/Super Mario Bros.nes",
-                platform_id=1,
-                platform_slug="nes",
-                missing_from_fs=False,
-                is_unidentified=False,
-            )
-        ]
+        return [_make_rom()]
 
     def list_firmware(self, platform_id=None):
-        return [
-            {
-                "id": 55,
-                "file_name": "scph1001.bin",
-                "file_path": "bios/psx",
-            }
-        ]
+        return [{"id": 55, "file_name": "scph1001.bin", "file_path": "bios/psx"}]
 
 
 class StubClientWithPrefixedPaths(StubClient):
-    def list_roms(self):
-        return [
-            RomSummary(
-                id=10,
-                name="Super Mario Bros",
-                fs_name="Super Mario Bros.nes",
-                fs_path="roms/nes",
-                full_path="roms/nes/Super Mario Bros.nes",
-                platform_id=1,
-                platform_slug="nes",
-                missing_from_fs=False,
-                is_unidentified=False,
-            )
-        ]
-
-    def list_firmware(self, platform_id=None):
-        return [
-            {
-                "id": 55,
-                "file_name": "scph1001.bin",
-                "file_path": "bios/psx",
-            }
-        ]
+    pass
 
 
 def make_config(tmp_path: Path) -> AppConfig:
@@ -82,8 +63,91 @@ def make_config(tmp_path: Path) -> AppConfig:
             bios_path=str(tmp_path / "emudeck" / "Emulation" / "bios"),
             media_path=str(tmp_path / "emudeck" / "Emulation" / "tools" / "downloaded_media"),
         ),
-        assets=AssetsConfig(folder_map={"box_front": "covers"}),
+        assets=AssetsConfig(folder_map={"cover": "covers", "box3d": "3dboxes", "screenshots": "screenshots"}),
     )
+
+
+# ---------------------------------------------------------------------------
+# _resource_relative_path
+# ---------------------------------------------------------------------------
+
+
+def test_resource_relative_path_bare_relative():
+    assert _resource_relative_path("roms/1/10/box3d/box3d.png") == "roms/1/10/box3d/box3d.png"
+
+
+def test_resource_relative_path_url_style():
+    raw = "/assets/romm/resources/roms/11/1047/cover/big.png?ts=2026-06-22 12:50:00"
+    assert _resource_relative_path(raw) == "roms/11/1047/cover/big.png"
+
+
+def test_resource_relative_path_none():
+    assert _resource_relative_path(None) is None
+
+
+def test_resource_relative_path_screenshot_jpg():
+    raw = "/assets/romm/resources/roms/11/1047/screenshots/0.jpg"
+    assert _resource_relative_path(raw) == "roms/11/1047/screenshots/0.jpg"
+
+
+# ---------------------------------------------------------------------------
+# _asset_relative_path
+# ---------------------------------------------------------------------------
+
+
+def test_asset_relative_path_cover():
+    rom = _make_rom(path_cover_large="/assets/romm/resources/roms/1/10/cover/big.png")
+    assert _asset_relative_path(rom, "cover") == "roms/1/10/cover/big.png"
+
+
+def test_asset_relative_path_cover_absent():
+    rom = _make_rom(path_cover_large=None)
+    assert _asset_relative_path(rom, "cover") is None
+
+
+def test_asset_relative_path_screenshot_jpg():
+    rom = _make_rom(merged_screenshots=["/assets/romm/resources/roms/1/10/screenshots/0.jpg"])
+    assert _asset_relative_path(rom, "screenshots") == "roms/1/10/screenshots/0.jpg"
+
+
+def test_asset_relative_path_screenshot_absent():
+    rom = _make_rom(merged_screenshots=[])
+    assert _asset_relative_path(rom, "screenshots") is None
+
+
+def test_asset_relative_path_manual_present():
+    rom = _make_rom(has_manual=True, path_manual="roms/1/10/manual/10.pdf")
+    assert _asset_relative_path(rom, "manual") == "roms/1/10/manual/10.pdf"
+
+
+def test_asset_relative_path_manual_absent():
+    rom = _make_rom(has_manual=False, path_manual=None)
+    assert _asset_relative_path(rom, "manual") is None
+
+
+def test_asset_relative_path_ss_metadata_field():
+    rom = _make_rom(ss_metadata=SsMetadata(box3d_path="roms/1/10/box3d/box3d.png"))
+    assert _asset_relative_path(rom, "box3d") == "roms/1/10/box3d/box3d.png"
+
+
+def test_asset_relative_path_ss_metadata_field_absent():
+    rom = _make_rom(ss_metadata=SsMetadata(box3d_path=None))
+    assert _asset_relative_path(rom, "box3d") is None
+
+
+def test_asset_relative_path_no_ss_metadata():
+    rom = _make_rom(ss_metadata=None)
+    assert _asset_relative_path(rom, "box3d") is None
+
+
+def test_asset_relative_path_unknown_type():
+    rom = _make_rom()
+    assert _asset_relative_path(rom, "nonexistent_type") is None
+
+
+# ---------------------------------------------------------------------------
+# plan_symlink_operations
+# ---------------------------------------------------------------------------
 
 
 def test_plan_symlink_operations_builds_rom_bios_and_asset_entries(tmp_path: Path):
@@ -93,43 +157,46 @@ def test_plan_symlink_operations_builds_rom_bios_and_asset_entries(tmp_path: Pat
     assert any(op.category == "rom" and op.destination.name == "Super Mario Bros.nes" for op in ops)
     assert any(op.category == "bios" and op.destination.name == "scph1001.bin" for op in ops)
 
-    # Asset symlinks are now per-ROM files: <media>/<platform>/<esde_folder>/<rom_stem>.<ext>
-    # folder_map={"box_front": "covers"} → preferred file is box_front.png (no special case)
-    asset_op = next(
+    # cover asset: path from path_cover_large → big.png → .png extension
+    cover_op = next(
         (op for op in ops if op.category == "asset" and op.destination.parent.name == "covers"),
         None,
     )
-    assert asset_op is not None
-    assert asset_op.destination.name == "Super Mario Bros.png"
-    assert asset_op.target.name == "box_front.png"       # default: <asset_type>.png
-    assert asset_op.target.parent.name == "box_front"    # romm asset type subdir
-    # full target: resources/roms/<platform_id>/<rom_id>/box_front/box_front.png
-    assert asset_op.target.parts[-4:-1] == ("1", "10", "box_front")
+    assert cover_op is not None
+    assert cover_op.destination.name == "Super Mario Bros.png"
+    assert cover_op.target.name == "big.png"
+    assert cover_op.target.parts[-2] == "cover"
 
-    rom_op = next(op for op in ops if op.category == "rom")
-    bios_op = next(op for op in ops if op.category == "bios")
-    assert rom_op.target.name == "Super Mario Bros.nes"
-    assert bios_op.target.name == "scph1001.bin"
-
-
-def test_evaluate_operation_detects_existing_correct_symlink(tmp_path: Path):
-    target = tmp_path / "target.bin"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("x")
-
-    destination = tmp_path / "dest.bin"
-    destination.symlink_to(target)
-
-    result = evaluate_operation(
-        SymlinkOperation(
-            category="bios",
-            destination=destination,
-            target=target,
-            is_dir=False,
-        )
+    # box3d asset: path from ss_metadata.box3d_path
+    box3d_op = next(
+        (op for op in ops if op.category == "asset" and op.destination.parent.name == "3dboxes"),
+        None,
     )
+    assert box3d_op is not None
+    assert box3d_op.destination.name == "Super Mario Bros.png"
+    assert box3d_op.target.name == "box3d.png"
 
-    assert result.action == "ok"
+    # screenshots asset: .jpg extension picked up from merged_screenshots
+    ss_op = next(
+        (op for op in ops if op.category == "asset" and op.destination.parent.name == "screenshots"),
+        None,
+    )
+    assert ss_op is not None
+    assert ss_op.destination.suffix == ".jpg"
+    assert ss_op.target.name == "0.jpg"
+
+
+def test_plan_symlink_operations_skips_absent_assets(tmp_path: Path):
+    """ROMs with no cover path produce no cover symlink op."""
+    config = make_config(tmp_path)
+    rom_no_cover = _make_rom(path_cover_large=None, merged_screenshots=[], ss_metadata=None)
+
+    class StubNoAssets(StubClient):
+        def list_roms(self):
+            return [rom_no_cover]
+
+    ops = plan_symlink_operations(config, StubNoAssets())
+    assert not any(op.category == "asset" for op in ops)
 
 
 def test_plan_symlink_operations_normalizes_prefixed_roms_and_bios_paths(tmp_path: Path):
@@ -143,6 +210,23 @@ def test_plan_symlink_operations_normalizes_prefixed_roms_and_bios_paths(tmp_pat
     assert "/bios/bios/" not in str(bios_op.target)
 
 
+# ---------------------------------------------------------------------------
+# evaluate_operation / apply_operation
+# ---------------------------------------------------------------------------
+
+
+def test_evaluate_operation_detects_existing_correct_symlink(tmp_path: Path):
+    target = tmp_path / "target.bin"
+    target.write_text("x")
+    destination = tmp_path / "dest.bin"
+    destination.symlink_to(target)
+
+    result = evaluate_operation(
+        SymlinkOperation(category="bios", destination=destination, target=target, is_dir=False)
+    )
+    assert result.action == "ok"
+
+
 def test_apply_operation_returns_error_instead_of_raising_for_filesystem_issue(tmp_path: Path):
     blocking_parent = tmp_path / "not_a_directory"
     blocking_parent.write_text("block")
@@ -151,14 +235,8 @@ def test_apply_operation_returns_error_instead_of_raising_for_filesystem_issue(t
     target.write_text("x")
 
     result = apply_operation(
-        SymlinkOperation(
-            category="bios",
-            destination=destination,
-            target=target,
-            is_dir=False,
-        )
+        SymlinkOperation(category="bios", destination=destination, target=target, is_dir=False)
     )
-
     assert result.action == "error"
 
 
@@ -172,15 +250,11 @@ def test_apply_operation_replaces_broken_parent_symlink_with_real_dir(tmp_path: 
     media_root = tmp_path / "media" / "psx"
     media_root.mkdir(parents=True)
     covers_dir = media_root / "covers"
-    # Simulate old asset-dir: broken symlink where the real directory should be.
-    covers_dir.symlink_to(nas / "old_structure" / "covers")  # broken — target doesn't exist
+    covers_dir.symlink_to(nas / "old_structure" / "covers")  # broken
     assert covers_dir.is_symlink() and not covers_dir.exists()
 
     op = SymlinkOperation(
-        category="asset",
-        destination=covers_dir / "Final Fantasy VII.png",
-        target=asset_file,
-        is_dir=False,
+        category="asset", destination=covers_dir / "Final Fantasy VII.png", target=asset_file, is_dir=False
     )
     result = apply_operation(op)
 
@@ -192,7 +266,6 @@ def test_apply_operation_replaces_broken_parent_symlink_with_real_dir(tmp_path: 
 def test_apply_operation_replaces_valid_parent_symlink_with_real_dir(tmp_path: Path):
     """A VALID parent directory symlink (pointing to existing NAS dir) is also replaced."""
     nas = tmp_path / "nas"
-    # Old flat NAS dir that still exists (valid symlink target).
     old_flat = nas / "resources" / "roms" / "257" / "videos"
     old_flat.mkdir(parents=True)
     asset_file = nas / "resources" / "roms" / "11" / "1046" / "video_normalized" / "video-normalized.mp4"
@@ -202,33 +275,27 @@ def test_apply_operation_replaces_valid_parent_symlink_with_real_dir(tmp_path: P
     media_psx = tmp_path / "media" / "psx"
     media_psx.mkdir(parents=True)
     videos_dir = media_psx / "videos"
-    # Valid symlink to old flat NAS directory — mkdir(exist_ok=True) would silently succeed
-    # and the file would land inside the NAS tree, not locally.
     videos_dir.symlink_to(old_flat)
     assert videos_dir.is_symlink() and videos_dir.exists()
 
     op = SymlinkOperation(
-        category="asset",
-        destination=videos_dir / "Final Fantasy VII.mp4",
-        target=asset_file,
-        is_dir=False,
+        category="asset", destination=videos_dir / "Final Fantasy VII.mp4", target=asset_file, is_dir=False
     )
     result = apply_operation(op)
 
     assert result.action == "create"
     assert (videos_dir / "Final Fantasy VII.mp4").is_symlink()
-    assert videos_dir.is_dir() and not videos_dir.is_symlink()  # now a real directory
+    assert videos_dir.is_dir() and not videos_dir.is_symlink()
 
 
 def test_evaluate_operation_returns_broken_for_symlink_with_missing_target(tmp_path: Path):
-    target = tmp_path / "gone.bin"  # never created
+    target = tmp_path / "gone.bin"
     destination = tmp_path / "dest.bin"
     destination.symlink_to(target)
 
     result = evaluate_operation(
         SymlinkOperation(category="rom", destination=destination, target=target, is_dir=False)
     )
-
     assert result.action == "broken"
     assert "missing" in result.detail.lower()
 
@@ -242,13 +309,13 @@ def test_apply_operation_returns_broken_without_modifying_symlink(tmp_path: Path
     result = apply_operation(op)
 
     assert result.action == "broken"
-    assert destination.is_symlink()  # symlink untouched
+    assert destination.is_symlink()
 
 
 def test_apply_operation_returns_missing_target_when_nas_file_absent(tmp_path: Path):
     nas_dir = tmp_path / "nas" / "roms" / "psx"
     nas_dir.mkdir(parents=True)
-    target = nas_dir / "Xenogears.chd"  # directory exists but file does not
+    target = nas_dir / "Xenogears.chd"
 
     roms_dir = tmp_path / "roms" / "psx"
     roms_dir.mkdir(parents=True)
@@ -262,11 +329,9 @@ def test_apply_operation_returns_missing_target_when_nas_file_absent(tmp_path: P
 
 
 def test_apply_operation_returns_missing_target_when_asset_type_dir_absent(tmp_path: Path):
-    """Asset type dir missing (e.g. ROM has no 'manual' on NAS) → missing-target, no broken symlink."""
-    # ROM asset root exists, but the specific asset type subdir does not.
+    """Safety net: if an asset op is somehow created with a missing asset type dir, return missing-target."""
     rom_asset_root = tmp_path / "res" / "roms" / "293" / "3736"
     rom_asset_root.mkdir(parents=True)
-    # Target: .../3736/manual/3736.pdf — 'manual/' doesn't exist.
     target = rom_asset_root / "manual" / "3736.pdf"
 
     media_dir = tmp_path / "media" / "cps1" / "manuals"
@@ -280,58 +345,8 @@ def test_apply_operation_returns_missing_target_when_asset_type_dir_absent(tmp_p
     assert not destination.is_symlink()
 
 
-def test_resolve_image_file_finds_jpg_when_png_missing(tmp_path: Path):
-    """_resolve_image_file returns the .jpg variant when the canonical .png doesn't exist."""
-    asset_dir = tmp_path / "screenshots"
-    asset_dir.mkdir()
-    jpg = asset_dir / "0.jpg"
-    jpg.write_bytes(b"img")
-
-    result = _resolve_image_file(asset_dir / "0.png")
-    assert result == jpg
-
-
-def test_resolve_image_file_returns_canonical_when_dir_unreachable(tmp_path: Path):
-    """If the asset dir doesn't exist (NAS down), the canonical path is returned unchanged."""
-    target = tmp_path / "nonexistent_dir" / "0.png"
-    assert _resolve_image_file(target) == target
-
-
-def test_resolve_image_file_returns_canonical_when_nothing_found(tmp_path: Path):
-    """If the directory is reachable but has no matching image file, return the canonical path."""
-    asset_dir = tmp_path / "cover"
-    asset_dir.mkdir()
-    # no image files inside
-
-    result = _resolve_image_file(asset_dir / "big.png")
-    assert result == asset_dir / "big.png"
-
-
-def test_plan_symlink_operations_resolves_jpg_screenshot(tmp_path: Path):
-    """plan_symlink_operations picks up the actual .jpg when .png is absent."""
-    config = make_config(tmp_path)
-    config = config.model_copy(
-        update={"assets": AssetsConfig(folder_map={"screenshots": "screenshots"})}
-    )
-
-    # Create a NAS screenshot directory with a .jpg file.
-    resources = tmp_path / "nas" / "romm" / "resources" / "roms" / "1" / "10" / "screenshots"
-    resources.mkdir(parents=True)
-    (resources / "0.jpg").write_bytes(b"img")
-
-    ops = plan_symlink_operations(config, StubClient())
-    asset_op = next(
-        (op for op in ops if op.category == "asset" and op.destination.parent.name == "screenshots"),
-        None,
-    )
-    assert asset_op is not None
-    assert asset_op.target.name == "0.jpg"
-    assert asset_op.destination.suffix == ".jpg"
-
-
 def test_apply_operation_creates_symlink_when_nas_asset_root_absent(tmp_path: Path):
     """If even the ROM asset root doesn't exist (NAS down), create symlink optimistically."""
-    # Neither the asset type dir nor the ROM asset root exist (NAS unreachable).
     target = tmp_path / "res" / "roms" / "293" / "9999" / "cover" / "big.png"
 
     media_dir = tmp_path / "media" / "cps1" / "covers"
@@ -341,6 +356,5 @@ def test_apply_operation_creates_symlink_when_nas_asset_root_absent(tmp_path: Pa
     op = SymlinkOperation(category="asset", destination=destination, target=target, is_dir=False)
     result = apply_operation(op)
 
-    # NAS totally unreachable → optimistically create the symlink (will resolve when NAS is back).
     assert result.action == "create"
     assert destination.is_symlink()
