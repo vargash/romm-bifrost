@@ -1,0 +1,18 @@
+[Unit]
+Description=Bifrost ROM sync — symlinks + gamelist (RomM → ES-DE)
+Documentation=https://github.com/rommapp/romm-bifrost
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# %h expands to the user's home directory in user-scoped units
+ExecStart=%h/.local/bin/bifrost sync --apply
+ExecStart=%h/.local/bin/bifrost gamelist --apply
+StandardOutput=journal
+StandardError=journal
+# Keep the result in the journal so `systemctl --user status` shows last run
+RemainAfterExit=no
+
+[Install]
+WantedBy=default.target

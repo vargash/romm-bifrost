@@ -205,7 +205,7 @@ def _collect_save_debug_rows(root: Path) -> tuple[list[dict[str, str]], list[dic
         
         file_count = 0
         try:
-            for dirpath, dirnames, filenames in os.walk(child, followlinks=True):
+            for _dirpath, _dirnames, filenames in os.walk(child, followlinks=True):
                 for filename in filenames:
                     if not filename.startswith("."):
                         file_count += 1
@@ -220,7 +220,7 @@ def _collect_save_debug_rows(root: Path) -> tuple[list[dict[str, str]], list[dic
             }
         )
 
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=True):
+    for dirpath, _dirnames, filenames in os.walk(root, followlinks=True):
         for filename in filenames:
             if filename.startswith("."):
                 continue
@@ -365,7 +365,9 @@ def config_set(key: str, value: str, config_path: Path | None) -> None:
 
     key_path = [part for part in key.strip().split(".") if part]
     if len(key_path) < 2:
-        console.print("[red]Configuration error:[/red] key must use dot notation (for example romm.url).")
+        console.print(
+            "[red]Configuration error:[/red] key must use dot notation (for example romm.url)."
+        )
         raise SystemExit(EXIT_CONFIG_ERROR)
 
     dumped = loaded.model_dump(mode="python")
@@ -1377,8 +1379,8 @@ def setup(
             code_value = Prompt.ask("RomM Pairing Code (8 digits)").strip()
             if not PAIRING_CODE_PATTERN.fullmatch(code_value):
                 console.print(
-                    "[red]Configuration error:[/red] Pairing code must be 8 alphanumeric characters,"
-                    " optionally formatted with a hyphen (AAAA-BBBB)."
+                    "[red]Configuration error:[/red] Pairing code must be 8 alphanumeric"
+                    " characters, optionally formatted with a hyphen (AAAA-BBBB)."
                 )
                 raise SystemExit(EXIT_CONFIG_ERROR)
             normalized_code = code_value.replace("-", "").upper()
@@ -1389,7 +1391,9 @@ def setup(
                 raise SystemExit(EXIT_API_ERROR) from exc
             console.print("[green]Pairing exchange completed.[/green]")
         else:
-            existing_token = existing_config.romm.client_token if existing_config is not None else ""
+            existing_token = (
+                existing_config.romm.client_token if existing_config is not None else ""
+            )
             keep_existing_token = bool(existing_token) and Confirm.ask(
                 "Keep existing RomM Client Token",
                 default=True,
@@ -1445,8 +1449,8 @@ def setup(
             code_value = (pair_code or Prompt.ask("RomM Pairing Code (8 digits)")).strip()
             if not PAIRING_CODE_PATTERN.fullmatch(code_value):
                 console.print(
-                    "[red]Configuration error:[/red] Pairing code must be 8 alphanumeric characters,"
-                    " optionally formatted with a hyphen (AAAA-BBBB)."
+                    "[red]Configuration error:[/red] Pairing code must be 8 alphanumeric"
+                    " characters, optionally formatted with a hyphen (AAAA-BBBB)."
                 )
                 raise SystemExit(EXIT_CONFIG_ERROR)
             normalized_code = code_value.replace("-", "").upper()
@@ -1549,6 +1553,231 @@ def setup(
 
     save_path = save_config(config, resolved_path)
     console.print(f"[green]Configuration saved:[/green] {save_path}")
+    raise SystemExit(EXIT_OK)
+
+
+# ---------------------------------------------------------------------------
+# watch-saves
+# ---------------------------------------------------------------------------
+
+
+@main.command(
+    name="watch-saves",
+    help="Watch the local save directory and trigger save/state sync on changes (for systemd).",
+)
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=None,
+    help="Override config file path.",
+)
+def watch_saves(config_path: Path | None) -> None:
+    import shutil
+
+    from bifrost.logging_setup import setup_file_logging
+    from bifrost.watcher import run_save_watcher
+
+    setup_file_logging()
+    console = Console()
+    resolved_path = config_path or default_config_path()
+
+    try:
+        cfg = load_config(resolved_path)
+    except ConfigError as exc:
+        console.print(f"[red]Configuration error:[/red] {exc}")
+        raise SystemExit(EXIT_CONFIG_ERROR) from exc
+
+    saves_path = Path(cfg.emudeck.saves_path).expanduser()
+    bifrost_bin = shutil.which("bifrost") or sys.executable + " -m bifrost.cli"
+
+    console.print(f"Watching [cyan]{saves_path}[/cyan] for save file changes...")
+    console.print("Press Ctrl+C to stop.\n")
+
+    run_save_watcher(saves_path, bifrost_bin)
+    raise SystemExit(EXIT_OK)
+
+
+# ---------------------------------------------------------------------------
+# systemd subcommand group
+# ---------------------------------------------------------------------------
+
+_UNIT_FILES = [
+    "bifrost-sync.service",
+    "bifrost-sync.timer",
+    "bifrost-save-sync.service",
+    "bifrost-save-sync.timer",
+    "bifrost-save-watch.service",
+]
+
+_TIMERS = ["bifrost-sync.timer", "bifrost-save-sync.timer"]
+_PERSISTENT_SERVICES = ["bifrost-save-watch.service"]
+
+
+def _systemd_data_dir() -> Path:
+    """Return the path to bundled systemd unit templates."""
+    return Path(__file__).parent / "data" / "systemd"
+
+
+def _systemd_user_dir() -> Path:
+    xdg_config = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg_config).expanduser() if xdg_config else Path.home() / ".config"
+    return base / "systemd" / "user"
+
+
+@main.group(name="systemd", help="Manage Bifrost systemd user services and timers.")
+def systemd_group() -> None:
+    """Systemd unit management."""
+
+
+@systemd_group.command(name="install", help="Install and enable Bifrost systemd units.")
+@click.option("--dry-run", is_flag=True, help="Show what would be done without changing anything.")
+def systemd_install(dry_run: bool) -> None:
+    console = Console()
+    src_dir = _systemd_data_dir()
+    dst_dir = _systemd_user_dir()
+
+    if not src_dir.exists():
+        console.print(f"[red]Unit templates not found:[/red] {src_dir}")
+        raise SystemExit(EXIT_CONFIG_ERROR)
+
+    if not dry_run:
+        dst_dir.mkdir(parents=True, exist_ok=True)
+
+    for unit in _UNIT_FILES:
+        src = src_dir / unit
+        dst = dst_dir / unit
+        if not src.exists():
+            console.print(f"[yellow]Missing template:[/yellow] {unit} — skipping")
+            continue
+        if dry_run:
+            console.print(f"[cyan]would copy[/cyan]  {src} → {dst}")
+        else:
+            import shutil
+
+            shutil.copy2(src, dst)
+            console.print(f"[green]copied[/green]  {dst}")
+
+    if dry_run:
+        for unit in _TIMERS + _PERSISTENT_SERVICES:
+            console.print(f"[cyan]would enable + start[/cyan]  {unit}")
+        console.print("\n[cyan]Dry run — no changes made.[/cyan]")
+        raise SystemExit(EXIT_OK)
+
+    # Reload unit definitions then enable + start timers and watch service
+    import subprocess
+
+    def _ctl(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["systemctl", "--user", *args], capture_output=True, text=True
+        )
+
+    reload = _ctl("daemon-reload")
+    if reload.returncode != 0:
+        console.print(f"[yellow]daemon-reload warning:[/yellow] {reload.stderr.strip()}")
+
+    for unit in _TIMERS + _PERSISTENT_SERVICES:
+        enable = _ctl("enable", "--now", unit)
+        if enable.returncode == 0:
+            console.print(f"[green]enabled + started[/green]  {unit}")
+        else:
+            console.print(f"[yellow]enable failed[/yellow]  {unit}: {enable.stderr.strip()}")
+
+    # Enable linger so user services survive logout (important on Steam Deck game mode)
+    username = os.environ.get("USER") or os.environ.get("LOGNAME") or ""
+    if username:
+        linger = subprocess.run(
+            ["loginctl", "enable-linger", username], capture_output=True, text=True
+        )
+        if linger.returncode == 0:
+            console.print(f"[green]linger enabled[/green] for user {username}")
+        else:
+            console.print(
+                f"[yellow]linger not enabled[/yellow] ({linger.stderr.strip()}) "
+                "— services may stop on logout"
+            )
+
+    console.print(
+        "\n[green]Systemd units installed.[/green] "
+        "Use [cyan]bifrost systemd status[/cyan] to verify."
+    )
+    raise SystemExit(EXIT_OK)
+
+
+@systemd_group.command(name="status", help="Show status of all Bifrost systemd units.")
+def systemd_status() -> None:
+    import subprocess
+
+    console = Console()
+    table = Table(title="Bifrost Systemd Units")
+    table.add_column("Unit")
+    table.add_column("Loaded")
+    table.add_column("Active")
+    table.add_column("Last run / trigger")
+
+    for unit in _UNIT_FILES:
+        result = subprocess.run(
+            ["systemctl", "--user", "show", unit,
+             "--property=LoadState,ActiveState,SubState,ExecMainExitTimestamp,NextElapseUSecRealtime"],
+            capture_output=True,
+            text=True,
+        )
+        props: dict[str, str] = {}
+        for line in result.stdout.splitlines():
+            if "=" in line:
+                k, _, v = line.partition("=")
+                props[k] = v
+
+        loaded = props.get("LoadState", "?")
+        active = props.get("ActiveState", "?")
+        sub = props.get("SubState", "")
+        active_str = f"{active}/{sub}" if sub and sub != active else active
+
+        if unit.endswith(".timer"):
+            ts = props.get("NextElapseUSecRealtime", "")
+            last_str = f"next: {ts[:19]}" if ts and ts != "0" else "—"
+        else:
+            ts = props.get("ExecMainExitTimestamp", "")
+            last_str = ts[:19] if ts and ts != "0" else "—"
+
+        color = "green" if active in ("active", "inactive") and loaded == "loaded" else "yellow"
+        table.add_row(unit, loaded, f"[{color}]{active_str}[/{color}]", last_str)
+
+    console.print(table)
+    raise SystemExit(EXIT_OK)
+
+
+@systemd_group.command(name="uninstall", help="Disable and remove Bifrost systemd units.")
+@click.option("--yes", is_flag=True, help="Skip confirmation prompt.")
+def systemd_uninstall(yes: bool) -> None:
+    import subprocess
+
+    console = Console()
+    dst_dir = _systemd_user_dir()
+
+    if not yes:
+        if not Confirm.ask("This will stop and remove all Bifrost systemd units. Continue?"):
+            console.print("Aborted.")
+            raise SystemExit(EXIT_OK)
+
+    def _ctl(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["systemctl", "--user", *args], capture_output=True, text=True
+        )
+
+    for unit in _TIMERS + _PERSISTENT_SERVICES:
+        _ctl("disable", "--now", unit)
+        console.print(f"[yellow]disabled[/yellow]  {unit}")
+
+    _ctl("daemon-reload")
+
+    for unit in _UNIT_FILES:
+        dst = dst_dir / unit
+        if dst.exists():
+            dst.unlink()
+            console.print(f"[red]removed[/red]  {dst}")
+
+    console.print("\n[green]Uninstall complete.[/green]")
     raise SystemExit(EXIT_OK)
 
 

@@ -1,0 +1,15 @@
+[Unit]
+Description=Bifrost ROM sync timer — runs at boot and every 6 hours
+Documentation=https://github.com/rommapp/romm-bifrost
+
+[Timer]
+# Delay after boot to let the network settle
+OnBootSec=2min
+# Then every 6 hours
+OnUnitActiveSec=6h
+# Don't skip missed runs on resume from suspend
+Persistent=true
+Unit=bifrost-sync.service
+
+[Install]
+WantedBy=timers.target

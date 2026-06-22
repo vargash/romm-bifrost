@@ -1,0 +1,17 @@
+[Unit]
+Description=Bifrost save file watcher — triggers sync on local save changes
+Documentation=https://github.com/rommapp/romm-bifrost
+# Start after the first timed save sync so there's no race at boot
+After=bifrost-save-sync.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/bifrost watch-saves
+# Restart on crash; don't hammer if something is persistently broken
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

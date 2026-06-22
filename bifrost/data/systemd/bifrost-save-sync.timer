@@ -1,0 +1,13 @@
+[Unit]
+Description=Bifrost save/state sync timer — runs at boot and every 2 hours
+Documentation=https://github.com/rommapp/romm-bifrost
+
+[Timer]
+# Slightly later than the ROM sync to avoid simultaneous API load
+OnBootSec=3min
+OnUnitActiveSec=2h
+Persistent=true
+Unit=bifrost-save-sync.service
+
+[Install]
+WantedBy=timers.target
