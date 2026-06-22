@@ -58,6 +58,39 @@ client_token = "rmm_123456"
         load_config(config_file)
 
 
+def test_load_config_migrates_legacy_folder_map_keys(tmp_path: Path) -> None:
+    """Old flat-structure folder_map keys are silently upgraded to per-game names."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[romm]
+url = "http://romm.local"
+client_token = "rmm_token"
+
+[assets.folder_map]
+boxes = "box3dfront"
+covers = "covers"
+bezels = "bezels"
+fanart = "fanart"
+""".strip(),
+        encoding="utf-8",
+    )
+    config_file.chmod(0o600)
+
+    config = load_config(config_file)
+    fm = config.assets.folder_map
+
+    # Legacy keys must be renamed; their values preserved.
+    assert "boxes" not in fm
+    assert "covers" not in fm
+    assert "bezels" not in fm
+    assert fm.get("box3d") == "box3dfront"
+    assert fm.get("cover") == "covers"
+    assert fm.get("bezel") == "bezels"
+    # Non-legacy keys survive unchanged.
+    assert fm.get("fanart") == "fanart"
+
+
 def test_save_config_sets_secure_mode(tmp_path: Path) -> None:
     app_config = AppConfig(romm=RommConfig(url="http://romm.local", client_token="rmm_token"))
     config_file = tmp_path / "config.toml"

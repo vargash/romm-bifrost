@@ -1,13 +1,21 @@
-"""Symlink planning and application for F2."""
+"""Symlink planning and application."""
 
 from __future__ import annotations
 
+import errno
 import os
 from dataclasses import dataclass
 from pathlib import Path
 
 from bifrost.api.client import RommApiClient
 from bifrost.config import AppConfig
+
+# For most RomM asset types the preferred file is <type>.png.
+# Exceptions are listed here explicitly.
+_PREFERRED_ASSET_FILE: dict[str, str] = {
+    "cover": "big.png",           # RomM generates big/small variants for covers
+    "video_normalized": "video_normalized.mp4",
+}
 
 
 @dataclass(frozen=True)
@@ -129,18 +137,30 @@ def plan_symlink_operations(config: AppConfig, client: RommApiClient) -> list[Sy
             )
         )
 
-    for platform in platforms:
-        if not platform.fs_slug:
+    for rom in roms:
+        if rom.platform_id is None or not rom.fs_name:
             continue
-        for romm_folder, esde_folder in config.assets.folder_map.items():
-            destination = media_root / platform.fs_slug / esde_folder
-            target = resources_root / str(platform.id) / romm_folder
+        slug = platform_slug_by_id.get(rom.platform_id)
+        if not slug:
+            continue
+        rom_stem = Path(rom.fs_name).stem
+        for romm_asset_type, esde_folder in config.assets.folder_map.items():
+            pref_file = _PREFERRED_ASSET_FILE.get(romm_asset_type, f"{romm_asset_type}.png")
+            ext = Path(pref_file).suffix
+            destination = media_root / slug / esde_folder / f"{rom_stem}{ext}"
+            target = (
+                resources_root
+                / str(rom.platform_id)
+                / str(rom.id)
+                / romm_asset_type
+                / pref_file
+            )
             ops.append(
                 SymlinkOperation(
-                    category="asset-dir",
+                    category="asset",
                     destination=destination,
                     target=target,
-                    is_dir=True,
+                    is_dir=False,
                 )
             )
 
@@ -215,6 +235,21 @@ def plan_stale_removals(
             if not item.exists() or _is_bifrost_symlink(item, nas_root):
                 remove_ops.append(RemoveSymlinkOperation(category="bios", destination=item))
 
+    # Old asset-dir directory symlinks (legacy flat NAS structure).
+    # These are directory-level symlinks like downloaded_media/psx/covers → NAS/roms/<id>/covers.
+    # The new per-game approach creates file symlinks inside real directories, so these must go.
+    media_root = _normalize_path(config.emudeck.media_path)
+    planned_asset_parents: set[Path] = {
+        op.destination.parent for op in ops if op.category == "asset"
+    }
+    for slug_dir in (media_root.iterdir() if media_root.is_dir() else []):
+        if not slug_dir.is_dir():
+            continue
+        for item in slug_dir.iterdir():
+            if item.is_symlink() and item not in planned_asset_parents:
+                if not item.exists() or _is_bifrost_symlink(item, nas_root):
+                    remove_ops.append(RemoveSymlinkOperation(category="asset-dir", destination=item))
+
     return remove_ops
 
 
@@ -268,7 +303,16 @@ def apply_operation(op: SymlinkOperation) -> OperationResult:
     try:
         op.destination.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        return OperationResult(op, "error", f"Failed to create parent directory: {exc}")
+        if exc.errno == errno.EEXIST and op.destination.parent.is_symlink():
+            # Parent is a broken symlink left over from the old asset-dir approach.
+            # Remove it so we can create a real directory in its place.
+            try:
+                op.destination.parent.unlink()
+                op.destination.parent.mkdir(parents=True, exist_ok=True)
+            except OSError as inner:
+                return OperationResult(op, "error", f"Failed to replace stale parent symlink: {inner}")
+        else:
+            return OperationResult(op, "error", f"Failed to create parent directory: {exc}")
 
     if action == "replace" and op.destination.is_symlink():
         try:

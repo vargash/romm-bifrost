@@ -51,21 +51,25 @@ class EmudeckConfig(BaseModel):
 
 
 class AssetsConfig(BaseModel):
-    """Asset folder mapping RomM -> ES-DE."""
+    """Asset folder mapping RomM per-game asset type -> ES-DE media folder.
+
+    Keys are the subdirectory names under resources/roms/<platform_id>/<rom_id>/.
+    Values are the corresponding subdirectory names under downloaded_media/<platform>/.
+    """
 
     folder_map: dict[str, str] = Field(
         default_factory=lambda: {
-            "backcovers": "backcovers",
-            "bezels": "bezels",
-            "boxes": "box3dfront",
-            "covers": "covers",
+            # RomM per-game asset type → ES-DE media subfolder
+            "cover": "covers",
             "fanart": "fanart",
-            "manuals": "manuals",
-            "marquees": "marquees",
-            "miximages": "miximages",
-            "screenshots": "screenshots",
-            "titlescreens": "titlescreens",
-            "videos": "videos",
+            "box3d": "box3dfront",
+            "box2d_back": "backcovers",
+            "marquee": "marquees",
+            "miximage": "miximages",
+            "title_screen": "titlescreens",
+            "video_normalized": "videos",
+            "bezel": "bezels",
+            "logo": "logos",
         }
     )
 
@@ -132,9 +136,33 @@ def _normalize_url(url: str) -> str:
     return url.rstrip("/")
 
 
+# Keys used in the old flat RomM asset structure → new per-game asset type names.
+_FOLDER_MAP_LEGACY: dict[str, str] = {
+    "backcovers": "box2d_back",
+    "bezels": "bezel",
+    "boxes": "box3d",
+    "covers": "cover",
+    "marquees": "marquee",
+    "miximages": "miximage",
+    "titlescreens": "title_screen",
+    "videos": "video_normalized",
+}
+
+
+def _migrate_folder_map(data: dict[str, Any]) -> None:
+    """Rename legacy folder_map keys to their per-game equivalents, in-place."""
+    fm = data.get("assets", {}).get("folder_map")
+    if not isinstance(fm, dict):
+        return
+    for old_key, new_key in _FOLDER_MAP_LEGACY.items():
+        if old_key in fm:
+            fm.setdefault(new_key, fm.pop(old_key))
+
+
 def _parse_config(data: dict[str, Any]) -> AppConfig:
     if "romm" in data and "url" in data["romm"]:
         data["romm"]["url"] = _normalize_url(str(data["romm"]["url"]))
+    _migrate_folder_map(data)
     try:
         return AppConfig.model_validate(data)
     except ValidationError as exc:

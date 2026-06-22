@@ -91,7 +91,19 @@ def test_plan_symlink_operations_builds_rom_bios_and_asset_entries(tmp_path: Pat
 
     assert any(op.category == "rom" and op.destination.name == "Super Mario Bros.nes" for op in ops)
     assert any(op.category == "bios" and op.destination.name == "scph1001.bin" for op in ops)
-    assert any(op.category == "asset-dir" and op.destination.name == "covers" for op in ops)
+
+    # Asset symlinks are now per-ROM files: <media>/<platform>/<esde_folder>/<rom_stem>.<ext>
+    # folder_map={"box_front": "covers"} → preferred file is box_front.png (no special case)
+    asset_op = next(
+        (op for op in ops if op.category == "asset" and op.destination.parent.name == "covers"),
+        None,
+    )
+    assert asset_op is not None
+    assert asset_op.destination.name == "Super Mario Bros.png"
+    assert asset_op.target.name == "box_front.png"       # default: <asset_type>.png
+    assert asset_op.target.parent.name == "box_front"    # romm asset type subdir
+    # full target: resources/roms/<platform_id>/<rom_id>/box_front/box_front.png
+    assert asset_op.target.parts[-4:-1] == ("1", "10", "box_front")
 
     rom_op = next(op for op in ops if op.category == "rom")
     bios_op = next(op for op in ops if op.category == "bios")
@@ -147,6 +159,33 @@ def test_apply_operation_returns_error_instead_of_raising_for_filesystem_issue(t
     )
 
     assert result.action == "error"
+
+
+def test_apply_operation_replaces_broken_parent_symlink_with_real_dir(tmp_path: Path):
+    """If the parent directory is a broken symlink (old asset-dir legacy), replace it with a dir."""
+    nas = tmp_path / "nas"
+    asset_file = nas / "cover" / "big.png"
+    asset_file.parent.mkdir(parents=True)
+    asset_file.write_text("img")
+
+    media_root = tmp_path / "media" / "psx"
+    media_root.mkdir(parents=True)
+    covers_dir = media_root / "covers"
+    # Simulate old asset-dir: broken symlink where the real directory should be.
+    covers_dir.symlink_to(nas / "old_structure" / "covers")  # broken — target doesn't exist
+    assert covers_dir.is_symlink() and not covers_dir.exists()
+
+    op = SymlinkOperation(
+        category="asset",
+        destination=covers_dir / "Final Fantasy VII.png",
+        target=asset_file,
+        is_dir=False,
+    )
+    result = apply_operation(op)
+
+    assert result.action == "create"
+    assert (covers_dir / "Final Fantasy VII.png").is_symlink()
+    assert covers_dir.is_dir() and not covers_dir.is_symlink()
 
 
 def test_evaluate_operation_returns_broken_for_symlink_with_missing_target(tmp_path: Path):

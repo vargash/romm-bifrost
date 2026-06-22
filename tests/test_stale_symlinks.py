@@ -281,3 +281,22 @@ def test_remove_operation_target_property_on_broken_symlink(tmp_path: Path):
     op = RemoveSymlinkOperation(category="rom", destination=link)
     # Should not raise; returns a resolved path
     _ = op.target
+
+
+def test_plan_stale_removals_removes_legacy_asset_dir_symlinks(tmp_path: Path):
+    """Old asset-dir directory symlinks under downloaded_media are flagged for removal."""
+    config = _make_config(tmp_path)
+    nas_root = tmp_path / "nas"
+    nas_root.mkdir(parents=True)
+
+    # Simulate old asset-dir broken symlink: media/psx/covers → NAS (doesn't exist)
+    media_psx = tmp_path / "media" / "psx"
+    media_psx.mkdir(parents=True)
+    old_covers = media_psx / "covers"
+    old_covers.symlink_to(nas_root / "resources" / "roms" / "11" / "covers")
+    assert old_covers.is_symlink() and not old_covers.exists()
+
+    # No ops — simulates empty sync plan (no asset ops)
+    remove_ops = plan_stale_removals(config, ops=[])
+
+    assert any(r.destination == old_covers for r in remove_ops)
