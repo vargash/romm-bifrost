@@ -364,3 +364,7 @@ ttl_firmware_hours = 24
 ## License
 
 [GNU General Public License v3.0](LICENSE)
+
+## Acknowledgments
+This project is developed with the assistance of AI coding tools, primarily **Claude Code**, which helped in scaffolding, refactoring, and optimizing parts of the codebase.
+All AI-generated code is reviewed, tested, and maintained by a human (me!).
