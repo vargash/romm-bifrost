@@ -71,6 +71,21 @@ def _check_disk_space(label: str, path: Path, result: PreflightResult) -> None:
         pass  # path might not exist yet; caught by _check_path_accessible
 
 
+def run_nas_check(config: AppConfig) -> PreflightResult:
+    """Verify NAS library and resources paths are accessible.
+
+    Always runs, even in dry-run mode.  If the NAS is down there is no
+    point planning or applying a sync: all ROM targets would be broken and
+    stale-removal would be triggered incorrectly.
+    """
+    result = PreflightResult()
+    nas_lib = Path(config.nas.library_path).expanduser()
+    nas_res = Path(config.nas.resources_path).expanduser()
+    _check_path_accessible("NAS library", nas_lib, result)
+    _check_path_accessible("NAS resources", nas_res, result)
+    return result
+
+
 def run_sync_preflight(config: AppConfig) -> PreflightResult:
     """Pre-flight for `bifrost sync --apply` and `bifrost gamelist --apply`."""
     result = PreflightResult()

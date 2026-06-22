@@ -40,7 +40,7 @@ from bifrost.multidisc import (
     evaluate_m3u_operation,
     plan_m3u_operations,
 )
-from bifrost.preflight import PreflightResult, run_save_preflight, run_sync_preflight
+from bifrost.preflight import PreflightResult, run_nas_check, run_save_preflight, run_sync_preflight
 from bifrost.save_sync import build_save_sync_preview, execute_save_sync_preview
 from bifrost.state_sync import build_state_sync_preview, execute_state_sync_preview
 from bifrost.symlink_manager import (
@@ -686,6 +686,9 @@ def sync(config_path: Path | None, apply: bool, no_cache: bool) -> None:
     except ConfigError as exc:
         console.print(f"[red]Configuration error:[/red] {exc}")
         raise SystemExit(EXIT_CONFIG_ERROR) from exc
+
+    # NAS check runs in both dry-run and --apply: a down NAS makes the plan meaningless.
+    _abort_on_preflight(run_nas_check(config), console)
 
     if apply:
         _abort_on_preflight(run_sync_preflight(config), console)
