@@ -11,11 +11,14 @@ from bifrost.api.client import RommApiClient
 from bifrost.config import AppConfig
 
 # For most RomM asset types the preferred file is <type>.png.
-# Exceptions are listed here explicitly.
+# Exceptions are listed here explicitly.  Use _MANUAL_ASSET_FILE for types
+# whose filename depends on the ROM's numeric id (e.g. "1046.pdf").
 _PREFERRED_ASSET_FILE: dict[str, str] = {
-    "cover": "big.png",           # RomM generates big/small variants for covers
-    "video_normalized": "video_normalized.mp4",
+    "cover": "big.png",                          # RomM generates big/small variants for covers
+    "video_normalized": "video_normalized.mp4",  # video, not image
+    "physical": "physical.png",
 }
+_ROM_ID_NAMED: frozenset[str] = frozenset({"manual"})  # filename is "<rom_id>.pdf"
 
 
 @dataclass(frozen=True)
@@ -145,7 +148,10 @@ def plan_symlink_operations(config: AppConfig, client: RommApiClient) -> list[Sy
             continue
         rom_stem = Path(rom.fs_name).stem
         for romm_asset_type, esde_folder in config.assets.folder_map.items():
-            pref_file = _PREFERRED_ASSET_FILE.get(romm_asset_type, f"{romm_asset_type}.png")
+            if romm_asset_type in _ROM_ID_NAMED:
+                pref_file = f"{rom.id}.pdf"
+            else:
+                pref_file = _PREFERRED_ASSET_FILE.get(romm_asset_type, f"{romm_asset_type}.png")
             ext = Path(pref_file).suffix
             destination = media_root / slug / esde_folder / f"{rom_stem}{ext}"
             target = (

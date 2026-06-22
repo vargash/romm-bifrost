@@ -62,14 +62,15 @@ class AssetsConfig(BaseModel):
             # RomM per-game asset type → ES-DE media subfolder
             "cover": "covers",
             "fanart": "fanart",
-            "box3d": "box3dfront",
+            "box3d": "3dboxes",
             "box2d_back": "backcovers",
-            "logo": "marquees",
+            "logo": "marquees",        # ES-DE marquees = game logos, not arcade marquees
             "miximage": "miximages",
             "title_screen": "titlescreens",
             "video_normalized": "videos",
-            "bezel": "bezels",
-            "logo": "logos",
+            "manual": "manuals",
+            "physical": "physicalmedia",
+            "bezel": "bezels",         # non-standard ES-DE path, used by some themes
         }
     )
 
@@ -142,7 +143,8 @@ _FOLDER_MAP_LEGACY: dict[str, str] = {
     "bezels": "bezel",
     "boxes": "box3d",
     "covers": "cover",
-    "marquees": "logo",      # ES-DE marquees = RomM logo, not marquee
+    "manuals": "manual",
+    "marquees": "logo",      # ES-DE marquees = RomM logo, not arcade marquee
     "miximages": "miximage",
     "titlescreens": "title_screen",
     "videos": "video_normalized",
