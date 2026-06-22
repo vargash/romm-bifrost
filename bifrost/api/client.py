@@ -232,7 +232,8 @@ class RommApiClient:
 
             if response.is_error:
                 raise ApiError(
-                    f"RomM API request failed: {response.status_code} {response.text.strip()}"
+                    f"RomM API request failed: {response.status_code} {response.text.strip()}",
+                    http_status=response.status_code,
                 )
 
             return response

@@ -1,8 +1,9 @@
-"""Save sync preview helpers for the first RomM tranche."""
+"""Save sync: negotiate with RomM, upload/download save files."""
 
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -21,6 +22,29 @@ from bifrost.api.models import (
 from bifrost.config import AppConfig
 from bifrost.errors import ApiError
 from bifrost.errors import ConfigError
+
+_log = logging.getLogger("bifrost.save_sync")
+
+_MULTISPACE_RE = re.compile(r"\s+")
+_TRAILING_TAG_RE = re.compile(r"\s*\[[^\]]+\]$")
+_STATE_FILE_RE = re.compile(r"\.state\d*(\.png)?$", re.IGNORECASE)
+_SUPPORTED_SAVE_EXTENSIONS = {
+    ".srm",
+    ".sav",
+    ".mcr",
+    ".mcd",
+    ".dsv",
+    ".fla",
+    ".eep",
+    ".sra",
+    ".gme",
+    ".mem",
+    ".vmp",
+    ".vm1",
+    ".vm2",
+    ".nv",
+    ".hi",
+}
 
 
 @dataclass(frozen=True)
@@ -57,7 +81,6 @@ def _expand_path(path_value: str) -> Path:
 
 
 def _hash_file(path: Path) -> str:
-    # RomM save content_hash is MD5 in current API responses.
     digest = hashlib.md5()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -66,11 +89,16 @@ def _hash_file(path: Path) -> str:
 
 
 def scan_local_save_files(root: Path) -> list[LocalSaveFile]:
+    """Return all non-hidden files under root, regardless of extension.
+
+    Callers are responsible for filtering by _is_syncable_save_file.
+    Returning all files lets the preview report how many were found vs skipped.
+    """
     if not root.exists():
         return []
 
     save_files: list[LocalSaveFile] = []
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=True):
+    for dirpath, _dirnames, filenames in os.walk(root, followlinks=True):
         for filename in filenames:
             if filename.startswith("."):
                 continue
@@ -91,28 +119,6 @@ def scan_local_save_files(root: Path) -> list[LocalSaveFile]:
                 pass
 
     return sorted(save_files, key=lambda f: f.path)
-
-
-_MULTISPACE_RE = re.compile(r"\s+")
-_TRAILING_TAG_RE = re.compile(r"\s*\[[^\]]+\]$")
-_STATE_FILE_RE = re.compile(r"\.state\d*(\.png)?$", re.IGNORECASE)
-_SUPPORTED_SAVE_EXTENSIONS = {
-    ".srm",
-    ".sav",
-    ".mcr",
-    ".mcd",
-    ".dsv",
-    ".fla",
-    ".eep",
-    ".sra",
-    ".gme",
-    ".mem",
-    ".vmp",
-    ".vm1",
-    ".vm2",
-    ".nv",
-    ".hi",
-}
 
 
 def _strip_trailing_tags(value: str) -> str:
@@ -244,6 +250,62 @@ def _is_redundant_upload_operation(
     return False
 
 
+def _is_redundant_download(operation: SyncOperationSchema, save_root: Path) -> bool:
+    """Return True if the local file already matches the server's content hash."""
+    server_hash = operation.server_content_hash
+    if not server_hash:
+        return False
+    local_path = save_root / operation.file_name
+    if not local_path.exists():
+        return False
+    return _hash_file(local_path).lower() == server_hash.lower()
+
+
+def _backup_local_file(path: Path) -> Path | None:
+    """Create <filename>.bak before overwriting. Returns backup path or None."""
+    if not path.exists():
+        return None
+    backup = path.with_name(path.name + ".bak")
+    tmp = backup.with_name(backup.name + ".tmp")
+    try:
+        tmp.write_bytes(path.read_bytes())
+        tmp.replace(backup)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        return None
+    _log.debug("backed up %s -> %s", path.name, backup.name)
+    return backup
+
+
+def _resolve_conflict_action(
+    conflict_strategy: str,
+    is_interactive: bool,
+    file_name: str,
+    rom_id: int,
+) -> str:
+    """Map a 'conflict' operation to upload/download/skip."""
+    if conflict_strategy == "server_wins":
+        return "download"
+    if conflict_strategy == "local_wins":
+        return "upload"
+    # "ask" strategy
+    if not is_interactive:
+        _log.warning(
+            "conflict auto-resolved as local_wins (headless, no TTY): %s (rom_id=%d)",
+            file_name,
+            rom_id,
+        )
+        return "upload"
+    # Interactive mode: the CLI layer should provide conflict_overrides before calling execute.
+    # If it hasn't (shouldn't happen), fall back to local_wins and log.
+    _log.warning(
+        "conflict for %s (rom_id=%d) reached execute without resolution — defaulting to local_wins",
+        file_name,
+        rom_id,
+    )
+    return "upload"
+
+
 def _lookup_local_file_for_operation(
     operation: SyncOperationSchema,
     local_index: dict[str, list[LocalSaveFile]],
@@ -252,6 +314,67 @@ def _lookup_local_file_for_operation(
     if not candidates:
         return None
     return candidates[0]
+
+
+def _legacy_negotiate(
+    local_states: list[ClientSaveState],
+    remote_save_index: dict[tuple[int, str], SaveSummary],
+    sync_mode: str,
+) -> tuple[list[SyncOperationSchema], None]:
+    """Fallback when /api/sync/negotiate is unavailable (older RomM server).
+
+    Builds upload/download operations by direct local↔server comparison.
+    Downloads are only added in push_pull mode.
+    """
+    _log.warning(
+        "using legacy negotiate fallback (no session tracking); %d local saves, %d remote saves",
+        len(local_states),
+        len(remote_save_index),
+    )
+    ops: list[SyncOperationSchema] = []
+    local_keys = {_save_lookup_key(s.rom_id, s.file_name) for s in local_states}
+
+    for state in local_states:
+        key = _save_lookup_key(state.rom_id, state.file_name)
+        remote = remote_save_index.get(key)
+        if remote is None:
+            ops.append(
+                SyncOperationSchema(
+                    action="upload",
+                    rom_id=state.rom_id,
+                    file_name=state.file_name,
+                    reason="Save exists on client but not on server",
+                )
+            )
+        elif (
+            state.content_hash
+            and remote.content_hash
+            and state.content_hash.lower() != remote.content_hash.lower()
+        ):
+            ops.append(
+                SyncOperationSchema(
+                    action="upload",
+                    rom_id=state.rom_id,
+                    file_name=state.file_name,
+                    save_id=remote.id,
+                    reason="Client version differs from server",
+                )
+            )
+
+    if sync_mode == "push_pull":
+        for key, remote in remote_save_index.items():
+            if key not in local_keys:
+                ops.append(
+                    SyncOperationSchema(
+                        action="download",
+                        rom_id=remote.rom_id,
+                        save_id=remote.id,
+                        file_name=remote.file_name,
+                        reason="Save exists on server but not on client",
+                    )
+                )
+
+    return ops, None
 
 
 def build_save_sync_preview(
@@ -269,38 +392,65 @@ def build_save_sync_preview(
 
     save_root = _expand_path(config.emudeck.saves_path)
     all_local_files = scan_local_save_files(save_root)
+
     local_files = [
         item
         for item in all_local_files
         if _matches_file_filter(item.file_name, file_filters)
         or _matches_file_filter(str(item.path), file_filters)
     ]
+
     remote_roms = client.list_roms()
-    remote_index = _build_remote_rom_index(remote_roms)
+    remote_rom_index = _build_remote_rom_index(remote_roms)
     remote_saves = client.list_saves(device_id=resolved_device_id)
     remote_save_index = _build_remote_save_index(remote_saves)
 
     local_states: list[ClientSaveState] = []
     local_state_index: dict[tuple[int, str], ClientSaveState] = {}
     skipped_paths: list[Path] = []
+
     for local_save in local_files:
+        # State files and non-save extensions are not synced by this module
         if not _is_syncable_save_file(local_save.path):
             skipped_paths.append(local_save.path)
             continue
-        state, _ = _build_local_save_state(local_save, remote_index)
+        state, _rom_name = _build_local_save_state(local_save, remote_rom_index)
         if state is None:
             skipped_paths.append(local_save.path)
             continue
         local_states.append(state)
         local_state_index[_save_lookup_key(state.rom_id, state.file_name)] = state
 
-    negotiate_response = client.negotiate_sync(
-        SyncNegotiatePayload(device_id=resolved_device_id, saves=local_states)
-    )
+    # Negotiate with RomM, falling back to local comparison on 404/405
+    session_id: int | None
+    raw_operations: list[SyncOperationSchema]
+    try:
+        negotiate_response = client.negotiate_sync(
+            SyncNegotiatePayload(device_id=resolved_device_id, saves=local_states)
+        )
+        session_id = negotiate_response.session_id
+        raw_operations = negotiate_response.operations
+        _log.info(
+            "negotiate complete: session=%d upload=%d download=%d conflict=%d no_op=%d",
+            session_id,
+            negotiate_response.total_upload,
+            negotiate_response.total_download,
+            negotiate_response.total_conflict,
+            negotiate_response.total_no_op,
+        )
+    except ApiError as exc:
+        if exc.http_status in {404, 405}:
+            raw_operations, session_id = _legacy_negotiate(
+                local_states,
+                remote_save_index,
+                config.sync.sync_mode,
+            )
+        else:
+            raise
 
     filtered_operations = [
         operation
-        for operation in negotiate_response.operations
+        for operation in raw_operations
         if not _is_redundant_upload_operation(
             operation,
             local_state_index.get(_save_lookup_key(operation.rom_id, operation.file_name)),
@@ -316,7 +466,7 @@ def build_save_sync_preview(
         local_saves=local_states,
         operations=filtered_operations,
         skipped_paths=skipped_paths,
-        session_id=negotiate_response.session_id,
+        session_id=session_id,
     )
 
 
@@ -325,9 +475,15 @@ def execute_save_sync_preview(
     client: RommApiClient,
     preview: SaveSyncPreview,
     file_filters: list[str] | None = None,
+    is_interactive: bool = False,
+    conflict_overrides: dict[str, str] | None = None,
 ) -> SaveSyncExecutionResult:
-    """Execute selected sync operations from a previously negotiated preview."""
+    """Execute selected sync operations from a previously negotiated preview.
 
+    conflict_overrides maps file_name → "upload"|"download"|"skip" for conflicts
+    resolved interactively by the CLI layer. When absent, conflict_strategy from
+    config is applied automatically (headless-safe).
+    """
     save_root = _expand_path(config.emudeck.saves_path)
     local_files = scan_local_save_files(save_root)
     local_index: dict[str, list[LocalSaveFile]] = {}
@@ -347,7 +503,43 @@ def execute_save_sync_preview(
     skipped = 0
     details: list[tuple[str, str, str]] = []
 
-    for operation in selected_ops:
+    _log.info(
+        "save-sync execute: device=%s session=%s ops=%d apply=True",
+        preview.device_id,
+        preview.session_id,
+        len(selected_ops),
+    )
+
+    for raw_op in selected_ops:
+        # Resolve conflicts to a concrete upload/download/skip action
+        if raw_op.action == "conflict":
+            if conflict_overrides and raw_op.file_name in conflict_overrides:
+                resolved_action = conflict_overrides[raw_op.file_name]
+            else:
+                resolved_action = _resolve_conflict_action(
+                    config.sync.conflict_strategy,
+                    is_interactive,
+                    raw_op.file_name,
+                    raw_op.rom_id,
+                )
+            if resolved_action == "skip":
+                skipped += 1
+                details.append(("conflict", raw_op.file_name, "skipped (conflict unresolved)"))
+                continue
+            operation = SyncOperationSchema(
+                action=resolved_action,
+                rom_id=raw_op.rom_id,
+                save_id=raw_op.save_id,
+                file_name=raw_op.file_name,
+                slot=raw_op.slot,
+                emulator=raw_op.emulator,
+                reason=f"conflict resolved as {resolved_action}",
+                server_updated_at=raw_op.server_updated_at,
+                server_content_hash=raw_op.server_content_hash,
+            )
+        else:
+            operation = raw_op
+
         if operation.action not in {"upload", "download"}:
             skipped += 1
             details.append((operation.action, operation.file_name, "skipped (non-transfer operation)"))
@@ -370,7 +562,7 @@ def execute_save_sync_preview(
                         overwrite=True,
                     )
                 except ApiError as exc:
-                    # Some RomM builds may return 500 on create when the save already exists.
+                    # Some RomM builds return 500 on POST when save already exists.
                     if operation.save_id is None:
                         if remote_save_index is None:
                             device_scoped = client.list_saves(device_id=preview.device_id)
@@ -404,9 +596,16 @@ def execute_save_sync_preview(
                 details.append(("upload", operation.file_name, "ok"))
                 continue
 
+            # download
             if operation.save_id is None:
                 failed += 1
                 details.append(("download", operation.file_name, "failed (missing save_id)"))
+                continue
+
+            # Skip download if local already matches server
+            if _is_redundant_download(operation, save_root):
+                skipped += 1
+                details.append(("download", operation.file_name, "skipped (already in sync)"))
                 continue
 
             content = client.download_save_file_content(
@@ -416,23 +615,35 @@ def execute_save_sync_preview(
             )
             destination = save_root / operation.file_name
             destination.parent.mkdir(parents=True, exist_ok=True)
+            _backup_local_file(destination)
             destination.write_bytes(content)
             client.confirm_save_download(save_id=operation.save_id, device_id=preview.device_id)
             completed += 1
             details.append(("download", operation.file_name, f"ok -> {destination}"))
-        except Exception as exc:
+
+        except Exception as exc:  # noqa: BLE001
             failed += 1
             details.append((operation.action, operation.file_name, f"failed ({exc})"))
+            _log.error("save-sync op failed: %s %s: %s", operation.action, operation.file_name, exc)
 
     if preview.session_id is not None:
-        client.complete_sync_session(
-            preview.session_id,
-            SyncCompletePayload(
-                operations_completed=completed,
-                operations_failed=failed,
-            ),
-        )
+        try:
+            client.complete_sync_session(
+                preview.session_id,
+                SyncCompletePayload(
+                    operations_completed=completed,
+                    operations_failed=failed,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("failed to complete sync session %d: %s", preview.session_id, exc)
 
+    _log.info(
+        "save-sync execute done: completed=%d failed=%d skipped=%d",
+        completed,
+        failed,
+        skipped,
+    )
     return SaveSyncExecutionResult(
         executed=completed,
         failed=failed,

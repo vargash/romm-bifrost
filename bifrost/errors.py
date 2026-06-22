@@ -18,6 +18,10 @@ class ConfigPermissionError(ConfigError):
 class ApiError(BifrostError):
     """Raised for non-auth API failures."""
 
+    def __init__(self, message: str, http_status: int | None = None) -> None:
+        super().__init__(message)
+        self.http_status = http_status
+
 
 class AuthenticationError(BifrostError):
     """Raised when RomM API authentication fails."""

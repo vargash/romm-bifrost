@@ -222,7 +222,11 @@ def build_state_sync_preview(
             )
             continue
 
-        if remote.file_size_bytes is not None and int(remote.file_size_bytes) == local_state.file_size_bytes:
+        # Already in sync: same content hash
+        if remote.content_hash and local_state.content_hash:
+            if remote.content_hash.lower() == local_state.content_hash.lower():
+                continue
+        elif remote.file_size_bytes is not None and int(remote.file_size_bytes) == local_state.file_size_bytes:
             continue
 
         operations.append(

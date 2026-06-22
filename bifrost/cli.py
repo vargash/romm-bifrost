@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import platform as sys_platform
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +32,7 @@ from bifrost.config import (
 )
 from bifrost.errors import ApiError, AuthenticationError, ConfigError, NetworkError
 from bifrost.gamelist import apply_gamelist_plan, build_gamelist_plan
+from bifrost.logging_setup import setup_file_logging
 from bifrost.save_sync import build_save_sync_preview, execute_save_sync_preview
 from bifrost.state_sync import build_state_sync_preview, execute_state_sync_preview
 from bifrost.symlink_manager import (
@@ -796,12 +799,22 @@ def save_sync(
 
     console = Console()
     resolved_path = config_path or default_config_path()
+    setup_file_logging()
+    _cli_log = logging.getLogger("bifrost.cli.save_sync")
 
     try:
         config = load_config(resolved_path)
     except ConfigError as exc:
         console.print(f"[red]Configuration error:[/red] {exc}")
         raise SystemExit(EXIT_CONFIG_ERROR) from exc
+
+    is_interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    _cli_log.info(
+        "save-sync started: apply=%s interactive=%s filters=%s",
+        apply,
+        is_interactive,
+        list(only_files),
+    )
 
     try:
         with RommApiClient(config, no_cache=no_cache) as client:
@@ -811,6 +824,30 @@ def save_sync(
                 device_id=device_id,
                 file_filters=list(only_files),
             )
+
+            # Interactive conflict resolution for "ask" strategy
+            conflict_overrides: dict[str, str] = {}
+            if apply and is_interactive and config.sync.conflict_strategy == "ask":
+                conflict_ops = [op for op in preview.operations if op.action == "conflict"]
+                if conflict_ops:
+                    console.print(
+                        f"[yellow]{len(conflict_ops)} conflict(s) require resolution:[/yellow]"
+                    )
+                for op in conflict_ops:
+                    console.print(
+                        f"  [bold]{op.file_name}[/bold] (rom_id={op.rom_id}): {op.reason}"
+                    )
+                    choice = Prompt.ask(
+                        "  Resolve as [u]pload (local wins), [d]ownload (server wins), or [s]kip?",
+                        choices=["u", "d", "s"],
+                        default="u",
+                    )
+                    conflict_overrides[op.file_name] = {
+                        "u": "upload",
+                        "d": "download",
+                        "s": "skip",
+                    }[choice]
+
             execution = None
             if apply:
                 execution = execute_save_sync_preview(
@@ -818,14 +855,19 @@ def save_sync(
                     client,
                     preview,
                     file_filters=list(only_files),
+                    is_interactive=is_interactive,
+                    conflict_overrides=conflict_overrides if conflict_overrides else None,
                 )
     except AuthenticationError as exc:
+        _cli_log.error("authentication error: %s", exc)
         console.print(f"[red]Authentication error:[/red] {exc}")
         raise SystemExit(EXIT_AUTH_ERROR) from exc
     except ConfigError as exc:
+        _cli_log.error("config error: %s", exc)
         console.print(f"[red]Configuration error:[/red] {exc}")
         raise SystemExit(EXIT_CONFIG_ERROR) from exc
     except (NetworkError, ApiError) as exc:
+        _cli_log.error("api/network error: %s", exc)
         console.print(f"[red]API error:[/red] {exc}")
         raise SystemExit(EXIT_API_ERROR) from exc
 
@@ -838,6 +880,7 @@ def save_sync(
             if any(fragment in op.file_name.lower() for fragment in lowered_filters)
         ]
 
+    conflict_count = sum(1 for op in selected_operations if op.action == "conflict")
     summary = Table(title="Bifrost Save Sync (preview)")
     summary.add_column("Metric")
     summary.add_column("Value")
@@ -848,17 +891,19 @@ def save_sync(
     summary.add_row("Files skipped", str(preview.skipped_files))
     summary.add_row("Negotiated session", str(preview.session_id or "-"))
     summary.add_row("Operations", str(len(selected_operations)))
+    if conflict_count:
+        summary.add_row("Conflicts", str(conflict_count))
     if only_files:
         summary.add_row("File filter", ", ".join(only_files))
     console.print(summary)
 
-    operations = Table(title="Sync Operations")
-    operations.add_column("Action")
-    operations.add_column("ROM")
-    operations.add_column("Save")
-    operations.add_column("Reason")
+    operations_table = Table(title="Sync Operations")
+    operations_table.add_column("Action")
+    operations_table.add_column("ROM")
+    operations_table.add_column("Save")
+    operations_table.add_column("Reason")
     for operation in selected_operations[:25]:
-        operations.add_row(
+        operations_table.add_row(
             operation.action,
             str(operation.rom_id),
             operation.file_name,
@@ -866,7 +911,7 @@ def save_sync(
         )
 
     if selected_operations:
-        console.print(operations)
+        console.print(operations_table)
         if len(selected_operations) > 25:
             console.print("[yellow]Showing first 25 operations only.[/yellow]")
 
@@ -898,6 +943,13 @@ def save_sync(
             console.print(details)
             if len(execution.details) > 25:
                 console.print("[yellow]Showing first 25 execution rows only.[/yellow]")
+
+        _cli_log.info(
+            "save-sync completed: executed=%d failed=%d skipped=%d",
+            execution.executed,
+            execution.failed,
+            execution.skipped,
+        )
     else:
         console.print(
             "[cyan]Preview only: no save files were uploaded or downloaded in this tranche.[/cyan]"
@@ -940,6 +992,9 @@ def state_sync(
 
     console = Console()
     resolved_path = config_path or default_config_path()
+    setup_file_logging()
+    _cli_log = logging.getLogger("bifrost.cli.state_sync")
+    _cli_log.info("state-sync started: apply=%s filters=%s", apply, list(only_files))
 
     try:
         config = load_config(resolved_path)
@@ -963,12 +1018,15 @@ def state_sync(
                     file_filters=list(only_files),
                 )
     except AuthenticationError as exc:
+        _cli_log.error("authentication error: %s", exc)
         console.print(f"[red]Authentication error:[/red] {exc}")
         raise SystemExit(EXIT_AUTH_ERROR) from exc
     except ConfigError as exc:
+        _cli_log.error("config error: %s", exc)
         console.print(f"[red]Configuration error:[/red] {exc}")
         raise SystemExit(EXIT_CONFIG_ERROR) from exc
     except (NetworkError, ApiError) as exc:
+        _cli_log.error("api/network error: %s", exc)
         console.print(f"[red]API error:[/red] {exc}")
         raise SystemExit(EXIT_API_ERROR) from exc
 
@@ -1039,6 +1097,13 @@ def state_sync(
             console.print(details)
             if len(execution.details) > 25:
                 console.print("[yellow]Showing first 25 execution rows only.[/yellow]")
+
+        _cli_log.info(
+            "state-sync completed: executed=%d failed=%d skipped=%d",
+            execution.executed,
+            execution.failed,
+            execution.skipped,
+        )
     else:
         console.print(
             "[cyan]Preview only: no state files were uploaded in this tranche.[/cyan]"

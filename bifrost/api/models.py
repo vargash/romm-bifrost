@@ -90,6 +90,7 @@ class StateSummary(BaseModel):
     created_at: str | None = None
     updated_at: str
     emulator: str | None = None
+    content_hash: str | None = None
 
 
 class ClientSaveState(BaseModel):
