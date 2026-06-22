@@ -17,6 +17,7 @@ _PREFERRED_ASSET_FILE: dict[str, str] = {
     "cover": "big.png",                          # RomM generates big/small variants for covers
     "video_normalized": "video_normalized.mp4",  # video, not image
     "physical": "physical.png",
+    "screenshots": "0.png",                      # first screenshot, 0-indexed
 }
 _ROM_ID_NAMED: frozenset[str] = frozenset({"manual"})  # filename is "<rom_id>.pdf"
 

@@ -70,6 +70,7 @@ class AssetsConfig(BaseModel):
             "video_normalized": "videos",
             "manual": "manuals",
             "physical": "physicalmedia",
+            "screenshots": "screenshots",  # links to first screenshot (0.png)
             "bezel": "bezels",         # non-standard ES-DE path, used by some themes
         }
     )
