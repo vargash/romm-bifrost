@@ -10,7 +10,10 @@ from bifrost.config import AppConfig, RommConfig, load_config, save_config
 
 def test_config_show_prints_current_values(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
-    save_config(AppConfig(romm=RommConfig(url="http://romm.local", client_token="rmm_token")), config_path)
+    save_config(
+        AppConfig(romm=RommConfig(url="http://romm.local", client_token="rmm_token")),
+        config_path,
+    )
 
     runner = CliRunner()
     result = runner.invoke(main, ["config", "show", "--config", str(config_path)])
@@ -23,7 +26,10 @@ def test_config_show_prints_current_values(tmp_path: Path) -> None:
 
 def test_config_set_updates_single_value(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
-    save_config(AppConfig(romm=RommConfig(url="http://romm.local", client_token="rmm_token")), config_path)
+    save_config(
+        AppConfig(romm=RommConfig(url="http://romm.local", client_token="rmm_token")),
+        config_path,
+    )
 
     runner = CliRunner()
     result = runner.invoke(
@@ -45,7 +51,10 @@ def test_config_set_updates_single_value(tmp_path: Path) -> None:
 
 def test_config_set_rejects_unknown_key(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
-    save_config(AppConfig(romm=RommConfig(url="http://romm.local", client_token="rmm_token")), config_path)
+    save_config(
+        AppConfig(romm=RommConfig(url="http://romm.local", client_token="rmm_token")),
+        config_path,
+    )
 
     runner = CliRunner()
     result = runner.invoke(

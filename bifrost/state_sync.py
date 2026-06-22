@@ -188,7 +188,8 @@ def build_state_sync_preview(
     local_states = [
         item
         for item in all_local_states
-        if _matches_filter(item.file_name, file_filters) or _matches_filter(str(item.path), file_filters)
+        if _matches_filter(item.file_name, file_filters)
+        or _matches_filter(str(item.path), file_filters)
     ]
 
     rom_index = _build_rom_index(client.list_roms())
@@ -226,7 +227,10 @@ def build_state_sync_preview(
         if remote.content_hash and local_state.content_hash:
             if remote.content_hash.lower() == local_state.content_hash.lower():
                 continue
-        elif remote.file_size_bytes is not None and int(remote.file_size_bytes) == local_state.file_size_bytes:
+        elif (
+            remote.file_size_bytes is not None
+            and int(remote.file_size_bytes) == local_state.file_size_bytes
+        ):
             continue
 
         operations.append(

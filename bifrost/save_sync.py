@@ -20,8 +20,7 @@ from bifrost.api.models import (
     SyncOperationSchema,
 )
 from bifrost.config import AppConfig
-from bifrost.errors import ApiError
-from bifrost.errors import ConfigError
+from bifrost.errors import ApiError, ConfigError
 
 _log = logging.getLogger("bifrost.save_sync")
 
@@ -542,7 +541,9 @@ def execute_save_sync_preview(
 
         if operation.action not in {"upload", "download"}:
             skipped += 1
-            details.append((operation.action, operation.file_name, "skipped (non-transfer operation)"))
+            details.append(
+                (operation.action, operation.file_name, "skipped (non-transfer operation)")
+            )
             continue
 
         try:
@@ -550,7 +551,9 @@ def execute_save_sync_preview(
                 local_file = _lookup_local_file_for_operation(operation, local_index)
                 if local_file is None:
                     skipped += 1
-                    details.append(("upload", operation.file_name, "skipped (local file not found)"))
+                    details.append(
+                        ("upload", operation.file_name, "skipped (local file not found)")
+                    )
                     continue
                 try:
                     upload_response = client.upload_save_file(
@@ -589,7 +592,9 @@ def execute_save_sync_preview(
                             raise exc
                     else:
                         raise exc
-                uploaded_id = upload_response.get("id") if isinstance(upload_response, dict) else None
+                uploaded_id = (
+                    upload_response.get("id") if isinstance(upload_response, dict) else None
+                )
                 if isinstance(uploaded_id, int):
                     client.track_save(uploaded_id, preview.device_id)
                 completed += 1

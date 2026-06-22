@@ -347,7 +347,9 @@ def test_setup_allows_explicit_path_overrides(tmp_path: Path) -> None:
     assert cfg.emudeck.media_path == "~/Emulation/tools/downloaded_media"
 
 
-def test_setup_wizard_reuses_existing_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_setup_wizard_reuses_existing_defaults(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     config_file = tmp_path / "config.toml"
     existing = AppConfig(
         romm=RommConfig(url="http://romm.local", client_token="rmm_old", device_id="device-1"),

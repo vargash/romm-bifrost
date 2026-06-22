@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +14,6 @@ from bifrost.api.client import RommApiClient
 from bifrost.api.models import SyncOperationSchema
 from bifrost.cli import main
 from bifrost.config import AppConfig, EmudeckConfig, RommConfig, SyncConfig
-from bifrost.errors import ApiError
 from bifrost.save_sync import (
     _backup_local_file,
     _is_redundant_download,
@@ -23,7 +21,6 @@ from bifrost.save_sync import (
     build_save_sync_preview,
     execute_save_sync_preview,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -436,7 +433,12 @@ def test_execute_conflict_ask_headless_resolves_as_upload(tmp_path: Path) -> Non
             calls["upload"] += 1
             return httpx.Response(
                 200,
-                json={"id": 99, "rom_id": 10, "file_name": "Mario.sav", "updated_at": "2026-06-22T00:00:00Z"},
+                json={
+                    "id": 99,
+                    "rom_id": 10,
+                    "file_name": "Mario.sav",
+                    "updated_at": "2026-06-22T00:00:00Z",
+                },
             )
         if request.url.path == "/api/saves/99/track":
             return httpx.Response(200, json={"id": 99})
@@ -743,7 +745,9 @@ def test_legacy_fallback_includes_download_in_push_pull_mode(tmp_path: Path) -> 
 # ---------------------------------------------------------------------------
 
 
-def test_cli_save_sync_conflict_server_wins(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_cli_save_sync_conflict_server_wins(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     cfg = config_path_for(tmp_path, conflict_strategy="server_wins")
 
     calls: dict[str, int] = {"download": 0}
