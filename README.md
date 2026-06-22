@@ -48,21 +48,52 @@ No files are ever copied or duplicated. RomM is the single source of truth.
 
 ## Installation
 
+### Steam Deck / EmuDeck (recommended)
+
+Use the one-shot installer. Open a terminal once — everything else runs automatically from then on:
+
 ```bash
 git clone https://github.com/yourusername/romm-bifrost.git
 cd romm-bifrost
-./install.sh
+./install-deck.sh
 ```
 
-This installs Bifrost with `pipx` and exposes the `bifrost` command globally.
+`install-deck.sh` handles everything in sequence:
+1. Verifies Python 3.11+ and installs `pipx` if missing
+2. Installs `bifrost` (with save-watcher support) via `pipx`
+3. Runs the setup wizard interactively
+4. Installs and enables the systemd user services (ROM sync, save sync, save watcher)
+5. Enables session linger so services survive game-mode logout
+6. Runs the initial sync
 
-If you prefer a local editable installation for development:
+To update an existing installation without re-running the wizard:
 
 ```bash
-pip install -e .
+./install-deck.sh --update
 ```
 
-For development tooling:
+To uninstall:
+
+```bash
+./install-deck.sh --uninstall
+```
+
+### Manual installation
+
+```bash
+git clone https://github.com/yourusername/romm-bifrost.git
+cd romm-bifrost
+./install.sh        # installs via pipx
+bifrost setup       # interactive wizard
+```
+
+With save-watcher support (requires `watchdog`):
+
+```bash
+pipx install ".[watch]"
+```
+
+For development:
 
 ```bash
 pip install -e .[dev]
@@ -78,17 +109,17 @@ For a full, reproducible setup from fresh clone to passing checks, see [`docs/de
 bifrost setup
 ```
 
-The setup command now stores your RomM URL and Client API Token in `~/.config/bifrost/config.toml` with secure permissions (`600`) and verifies connectivity via `/api/heartbeat`.
+The setup wizard stores your RomM URL and Client API Token in `~/.config/bifrost/config.toml` with secure permissions (`600`) and verifies connectivity via `/api/heartbeat`.
 
-`bifrost setup` is safely re-runnable: existing values are loaded as defaults so you can press Enter to keep current settings and only change one or two values.
+`bifrost setup` is safely re-runnable: existing values are pre-filled so you can change only what you need.
 
-Non-interactive setup is also supported:
+Non-interactive setup:
 
 ```bash
 bifrost setup --url http://192.168.1.x:8080 --token rmm_your-token
 ```
 
-Device Pairing flow is supported as well:
+Device Pairing flow:
 
 ```bash
 bifrost setup --pair --url http://192.168.1.x:8080 --pair-code MCM9-FDSQ
@@ -148,12 +179,104 @@ bifrost cache invalidate
 bifrost debug saves
 ```
 
-Current implementation status:
+---
 
-- Implemented (foundation): config loading/validation, RomM API client, setup (token + pairing), `bifrost status`, `bifrost scan`
-- Implemented (production-ready): `bifrost sync` (dry-run/apply), `bifrost gamelist` (dry-run/apply), `bifrost save-sync` (preview/apply, conflict resolution, backup, legacy fallback), `bifrost state-sync` (preview/apply)
-- Supporting commands: `bifrost device-enroll`, `bifrost debug saves`, `bifrost cache`
-- Not yet implemented: watch mode, systemd scheduling, structured metrics export (planned for F6 automation phase)
+## Automation
+
+Bifrost ships with five systemd **user** services (no root required) that make sync fully automatic on a console-style device.
+
+| Unit | Trigger | What it does |
+|------|---------|--------------|
+| `bifrost-sync.timer` | Boot +2 min, then every 6 h | ROM symlinks + gamelist.xml |
+| `bifrost-save-sync.timer` | Boot +3 min, then every 2 h | Save files + savestates |
+| `bifrost-save-watch.service` | Always running | Detects save file changes, triggers sync within 15 s |
+
+Install and enable all services in one command:
+
+```bash
+bifrost systemd install
+```
+
+`bifrost systemd install` also:
+- Auto-detects the systemd mount unit for your NAS path and injects `After=` / `BindsTo=` dependencies into the service files, so sync never runs before the NAS is mounted.
+- Enables `loginctl linger` so services survive game-mode logout on Steam Deck.
+
+Provide the NAS mount unit manually if auto-detection fails:
+
+```bash
+bifrost systemd install --nas-mount mnt-nas.mount
+# find it with: systemctl list-units --type=mount
+```
+
+Check service health at any time:
+
+```bash
+bifrost systemd status
+```
+
+Uninstall:
+
+```bash
+bifrost systemd uninstall
+```
+
+### Save file watcher
+
+`bifrost-save-watch.service` watches your saves directory using inotify (via `watchdog`) and triggers a save + state sync after a 15-second quiet window following the last file change. This means saves reach RomM within seconds of an emulator writing them, without polling.
+
+If `watchdog` is not installed, the service falls back to polling every 30 seconds.
+
+Run the watcher manually (useful for testing or debugging):
+
+```bash
+bifrost watch-saves
+```
+
+### Running unattended from cron (alternative to systemd)
+
+If you prefer cron over systemd timers:
+
+```bash
+# Add with: crontab -e
+0 */6 * * * bifrost sync --apply >> ~/.local/share/bifrost/logs/cron.log 2>&1
+0 */2 * * * bifrost save-sync --apply >> ~/.local/share/bifrost/logs/cron.log 2>&1
+```
+
+---
+
+## Diagnostics
+
+```bash
+bifrost doctor
+```
+
+`bifrost doctor` runs a full health check and prints a single report covering:
+
+- Config file validity
+- NAS paths (accessible, non-empty mount points)
+- Local paths (ES-DE ROMs, gamelists, BIOS, saves, media)
+- Disk space on the home partition
+- RomM connectivity (live heartbeat)
+- Systemd service states
+- Last 20 lines of the Bifrost log
+
+Use `--log` to also write the report to the log file — useful for diagnosing issues on a headless device without an open terminal:
+
+```bash
+bifrost doctor --log
+```
+
+---
+
+## Pre-flight checks
+
+Every `--apply` command (sync, gamelist, save-sync, state-sync) runs pre-flight checks before making any changes:
+
+- NAS paths exist and are readable (detects stale/empty mounts)
+- Destination directories are writable
+- At least 200 MB free disk space
+
+If a check fails, Bifrost prints an explicit error message and aborts — no partial writes, no silent failures.
 
 ---
 
@@ -180,25 +303,13 @@ When RomM reports a conflict (both sides changed since last sync), the `[sync].c
 | `server_wins` | Download server file | Download server file |
 | `ask` | Auto-resolves as `local_wins` + logs a warning | Prompts `[u/d/s]` for each conflict |
 
-The default is `ask`. In headless mode (cron, systemd) `ask` is safe: Bifrost never blocks for input and defaults to local_wins.
+The default is `ask`. In headless mode (systemd, cron) `ask` is safe: Bifrost never blocks for input and defaults to local_wins.
 
 Before any download that would overwrite a local file, Bifrost creates a `<filename>.bak` backup in the same directory.
 
 ### Logs
 
-Bifrost writes a structured log to `~/.local/share/bifrost/logs/bifrost.log` on every sync run. The log rotates at 10 MB and keeps 5 backups — useful for auditing unattended runs.
-
-### Running unattended
-
-Bifrost's sync commands are designed to be called from cron or a systemd timer without user interaction:
-
-```bash
-# Example: add to crontab with `crontab -e`
-# Sync saves every 6 hours
-0 */6 * * * bifrost save-sync --apply >> ~/.local/share/bifrost/logs/cron.log 2>&1
-```
-
-Automatic scheduling via a native systemd service (including network-aware triggers and watch mode) is planned for the F6 automation phase. For now, the recommended approach is a cron entry or a manual systemd timer.
+Bifrost writes a structured log to `~/.local/share/bifrost/logs/bifrost.log` on every sync run. The log rotates at 10 MB and keeps 5 backups.
 
 ---
 
@@ -222,6 +333,31 @@ ttl_roms_hours = 6
 ttl_platforms_hours = 24
 ttl_firmware_hours = 24
 ```
+
+---
+
+## Implementation status
+
+| Area | Status |
+|------|--------|
+| Config (TOML, wizard, validation) | ✅ |
+| RomM API client | ✅ |
+| `bifrost sync` — ROM/BIOS/asset symlinks | ✅ |
+| `bifrost gamelist` — gamelist.xml merge-safe | ✅ |
+| `bifrost save-sync` — conflict resolution, backup, legacy fallback | ✅ |
+| `bifrost state-sync` | ✅ |
+| `bifrost device-enroll` | ✅ |
+| Three-level API cache (L1 mem + L2 disk + L3 HTTP) | ✅ |
+| Structured logging + log rotation | ✅ |
+| Pre-flight checks (NAS, paths, disk space) | ✅ |
+| `bifrost doctor` — diagnostics command | ✅ |
+| Systemd user services + timers | ✅ |
+| Save file watcher (inotify/polling) | ✅ |
+| `install-deck.sh` — one-shot Steam Deck installer | ✅ |
+| Watch mode for assets / gamelist auto-rebuild | ❌ planned |
+| Structured metrics / JSON export | ❌ planned |
+| API request batching + parallel symlink creation | ❌ planned |
+| Partial sync resume on failure | ❌ planned |
 
 ---
 
