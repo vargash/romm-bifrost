@@ -2,7 +2,7 @@ from pathlib import Path
 
 from bifrost.api.models import PlatformSummary
 from bifrost.config import AppConfig, EmudeckConfig, EsdeConfig, NasConfig, RommConfig
-from bifrost.gamelist import apply_gamelist_plan, build_gamelist_plan
+from bifrost.gamelist import _normalize_gamelist_path, apply_gamelist_plan, build_gamelist_plan
 
 
 class StubClient:
@@ -297,3 +297,204 @@ def test_apply_gamelist_plan_prunes_removed_entries(tmp_path: Path):
         xml = gamelist_path.read_text(encoding="utf-8")
         assert "./Mario.nes" in xml
         assert "./Legacy.m3u" not in xml
+
+
+# ---------------------------------------------------------------------------
+# Multi-disc gamelist tests
+# ---------------------------------------------------------------------------
+
+
+class StubClientMultiDisc:
+    """PSX platform with a 3-disc game and a single-disc game."""
+
+    def list_platforms(self):
+        return [PlatformSummary(id=2, fs_slug="psx", name="PlayStation")]
+
+    def list_roms_raw(self, use_cache: bool = True):
+        return [
+            {
+                "id": 100,
+                "platform_id": 2,
+                "fs_name": "Final Fantasy VII (Disc 1).bin",
+                "name": "Final Fantasy VII (Disc 1)",
+                "developer": "Square",
+                "publisher": "Square EA",
+                "summary": "Legendary RPG",
+            },
+            {
+                "id": 101,
+                "platform_id": 2,
+                "fs_name": "Final Fantasy VII (Disc 2).bin",
+                "name": "Final Fantasy VII (Disc 2)",
+                "developer": "Square",
+            },
+            {
+                "id": 102,
+                "platform_id": 2,
+                "fs_name": "Final Fantasy VII (Disc 3).bin",
+                "name": "Final Fantasy VII (Disc 3)",
+                "developer": "Square",
+            },
+            {
+                "id": 103,
+                "platform_id": 2,
+                "fs_name": "Crash Bandicoot.bin",
+                "name": "Crash Bandicoot",
+                "developer": "Naughty Dog",
+            },
+        ]
+
+
+def test_multidisc_gamelist_has_m3u_entry_not_individual_discs(tmp_path: Path):
+    config = make_config(tmp_path)
+    results = apply_gamelist_plan(config, StubClientMultiDisc())
+
+    assert len(results) == 1
+    xml = (tmp_path / "gamelists" / "psx" / "gamelist.xml").read_text(encoding="utf-8")
+
+    # M3U entry must be present
+    assert "./Final Fantasy VII.m3u" in xml
+    # Individual disc entries must NOT appear
+    assert "./Final Fantasy VII (Disc 1).bin" not in xml
+    assert "./Final Fantasy VII (Disc 2).bin" not in xml
+    assert "./Final Fantasy VII (Disc 3).bin" not in xml
+    # Single-disc game still appears normally
+    assert "./Crash Bandicoot.bin" in xml
+
+
+def test_multidisc_gamelist_m3u_entry_uses_first_disc_metadata(tmp_path: Path):
+    config = make_config(tmp_path)
+    apply_gamelist_plan(config, StubClientMultiDisc())
+
+    xml = (tmp_path / "gamelists" / "psx" / "gamelist.xml").read_text(encoding="utf-8")
+    assert "<developer>Square</developer>" in xml
+    assert "<desc>Legendary RPG</desc>" in xml
+
+
+def test_multidisc_gamelist_m3u_entry_name_has_no_disc_marker(tmp_path: Path):
+    config = make_config(tmp_path)
+    apply_gamelist_plan(config, StubClientMultiDisc())
+
+    xml = (tmp_path / "gamelists" / "psx" / "gamelist.xml").read_text(encoding="utf-8")
+    assert "<name>Final Fantasy VII</name>" in xml
+    # Disc marker must not appear in the name tag
+    assert "(Disc 1)" not in xml.split("<name>", 1)[-1].split("</name>", 1)[0]
+
+
+def test_multidisc_gamelist_plan_counts_group_as_one_entry(tmp_path: Path):
+    config = make_config(tmp_path)
+    plans = build_gamelist_plan(config, StubClientMultiDisc())
+
+    assert len(plans) == 1
+    plan = plans[0]
+    # 2 entries: one M3U group + Crash Bandicoot
+    assert plan.total_roms == 2
+    assert plan.new_entries == 2
+
+
+def test_multidisc_gamelist_is_idempotent(tmp_path: Path):
+    config = make_config(tmp_path)
+    apply_gamelist_plan(config, StubClientMultiDisc())
+
+    plans = build_gamelist_plan(config, StubClientMultiDisc())
+    assert len(plans) == 1
+    assert plans[0].new_entries == 0
+    assert plans[0].updated_entries == 0
+    assert plans[0].unchanged_entries == 2
+
+
+def test_multidisc_gamelist_merges_m3u_entry_on_metadata_change(tmp_path: Path):
+    config = make_config(tmp_path)
+    apply_gamelist_plan(config, StubClientMultiDisc())
+
+    class _UpdatedClient(StubClientMultiDisc):
+        def list_roms_raw(self, use_cache: bool = True):
+            roms = super().list_roms_raw()
+            roms[0]["developer"] = "SquareSoft"
+            return roms
+
+    plans = build_gamelist_plan(config, _UpdatedClient())
+    assert plans[0].updated_entries == 1
+
+
+# ---------------------------------------------------------------------------
+# _normalize_gamelist_path
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_gamelist_path_leaves_dot_slash_unchanged():
+    assert _normalize_gamelist_path("./game.nes") == "./game.nes"
+
+
+def test_normalize_gamelist_path_adds_dot_slash_prefix():
+    assert _normalize_gamelist_path("game.nes") == "./game.nes"
+
+
+def test_normalize_gamelist_path_absolute_extracts_filename():
+    assert _normalize_gamelist_path("/home/user/ROMs/nes/game.nes") == "./game.nes"
+
+
+def test_normalize_gamelist_path_strips_whitespace():
+    assert _normalize_gamelist_path("  ./game.nes  ") == "./game.nes"
+
+
+def test_normalize_gamelist_path_empty_string_returns_empty():
+    assert _normalize_gamelist_path("") == ""
+
+
+# ---------------------------------------------------------------------------
+# alternativeEmulator preserved even when ES-DE normalizes path (no ./)
+# ---------------------------------------------------------------------------
+
+
+def test_apply_gamelist_plan_preserves_alternative_emulator_no_dot_slash(tmp_path: Path):
+    """ES-DE may write paths without ./ prefix; bifrost must still find the entry."""
+    config = make_config(tmp_path)
+    gamelist_path = tmp_path / "gamelists" / "nes" / "gamelist.xml"
+    gamelist_path.parent.mkdir(parents=True, exist_ok=True)
+    # ES-DE writes path without the ./ prefix and adds alternativeEmulator
+    gamelist_path.write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<gameList>
+  <game>
+    <path>Mario.nes</path>
+    <name>Super Mario Bros</name>
+    <alternativeEmulator>mesen libretro</alternativeEmulator>
+  </game>
+</gameList>
+""",
+        encoding="utf-8",
+    )
+
+    results = apply_gamelist_plan(config, StubClient())
+
+    assert len(results) == 1
+    xml = gamelist_path.read_text(encoding="utf-8")
+    assert "<alternativeEmulator>mesen libretro</alternativeEmulator>" in xml
+
+
+def test_apply_gamelist_plan_preserves_alternative_emulator_absolute_path(tmp_path: Path):
+    """ES-DE may write absolute paths; bifrost must still find the entry."""
+    config = make_config(tmp_path)
+    gamelist_path = tmp_path / "gamelists" / "nes" / "gamelist.xml"
+    gamelist_path.parent.mkdir(parents=True, exist_ok=True)
+    gamelist_path.write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<gameList>
+  <game>
+    <path>/home/user/ROMs/nes/Mario.nes</path>
+    <name>Super Mario Bros</name>
+    <alternativeEmulator>mesen libretro</alternativeEmulator>
+    <playcount>5</playcount>
+  </game>
+</gameList>
+""",
+        encoding="utf-8",
+    )
+
+    results = apply_gamelist_plan(config, StubClient())
+
+    assert len(results) == 1
+    xml = gamelist_path.read_text(encoding="utf-8")
+    assert "<alternativeEmulator>mesen libretro</alternativeEmulator>" in xml
+    assert "<playcount>5</playcount>" in xml

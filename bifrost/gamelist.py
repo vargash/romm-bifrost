@@ -13,6 +13,11 @@ from xml.etree import ElementTree as ET
 from bifrost.api.client import RommApiClient
 from bifrost.api.models import PlatformSummary
 from bifrost.config import AppConfig
+from bifrost.multidisc import (
+    detect_folder_multidisc_from_api,
+    group_multidisc_roms_raw,
+    strip_disc_marker,
+)
 
 ESDE_PRESERVED_TAGS = {
     "playcount",
@@ -329,6 +334,39 @@ def _build_game_element(rom: dict[str, Any]) -> ET.Element | None:
     return game
 
 
+def _build_m3u_game_element(
+    base_name: str, group_roms: list[dict[str, Any]]
+) -> ET.Element | None:
+    """Build a <game> element for a multi-disc group using the first available disc's metadata."""
+    game = None
+    for rom in group_roms:
+        game = _build_game_element(rom)
+        if game is not None:
+            break
+    if game is None:
+        return None
+
+    path_node = game.find("path")
+    if path_node is None:
+        path_node = ET.SubElement(game, "path")
+    path_node.text = f"./{base_name}.m3u"
+
+    name_node = game.find("name")
+    if name_node is not None and name_node.text:
+        cleaned = strip_disc_marker(name_node.text)
+        if cleaned:
+            name_node.text = cleaned
+
+    return game
+
+
+def _reroute_path_to_m3u(game: ET.Element) -> None:
+    """Append .m3u to the <path> element of a folder-based multi-disc game entry."""
+    path_node = game.find("path")
+    if path_node is not None and path_node.text and not path_node.text.endswith(".m3u"):
+        path_node.text += ".m3u"
+
+
 def _parse_existing_tree(path: Path) -> ET.Element:
     if not path.exists():
         return ET.Element("gameList")
@@ -367,12 +405,33 @@ def _parse_existing_tree(path: Path) -> ET.Element:
     return root
 
 
+def _normalize_gamelist_path(path_text: str) -> str:
+    """Normalize a gamelist <path> value for stable key comparison.
+
+    ES-DE may write paths in different forms depending on version; this
+    collapses them to a consistent ``./filename`` form so that bifrost-generated
+    entries and ES-DE-modified entries match on lookup.
+
+    * ``game.chd``          → ``./game.chd``
+    * ``./game.chd``        → ``./game.chd``
+    * ``/abs/path/game.chd``→ ``./game.chd``
+    """
+    p = path_text.strip()
+    if not p:
+        return p
+    if Path(p).is_absolute():
+        return "./" + Path(p).name
+    if not p.startswith("./"):
+        return "./" + p
+    return p
+
+
 def _game_path_key(game: ET.Element) -> str | None:
     path_node = game.find("path")
     if path_node is None or path_node.text is None:
         return None
-    key = path_node.text.strip()
-    return key or None
+    raw = path_node.text.strip()
+    return _normalize_gamelist_path(raw) if raw else None
 
 
 def _merge_game(existing_game: ET.Element, generated_game: ET.Element) -> bool:
@@ -429,11 +488,16 @@ def build_gamelist_plan(config: AppConfig, client: RommApiClient) -> list[Gameli
     roms = client.list_roms_raw()
     grouped = _roms_by_platform(roms)
 
+    folder_multidisc_data = detect_folder_multidisc_from_api(roms, client)
+    folder_multidisc_ids = set(folder_multidisc_data.keys())
+
     plans: list[GamelistPlan] = []
     gamelists_root = Path(config.esde.gamelists_path).expanduser()
 
     for platform in platforms:
-        plan = _build_platform_plan(platform, grouped.get(platform.id, []), gamelists_root)
+        plan = _build_platform_plan(
+            platform, grouped.get(platform.id, []), gamelists_root, folder_multidisc_ids
+        )
         if plan is not None and plan.total_roms > 0:
             plans.append(plan)
 
@@ -444,6 +508,7 @@ def _build_platform_plan(
     platform: PlatformSummary,
     roms: list[dict[str, Any]],
     gamelists_root: Path,
+    folder_multidisc_ids: set[int] | None = None,
 ) -> GamelistPlan | None:
     if not platform.fs_slug:
         return None
@@ -457,15 +522,35 @@ def _build_platform_plan(
         if key:
             existing_by_path[key] = game
 
+    # Flat-file multi-disc: multiple ROM entries with disc markers in fs_name.
+    disc_groups = group_multidisc_roms_raw(roms)
+    disc_rom_ids: set[int] = {
+        rid
+        for group_roms in disc_groups.values()
+        for rom in group_roms
+        if isinstance(rid := rom.get("id"), int)
+    }
+
+    # Folder-based multi-disc IDs come pre-computed by the caller via API.
+    _folder_multidisc_ids: set[int] = folder_multidisc_ids or set()
+
     new_entries = 0
     updated_entries = 0
     unchanged_entries = 0
     seen_keys: set[str] = set()
 
     for rom in roms:
+        rom_id = rom.get("id")
+
+        if isinstance(rom_id, int) and rom_id in disc_rom_ids:
+            continue
+
         generated_game = _build_game_element(rom)
         if generated_game is None:
             continue
+
+        if isinstance(rom_id, int) and rom_id in _folder_multidisc_ids:
+            _reroute_path_to_m3u(generated_game)
 
         key = _game_path_key(generated_game)
         if key is None:
@@ -486,6 +571,26 @@ def _build_platform_plan(
         else:
             unchanged_entries += 1
 
+    for base_name, group_roms in disc_groups.items():
+        m3u_game = _build_m3u_game_element(base_name, group_roms)
+        if m3u_game is None:
+            continue
+
+        key = f"./{base_name}.m3u"
+        seen_keys.add(key)
+
+        existing = existing_by_path.get(key)
+        if existing is None:
+            root.append(m3u_game)
+            existing_by_path[key] = m3u_game
+            new_entries += 1
+        else:
+            changed = _merge_game(existing, m3u_game)
+            if changed:
+                updated_entries += 1
+            else:
+                unchanged_entries += 1
+
     removed_entries = sum(1 for key in existing_by_path if key not in seen_keys)
 
     total_roms = new_entries + updated_entries + unchanged_entries
@@ -505,6 +610,9 @@ def apply_gamelist_plan(config: AppConfig, client: RommApiClient) -> list[Gameli
     roms = client.list_roms_raw()
     grouped = _roms_by_platform(roms)
 
+    folder_multidisc_data = detect_folder_multidisc_from_api(roms, client)
+    folder_multidisc_ids = set(folder_multidisc_data.keys())
+
     results: list[GamelistApplyResult] = []
     gamelists_root = Path(config.esde.gamelists_path).expanduser()
 
@@ -521,15 +629,32 @@ def apply_gamelist_plan(config: AppConfig, client: RommApiClient) -> list[Gameli
             if key:
                 existing_by_path[key] = game
 
+        platform_roms = grouped.get(platform.id, [])
+        disc_groups = group_multidisc_roms_raw(platform_roms)
+        disc_rom_ids: set[int] = {
+            rid
+            for group_roms in disc_groups.values()
+            for rom in group_roms
+            if isinstance(rid := rom.get("id"), int)
+        }
+
         new_entries = 0
         updated_entries = 0
         unchanged_entries = 0
         seen_keys: set[str] = set()
 
-        for rom in grouped.get(platform.id, []):
+        for rom in platform_roms:
+            rom_id = rom.get("id")
+
+            if isinstance(rom_id, int) and rom_id in disc_rom_ids:
+                continue
+
             generated_game = _build_game_element(rom)
             if generated_game is None:
                 continue
+
+            if isinstance(rom_id, int) and rom_id in folder_multidisc_ids:
+                _reroute_path_to_m3u(generated_game)
 
             key = _game_path_key(generated_game)
             if key is None:
@@ -549,6 +674,26 @@ def apply_gamelist_plan(config: AppConfig, client: RommApiClient) -> list[Gameli
                 updated_entries += 1
             else:
                 unchanged_entries += 1
+
+        for base_name, group_roms in disc_groups.items():
+            m3u_game = _build_m3u_game_element(base_name, group_roms)
+            if m3u_game is None:
+                continue
+
+            key = f"./{base_name}.m3u"
+            seen_keys.add(key)
+
+            existing = existing_by_path.get(key)
+            if existing is None:
+                root.append(m3u_game)
+                existing_by_path[key] = m3u_game
+                new_entries += 1
+            else:
+                changed = _merge_game(existing, m3u_game)
+                if changed:
+                    updated_entries += 1
+                else:
+                    unchanged_entries += 1
 
         stale_games = [game for key, game in existing_by_path.items() if key not in seen_keys]
         for game in stale_games:
