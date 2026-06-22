@@ -81,6 +81,7 @@ def test_sync_apply_calls_apply_operations(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(cli, "load_config", lambda _: DummyConfig())
     monkeypatch.setattr(cli, "RommApiClient", DummyClient)
     monkeypatch.setattr(cli, "plan_symlink_operations", lambda _cfg, _client: [DummyOp()])
+    monkeypatch.setattr(cli, "run_sync_preflight", lambda _cfg: cli.PreflightResult())
 
     def fake_apply(_op):
         called["apply"] = True

@@ -82,6 +82,7 @@ def test_gamelist_apply_outputs_written_count(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(cli, "load_config", lambda _: DummyConfig())
     monkeypatch.setattr(cli, "RommApiClient", DummyClient)
     monkeypatch.setattr(cli, "apply_gamelist_plan", lambda _cfg, _c: [DummyResult()])
+    monkeypatch.setattr(cli, "run_sync_preflight", lambda _cfg: cli.PreflightResult())
 
     runner = CliRunner()
     result = runner.invoke(cli.main, ["gamelist", "--apply", "--config", str(config_path)])

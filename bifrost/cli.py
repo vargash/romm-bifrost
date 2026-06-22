@@ -6,6 +6,7 @@ import logging
 import os
 import platform as sys_platform
 import re
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,7 @@ from bifrost.config import (
 from bifrost.errors import ApiError, AuthenticationError, ConfigError, NetworkError
 from bifrost.gamelist import apply_gamelist_plan, build_gamelist_plan
 from bifrost.logging_setup import setup_file_logging
+from bifrost.preflight import PreflightResult, run_save_preflight, run_sync_preflight
 from bifrost.save_sync import build_save_sync_preview, execute_save_sync_preview
 from bifrost.state_sync import build_state_sync_preview, execute_state_sync_preview
 from bifrost.symlink_manager import (
@@ -47,6 +49,21 @@ EXIT_AUTH_ERROR = 3
 EXIT_API_ERROR = 4
 
 PAIRING_CODE_PATTERN = re.compile(r"^[A-Z0-9]{4}-?[A-Z0-9]{4}$", re.IGNORECASE)
+
+
+def _abort_on_preflight(result: PreflightResult, console: Console) -> None:
+    """Print pre-flight warnings/errors and abort with EXIT_CONFIG_ERROR if any errors."""
+    for warn in result.warnings:
+        console.print(f"[yellow]Pre-flight warning:[/yellow] {warn}")
+    if not result.ok:
+        console.print("[red bold]Pre-flight checks failed — aborting --apply:[/red bold]")
+        for err in result.errors:
+            console.print(f"  [red]✗[/red] {err}")
+        console.print(
+            "\nFix the issues above and retry. "
+            "Run [cyan]bifrost doctor[/cyan] for a full diagnostics report."
+        )
+        raise SystemExit(EXIT_CONFIG_ERROR)
 
 
 @click.group(help="Bifrost: RomM <-> ES-DE bridge CLI")
@@ -528,6 +545,9 @@ def gamelist(config_path: Path | None, apply: bool, no_cache: bool) -> None:
         console.print(f"[red]Configuration error:[/red] {exc}")
         raise SystemExit(EXIT_CONFIG_ERROR) from exc
 
+    if apply:
+        _abort_on_preflight(run_sync_preflight(config), console)
+
     try:
         with RommApiClient(config, no_cache=no_cache) as client:
             if apply:
@@ -656,6 +676,9 @@ def sync(config_path: Path | None, apply: bool, no_cache: bool) -> None:
     except ConfigError as exc:
         console.print(f"[red]Configuration error:[/red] {exc}")
         raise SystemExit(EXIT_CONFIG_ERROR) from exc
+
+    if apply:
+        _abort_on_preflight(run_sync_preflight(config), console)
 
     try:
         with RommApiClient(config, no_cache=no_cache) as client:
@@ -809,6 +832,9 @@ def save_sync(
     except ConfigError as exc:
         console.print(f"[red]Configuration error:[/red] {exc}")
         raise SystemExit(EXIT_CONFIG_ERROR) from exc
+
+    if apply:
+        _abort_on_preflight(run_save_preflight(config), console)
 
     is_interactive = sys.stdin.isatty() and sys.stdout.isatty()
     _cli_log.info(
@@ -1003,6 +1029,9 @@ def state_sync(
     except ConfigError as exc:
         console.print(f"[red]Configuration error:[/red] {exc}")
         raise SystemExit(EXIT_CONFIG_ERROR) from exc
+
+    if apply:
+        _abort_on_preflight(run_save_preflight(config), console)
 
     try:
         with RommApiClient(config, no_cache=no_cache) as client:
@@ -1561,6 +1590,166 @@ def setup(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# doctor
+# ---------------------------------------------------------------------------
+
+
+@main.command(help="Run diagnostics: check paths, connectivity, and service health.")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=None,
+    help="Override config file path.",
+)
+@click.option("--log", "write_log", is_flag=True, help="Also write the report to the log file.")
+def doctor(config_path: Path | None, write_log: bool) -> None:
+    import subprocess
+
+    from bifrost.logging_setup import _log_dir, setup_file_logging
+
+    console = Console()
+    resolved_path = config_path or default_config_path()
+    has_errors = False
+
+    if write_log:
+        setup_file_logging()
+    _log = logging.getLogger("bifrost.doctor")
+
+    def _ok(label: str, detail: str = "") -> None:
+        suffix = f"  {detail}" if detail else ""
+        console.print(f"  [green]✓[/green] {label}{suffix}")
+        if write_log:
+            _log.info("doctor OK: %s %s", label, detail)
+
+    def _warn(label: str, detail: str = "") -> None:
+        suffix = f"\n    {detail}" if detail else ""
+        console.print(f"  [yellow]⚠[/yellow] {label}{suffix}")
+        if write_log:
+            _log.warning("doctor WARN: %s %s", label, detail)
+
+    def _err(label: str, detail: str = "") -> None:
+        nonlocal has_errors
+        has_errors = True
+        suffix = f"\n    [dim]{detail}[/dim]" if detail else ""
+        console.print(f"  [red]✗[/red] {label}{suffix}")
+        if write_log:
+            _log.error("doctor ERR: %s %s", label, detail)
+
+    console.print("\n[bold]Bifrost Doctor[/bold]\n")
+
+    # ── 1. Config ────────────────────────────────────────────────────────
+    console.print("[bold]Config[/bold]")
+    try:
+        config = load_config(resolved_path)
+        _ok("Config file loaded", str(resolved_path))
+    except ConfigError as exc:
+        _err("Config file", str(exc))
+        console.print("\n[red]Cannot continue without a valid config.[/red]")
+        raise SystemExit(EXIT_CONFIG_ERROR) from exc
+
+    # ── 2. NAS paths ─────────────────────────────────────────────────────
+    console.print("\n[bold]NAS paths[/bold]")
+    nas_lib = Path(config.nas.library_path).expanduser()
+    nas_res = Path(config.nas.resources_path).expanduser()
+    for label, path in [("NAS library", nas_lib), ("NAS resources", nas_res)]:
+        if not path.exists():
+            _err(label, f"not found: {path}")
+        else:
+            try:
+                count = sum(1 for _ in path.iterdir())
+                if count == 0:
+                    _warn(label, f"exists but empty (dead mount?): {path}")
+                else:
+                    _ok(label, str(path))
+            except PermissionError:
+                _err(label, f"permission denied: {path}")
+
+    # ── 3. Local paths ───────────────────────────────────────────────────
+    console.print("\n[bold]Local paths[/bold]")
+    local_paths: list[tuple[str, str]] = [
+        ("ES-DE ROMs", config.esde.roms_path),
+        ("ES-DE gamelists", config.esde.gamelists_path),
+        ("BIOS", config.emudeck.bios_path),
+        ("Saves", config.emudeck.saves_path),
+        ("Media", config.emudeck.media_path),
+    ]
+    for label, raw in local_paths:
+        p = Path(raw).expanduser()
+        if p.exists():
+            _ok(label, str(p))
+        else:
+            _warn(label, f"does not exist yet (will be created on first sync): {p}")
+
+    # ── 4. Disk space ────────────────────────────────────────────────────
+    console.print("\n[bold]Disk space[/bold]")
+    try:
+        usage = shutil.disk_usage(Path.home())
+        free_gb = usage.free / (1024**3)
+        total_gb = usage.total / (1024**3)
+        detail = f"{free_gb:.1f} GB free / {total_gb:.1f} GB total"
+        if free_gb < 0.5:
+            _err("Home partition", detail + " — critically low!")
+        elif free_gb < 2:
+            _warn("Home partition", detail)
+        else:
+            _ok("Home partition", detail)
+    except OSError as exc:
+        _warn("Home partition", str(exc))
+
+    # ── 5. RomM connectivity ─────────────────────────────────────────────
+    console.print("\n[bold]RomM connectivity[/bold]")
+    try:
+        with RommApiClient(config) as client:
+            hb = client.heartbeat()
+        status_text = hb.status or hb.message or "ok"
+        _ok("Heartbeat", f"{config.romm.url} — {status_text}")
+    except AuthenticationError as exc:
+        _err("Authentication", str(exc))
+    except (NetworkError, ApiError) as exc:
+        _err("Connectivity", str(exc))
+
+    # ── 6. Systemd units ─────────────────────────────────────────────────
+    console.print("\n[bold]Systemd units[/bold]")
+    unit_names = [
+        "bifrost-sync.timer",
+        "bifrost-save-sync.timer",
+        "bifrost-save-watch.service",
+    ]
+    for unit in unit_names:
+        result = subprocess.run(
+            ["systemctl", "--user", "is-active", unit],
+            capture_output=True, text=True,
+        )
+        state = result.stdout.strip()
+        if state == "active":
+            _ok(unit, "active")
+        elif state == "inactive":
+            _warn(unit, "installed but not active — run: systemctl --user start " + unit)
+        else:
+            _warn(unit, f"state={state or 'not installed'}")
+
+    # ── 7. Recent log ────────────────────────────────────────────────────
+    console.print("\n[bold]Recent log (last 20 lines)[/bold]")
+    log_file = _log_dir() / "bifrost.log"
+    if log_file.exists():
+        lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        for line in lines[-20:]:
+            lvl = "red" if " ERROR " in line else "yellow" if " WARNING " in line else "dim"
+            console.print(f"  [{lvl}]{line}[/{lvl}]")
+    else:
+        console.print("  [dim]No log file yet.[/dim]")
+
+    # ── summary ──────────────────────────────────────────────────────────
+    console.print("")
+    if has_errors:
+        console.print("[red bold]Diagnostics found errors — see above.[/red bold]")
+        raise SystemExit(EXIT_CONFIG_ERROR)
+    console.print("[green bold]All checks passed.[/green bold]")
+    raise SystemExit(EXIT_OK)
+
+
 @main.command(
     name="watch-saves",
     help="Watch the local save directory and trigger save/state sync on changes (for systemd).",
@@ -1625,6 +1814,65 @@ def _systemd_user_dir() -> Path:
     return base / "systemd" / "user"
 
 
+def _detect_nas_mount_unit(nas_path: str) -> str | None:
+    """Try to find the systemd mount unit that covers nas_path.
+
+    Queries both user and system mounts, returns the unit name (e.g. 'mnt-nas.mount')
+    or None if not found.
+    """
+    import json
+    import subprocess
+
+    nas = Path(nas_path).expanduser().resolve()
+
+    for scope in (["--user"], []):
+        try:
+            out = subprocess.run(
+                ["systemctl", *scope, "list-units", "--type=mount", "--output=json", "--no-pager"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if out.returncode != 0:
+                continue
+            units = json.loads(out.stdout)
+        except (json.JSONDecodeError, subprocess.TimeoutExpired, FileNotFoundError):
+            continue
+
+        for entry in units:
+            unit_name: str = entry.get("unit", "")
+            if not unit_name.endswith(".mount"):
+                continue
+            # Derive the mount path from the unit name: unescape systemd path encoding
+            try:
+                escaped = unit_name[: -len(".mount")]
+                # systemd replaces / with - (except leading /)
+                # Use systemd-escape --unescape if available, else heuristic
+                unescape = subprocess.run(
+                    ["systemd-escape", "--unescape", "--path", escaped],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                )
+                mount_path = Path(unescape.stdout.strip()) if unescape.returncode == 0 else None
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                mount_path = None
+
+            if mount_path and (nas == mount_path or str(nas).startswith(str(mount_path) + "/")):
+                return unit_name
+
+    return None
+
+
+def _patch_unit_with_mount(content: str, mount_unit: str) -> str:
+    """Inject After=<mount_unit> and BindsTo=<mount_unit> into [Unit] section."""
+    marker = "After=network-online.target"
+    inject = f"After={mount_unit}\nBindsTo={mount_unit}\n"
+    if mount_unit in content:
+        return content  # already patched
+    return content.replace(marker, inject + marker)
+
+
 @main.group(name="systemd", help="Manage Bifrost systemd user services and timers.")
 def systemd_group() -> None:
     """Systemd unit management."""
@@ -1632,7 +1880,22 @@ def systemd_group() -> None:
 
 @systemd_group.command(name="install", help="Install and enable Bifrost systemd units.")
 @click.option("--dry-run", is_flag=True, help="Show what would be done without changing anything.")
-def systemd_install(dry_run: bool) -> None:
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=None,
+    help="Override config file path (used to detect NAS mount unit).",
+)
+@click.option(
+    "--nas-mount",
+    "nas_mount_unit",
+    default=None,
+    help="Systemd mount unit for the NAS (e.g. mnt-nas.mount). Auto-detected if omitted.",
+)
+def systemd_install(dry_run: bool, config_path: Path | None, nas_mount_unit: str | None) -> None:
+    import subprocess
+
     console = Console()
     src_dir = _systemd_data_dir()
     dst_dir = _systemd_user_dir()
@@ -1641,6 +1904,33 @@ def systemd_install(dry_run: bool) -> None:
         console.print(f"[red]Unit templates not found:[/red] {src_dir}")
         raise SystemExit(EXIT_CONFIG_ERROR)
 
+    # ── NAS mount unit detection ──────────────────────────────────────────
+    if nas_mount_unit is None:
+        resolved_path = config_path or default_config_path()
+        try:
+            cfg = load_config(resolved_path)
+            nas_mount_unit = _detect_nas_mount_unit(cfg.nas.library_path)
+        except ConfigError:
+            cfg = None
+            nas_mount_unit = None
+
+        if nas_mount_unit:
+            console.print(f"[green]Detected NAS mount unit:[/green] {nas_mount_unit}")
+        elif sys.stdin.isatty():
+            console.print(
+                "[yellow]Could not auto-detect NAS mount unit.[/yellow]\n"
+                "  Service files will use network-online.target only.\n"
+                "  If your NAS is mounted via systemd, provide the unit name with --nas-mount\n"
+                "  (e.g. --nas-mount mnt-nas.mount). You can find it with:\n"
+                "    systemctl list-units --type=mount"
+            )
+        else:
+            console.print(
+                "[yellow]NAS mount unit not detected — "
+                "services will depend on network only.[/yellow]"
+            )
+
+    # ── copy (and optionally patch) unit files ───────────────────────────
     if not dry_run:
         dst_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1650,13 +1940,17 @@ def systemd_install(dry_run: bool) -> None:
         if not src.exists():
             console.print(f"[yellow]Missing template:[/yellow] {unit} — skipping")
             continue
-        if dry_run:
-            console.print(f"[cyan]would copy[/cyan]  {src} → {dst}")
-        else:
-            import shutil
 
-            shutil.copy2(src, dst)
-            console.print(f"[green]copied[/green]  {dst}")
+        content = src.read_text(encoding="utf-8")
+        if nas_mount_unit and unit.endswith(".service"):
+            content = _patch_unit_with_mount(content, nas_mount_unit)
+
+        if dry_run:
+            patch_note = f" [dim](+{nas_mount_unit})[/dim]" if nas_mount_unit else ""
+            console.print(f"[cyan]would write[/cyan]  {dst}{patch_note}")
+        else:
+            dst.write_text(content, encoding="utf-8")
+            console.print(f"[green]written[/green]  {dst}")
 
     if dry_run:
         for unit in _TIMERS + _PERSISTENT_SERVICES:
@@ -1664,9 +1958,7 @@ def systemd_install(dry_run: bool) -> None:
         console.print("\n[cyan]Dry run — no changes made.[/cyan]")
         raise SystemExit(EXIT_OK)
 
-    # Reload unit definitions then enable + start timers and watch service
-    import subprocess
-
+    # ── reload + enable ───────────────────────────────────────────────────
     def _ctl(*args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["systemctl", "--user", *args], capture_output=True, text=True
