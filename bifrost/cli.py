@@ -774,7 +774,11 @@ def sync(config_path: Path | None, apply: bool, no_cache: bool) -> None:
     details.add_column("Target")
     details.add_column("Detail")
 
-    preview_results = sorted(results, key=lambda item: (item.action != "error", item.action))
+    _SYNC_ACTION_PRIORITY = {
+        "error": 0, "conflict": 1, "create": 2, "replace": 3, "remove": 4,
+        "broken": 5, "missing-target": 6, "ok": 7, "skip": 8,
+    }
+    preview_results = sorted(results, key=lambda r: _SYNC_ACTION_PRIORITY.get(r.action, 9))
     max_rows = 25
     for result in preview_results[:max_rows]:
         details.add_row(
@@ -960,7 +964,8 @@ def save_sync(
     operations_table.add_column("ROM")
     operations_table.add_column("Save")
     operations_table.add_column("Reason")
-    for operation in selected_operations[:25]:
+    _SAVE_ACTION_PRIORITY = {"conflict": 0, "download": 1, "upload": 2, "skip": 3}
+    for operation in sorted(selected_operations, key=lambda o: _SAVE_ACTION_PRIORITY.get(o.action, 9))[:25]:
         operations_table.add_row(
             operation.action,
             str(operation.rom_id),
@@ -1117,7 +1122,8 @@ def state_sync(
     operations.add_column("ROM")
     operations.add_column("State")
     operations.add_column("Reason")
-    for operation in selected_operations[:25]:
+    _STATE_ACTION_PRIORITY = {"conflict": 0, "download": 1, "upload": 2, "skip": 3}
+    for operation in sorted(selected_operations, key=lambda o: _STATE_ACTION_PRIORITY.get(o.action, 9))[:25]:
         operations.add_row(
             operation.action,
             str(operation.rom_id),
