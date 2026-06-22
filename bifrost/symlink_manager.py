@@ -305,8 +305,12 @@ def apply_operation(op: SymlinkOperation) -> OperationResult:
     if action in {"ok", "conflict", "broken"}:
         return eval_result
 
-    # Don't (re-)create a symlink if the NAS parent directory is reachable but the target file is gone.
-    if not op.target.exists() and op.target.parent.is_dir():
+    # Don't create a symlink when the NAS is reachable but the target is absent.
+    # Check both parent and grandparent: an asset type dir (parent) may not exist even
+    # when the NAS is up — the grandparent (ROM asset root) is enough to confirm reachability.
+    if not op.target.exists() and (
+        op.target.parent.is_dir() or op.target.parent.parent.is_dir()
+    ):
         return OperationResult(op, "missing-target", "NAS target does not exist")
 
     parent = op.destination.parent

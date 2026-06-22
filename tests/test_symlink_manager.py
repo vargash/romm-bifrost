@@ -258,3 +258,39 @@ def test_apply_operation_returns_missing_target_when_nas_file_absent(tmp_path: P
 
     assert result.action == "missing-target"
     assert not destination.exists() and not destination.is_symlink()
+
+
+def test_apply_operation_returns_missing_target_when_asset_type_dir_absent(tmp_path: Path):
+    """Asset type dir missing (e.g. ROM has no 'manual' on NAS) → missing-target, no broken symlink."""
+    # ROM asset root exists, but the specific asset type subdir does not.
+    rom_asset_root = tmp_path / "res" / "roms" / "293" / "3736"
+    rom_asset_root.mkdir(parents=True)
+    # Target: .../3736/manual/3736.pdf — 'manual/' doesn't exist.
+    target = rom_asset_root / "manual" / "3736.pdf"
+
+    media_dir = tmp_path / "media" / "cps1" / "manuals"
+    media_dir.mkdir(parents=True)
+    destination = media_dir / "mbombrd.pdf"
+
+    op = SymlinkOperation(category="asset", destination=destination, target=target, is_dir=False)
+    result = apply_operation(op)
+
+    assert result.action == "missing-target"
+    assert not destination.is_symlink()
+
+
+def test_apply_operation_creates_symlink_when_nas_asset_root_absent(tmp_path: Path):
+    """If even the ROM asset root doesn't exist (NAS down), create symlink optimistically."""
+    # Neither the asset type dir nor the ROM asset root exist (NAS unreachable).
+    target = tmp_path / "res" / "roms" / "293" / "9999" / "cover" / "big.png"
+
+    media_dir = tmp_path / "media" / "cps1" / "covers"
+    media_dir.mkdir(parents=True)
+    destination = media_dir / "UnknownGame.png"
+
+    op = SymlinkOperation(category="asset", destination=destination, target=target, is_dir=False)
+    result = apply_operation(op)
+
+    # NAS totally unreachable → optimistically create the symlink (will resolve when NAS is back).
+    assert result.action == "create"
+    assert destination.is_symlink()
