@@ -38,17 +38,17 @@ class NasConfig(BaseModel):
 class EsdeConfig(BaseModel):
     """ES-DE directories."""
 
-    roms_path: str = "~/ROMs"
-    gamelists_path: str = "~/.emulationstation/gamelists"
-    custom_systems_path: str = "~/.emulationstation/custom_systems"
+    roms_path: str = "~/Emulation/roms"
+    gamelists_path: str = "~/ES-DE/gamelists"
+    custom_systems_path: str = "~/ES-DE/custom_systems"
 
 
 class EmudeckConfig(BaseModel):
     """EmuDeck directories."""
 
-    bios_path: str = "~/BIOS"
-    media_path: str = "/Emulation/tools/downloaded_media"
-    saves_path: str = "~/saves"
+    bios_path: str = "~/Emulation/bios"
+    media_path: str = "~/Emulation/tools/downloaded_media"
+    saves_path: str = "~/Emulation/saves"
 
 
 class AssetsConfig(BaseModel):
@@ -80,6 +80,7 @@ class AssetsConfig(BaseModel):
 class SyncConfig(BaseModel):
     """Save-sync defaults."""
 
+    save_sync_enabled: bool = True
     conflict_strategy: str = "ask"
     sync_mode: str = "push_pull"
     parallel_workers: int = Field(default=16, ge=1)
