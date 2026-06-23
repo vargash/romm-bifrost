@@ -1038,7 +1038,10 @@ def save_sync(
     raise SystemExit(EXIT_OK)
 
 
-@main.command(name="state-sync", help="Preview/apply RomM state sync from local state files.")
+# DISABILITATO (Fase 0 — state sync escluso, non deve essere richiamabile).
+# Comando deregistrato dalla CLI: la funzione resta definita ma non è collegata al gruppo `main`,
+# quindi `bifrost state-sync` restituisce "No such command". Per riattivarlo, decommentare la riga.
+# @main.command(name="state-sync", help="Preview/apply RomM state sync from local state files.")
 @click.option(
     "--config",
     "config_path",

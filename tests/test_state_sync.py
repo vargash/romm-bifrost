@@ -4,12 +4,17 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 from click.testing import CliRunner
 
 from bifrost.api.client import RommApiClient
 from bifrost.cli import main
 from bifrost.config import AppConfig, EmudeckConfig, RommConfig
 from bifrost.state_sync import build_state_sync_preview
+
+# Fase 0: state sync escluso, comando CLI `state-sync` deregistrato.
+# I test che invocano la CLI sono marcati skip (non rimossi) finché resta disabilitato.
+_STATE_CLI_DISABLED = "state-sync CLI deregistrato (Fase 0 — state sync escluso)"
 
 
 def make_config(tmp_path: Path) -> AppConfig:
@@ -84,6 +89,7 @@ def test_state_sync_preview_ignores_state_screenshot(tmp_path: Path) -> None:
     client.close()
 
 
+@pytest.mark.skip(reason=_STATE_CLI_DISABLED)
 def test_state_sync_apply_only_file_executes_single_upload(monkeypatch, tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     saves_root = tmp_path / "saves"
@@ -160,6 +166,7 @@ saves_path = "{saves_root}"
     assert "State Sync Execution" in result.output
 
 
+@pytest.mark.skip(reason=_STATE_CLI_DISABLED)
 def test_state_sync_apply_fallback_put_when_post_fails(monkeypatch, tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     saves_root = tmp_path / "saves"

@@ -21,10 +21,11 @@ _POLL_INTERVAL_SECONDS = 30
 
 
 def _run_sync(bifrost_bin: str) -> None:
-    """Run save-sync and state-sync --apply, log outcome."""
+    """Run save-sync --apply, log outcome."""
     for cmd_args in (
         [bifrost_bin, "save-sync", "--apply"],
-        [bifrost_bin, "state-sync", "--apply"],
+        # DISABILITATO (Fase 0 — state sync escluso): il watcher non invoca più state-sync.
+        # [bifrost_bin, "state-sync", "--apply"],
     ):
         label = " ".join(cmd_args[1:])
         log.info("watcher: triggering %s", label)
