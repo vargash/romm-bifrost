@@ -101,6 +101,7 @@ pip install -e .[dev]
 
 For a full, reproducible setup from fresh clone to passing checks, see [`docs/development_setup.md`](docs/development_setup.md).
 
+
 ---
 
 ## Setup
@@ -326,6 +327,8 @@ Key sections relevant to sync:
 conflict_strategy = "ask"
 # Sync mode: push_pull | push
 sync_mode = "push_pull"
+# Worker threads for parallel symlink evaluation/apply (reduce if NAS is overloaded)
+parallel_workers = 16
 
 [cache]
 enabled = true
@@ -356,7 +359,8 @@ ttl_firmware_hours = 24
 | `install-deck.sh` — one-shot Steam Deck installer | ✅ |
 | Watch mode for assets / gamelist auto-rebuild | ❌ planned |
 | Structured metrics / JSON export | ❌ planned |
-| API request batching + parallel symlink creation | ❌ planned |
+| Parallel symlink evaluation/apply (ThreadPoolExecutor, configurable workers) | ✅ |
+| API request batching | ❌ planned |
 | Partial sync resume on failure | ❌ planned |
 
 ---

@@ -67,5 +67,5 @@ config.toml
 logs/
 
 # Temporary local artifacts
-docs/
+notes/
 *.tgz
