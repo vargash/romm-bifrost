@@ -72,12 +72,45 @@ success "Python $PY_VER — OK"
 # ── pipx ───────────────────────────────────────────────────────────────────
 info "Checking pipx..."
 if ! command -v pipx &>/dev/null; then
-  warn "pipx not found — installing via pip --user..."
-  python3 -m pip install --user --quiet pipx
-  python3 -m pipx ensurepath --force
+  warn "pipx not found — attempting install..."
+  _pipx_ok=0
+
+  # 1) system package manager (most reliable, avoids the pip-not-found problem)
+  if command -v apt-get &>/dev/null; then
+    info "Detected apt — running: sudo apt-get install -y pipx"
+    sudo apt-get install -y pipx 2>/dev/null && _pipx_ok=1
+    if [[ $_pipx_ok -eq 0 ]]; then
+      info "pipx package not found in apt — installing python3-pip first..."
+      sudo apt-get install -y python3-pip 2>/dev/null && \
+        python3 -m pip install --user --quiet pipx && _pipx_ok=1
+    fi
+  elif command -v pacman &>/dev/null; then
+    info "Detected pacman — running: sudo pacman -S --noconfirm python-pipx"
+    sudo pacman -S --noconfirm python-pipx 2>/dev/null && _pipx_ok=1
+  elif command -v dnf &>/dev/null; then
+    info "Detected dnf — running: sudo dnf install -y pipx"
+    sudo dnf install -y pipx 2>/dev/null && _pipx_ok=1
+  fi
+
+  # 2) fallback: bootstrap pip via ensurepip, then pip install pipx
+  if [[ $_pipx_ok -eq 0 ]]; then
+    warn "Package manager install failed — trying python3 -m ensurepip..."
+    if python3 -m ensurepip --upgrade 2>/dev/null; then
+      python3 -m pip install --user --quiet pipx && _pipx_ok=1
+    fi
+  fi
+
+  if [[ $_pipx_ok -eq 0 ]]; then
+    die "Could not install pipx automatically. Install it manually, then re-run:
+  Debian/Ubuntu : sudo apt-get install pipx
+  Arch/Manjaro  : sudo pacman -S python-pipx
+  Fedora        : sudo dnf install pipx"
+  fi
+
+  python3 -m pipx ensurepath --force 2>/dev/null || true
   export PATH="$HOME/.local/bin:$PATH"
   if ! command -v pipx &>/dev/null; then
-    die "pipx install failed. Try: python3 -m pip install --user pipx"
+    die "pipx installed but not found in PATH. Open a new terminal and re-run the installer."
   fi
 fi
 success "pipx — OK"
