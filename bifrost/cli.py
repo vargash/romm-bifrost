@@ -8,6 +8,7 @@ import platform as sys_platform
 import re
 import shutil
 import sys
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -47,7 +48,7 @@ from bifrost.symlink_manager import (
     RemoveSymlinkOperation,
     apply_operation,
     apply_remove_operation,
-    evaluate_operation,
+    evaluate_operations,
     evaluate_remove_operation,
     plan_stale_removals,
     plan_symlink_operations,
@@ -707,6 +708,7 @@ def sync(config_path: Path | None, apply: bool, no_cache: bool) -> None:
     remove_ops = plan_stale_removals(config, ops)
     all_ops: list[Any] = list(ops) + list(m3u_ops) + list(remove_ops)
 
+    workers = config.sync.parallel_workers
     results: list[Any]
     if apply:
         if not all_ops:
@@ -722,16 +724,24 @@ def sync(config_path: Path | None, apply: bool, no_cache: bool) -> None:
                 console=console,
             ) as progress:
                 task_id = progress.add_task("Applying sync", total=len(all_ops))
-                for op in all_ops:
-                    if isinstance(op, M3uOperation):
-                        results.append(apply_m3u_operation(op))
-                    elif isinstance(op, RemoveSymlinkOperation):
-                        results.append(apply_remove_operation(op))
-                    else:
-                        results.append(apply_operation(op))
-                    progress.advance(task_id)
+                pending: list[Future[Any]] = []
+                with ThreadPoolExecutor(max_workers=workers) as ex:
+                    for op in all_ops:
+                        if isinstance(op, M3uOperation):
+                            results.append(apply_m3u_operation(op))
+                            progress.advance(task_id)
+                        elif isinstance(op, RemoveSymlinkOperation):
+                            results.append(apply_remove_operation(op))
+                            progress.advance(task_id)
+                        else:
+                            pending.append(ex.submit(apply_operation, op))
+                    for future in as_completed(pending):
+                        results.append(future.result())
+                        progress.advance(task_id)
         mode_label = "apply"
     else:
+        sym_ops = [op for op in all_ops if not isinstance(op, (M3uOperation, RemoveSymlinkOperation))]
+        sym_results = iter(evaluate_operations(sym_ops, workers=workers))
         results = []
         for op in all_ops:
             if isinstance(op, M3uOperation):
@@ -739,7 +749,7 @@ def sync(config_path: Path | None, apply: bool, no_cache: bool) -> None:
             elif isinstance(op, RemoveSymlinkOperation):
                 results.append(evaluate_remove_operation(op))
             else:
-                results.append(evaluate_operation(op))
+                results.append(next(sym_results))
         mode_label = "dry-run"
 
     counts: dict[str, int] = {}

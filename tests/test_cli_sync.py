@@ -13,6 +13,9 @@ def test_sync_dry_run_uses_plan_and_prints_summary(monkeypatch, tmp_path: Path):
         class romm:
             timeout_seconds = 10.0
 
+        class sync:
+            parallel_workers = 1
+
     class DummyClient:
         def __init__(self, config, **kwargs):
             self.config = config
@@ -41,7 +44,7 @@ def test_sync_dry_run_uses_plan_and_prints_summary(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(cli, "plan_symlink_operations", lambda _cfg, _client: [DummyOp()])
     monkeypatch.setattr(cli, "plan_m3u_operations", lambda _cfg, _client: [])
     monkeypatch.setattr(cli, "plan_stale_removals", lambda _cfg, _ops: [])
-    monkeypatch.setattr(cli, "evaluate_operation", lambda _op: DummyResult("create"))
+    monkeypatch.setattr(cli, "evaluate_operations", lambda ops, workers=1: [DummyResult("create") for _ in ops])
 
     runner = CliRunner()
     result = runner.invoke(cli.main, ["sync", "--config", str(config_path)])
@@ -58,6 +61,9 @@ def test_sync_apply_calls_apply_operations(monkeypatch, tmp_path: Path):
     class DummyConfig:
         class romm:
             timeout_seconds = 10.0
+
+        class sync:
+            parallel_workers = 1
 
     class DummyClient:
         def __init__(self, config, **kwargs):

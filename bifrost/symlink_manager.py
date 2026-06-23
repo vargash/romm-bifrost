@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -319,14 +320,28 @@ def evaluate_remove_operation(op: RemoveSymlinkOperation) -> OperationResult:
     return OperationResult(op, "remove")
 
 
-def apply_operations(ops: list[SymlinkOperation]) -> list[OperationResult]:
-    """Apply operations and continue on per-item filesystem failures."""
+def evaluate_operations(ops: list[SymlinkOperation], workers: int = 16) -> list[OperationResult]:
+    """Evaluate operations in parallel (NAS stat calls release the GIL).
 
-    results: list[OperationResult] = []
-    for op in ops:
-        results.append(apply_operation(op))
+    Results are returned in the same order as ops.
+    Falls back to serial execution when workers=1 or ops has ≤1 item.
+    """
+    if workers <= 1 or len(ops) <= 1:
+        return [evaluate_operation(op) for op in ops]
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        return list(ex.map(evaluate_operation, ops))
 
-    return results
+
+def apply_operations(ops: list[SymlinkOperation], workers: int = 16) -> list[OperationResult]:
+    """Apply operations in parallel, continuing on per-item failures.
+
+    Results are returned in the same order as ops.
+    Falls back to serial execution when workers=1 or ops has ≤1 item.
+    """
+    if workers <= 1 or len(ops) <= 1:
+        return [apply_operation(op) for op in ops]
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        return list(ex.map(apply_operation, ops))
 
 
 def apply_operation(op: SymlinkOperation) -> OperationResult:

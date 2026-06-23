@@ -39,6 +39,7 @@ videos = "videos"
 [sync]
 conflict_strategy = "ask"
 sync_mode = "push_pull"
+parallel_workers = 16   # threads for parallel symlink evaluation/apply (reduce if NAS is overloaded)
 
 [output]
 format = "table"

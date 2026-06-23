@@ -82,6 +82,7 @@ class SyncConfig(BaseModel):
 
     conflict_strategy: str = "ask"
     sync_mode: str = "push_pull"
+    parallel_workers: int = Field(default=16, ge=1)
 
 
 class OutputConfig(BaseModel):
