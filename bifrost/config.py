@@ -23,6 +23,7 @@ class RommConfig(BaseModel):
     url: str
     client_token: str = Field(min_length=5)
     device_id: str = ""
+    timeout_seconds: float = Field(default=10.0, ge=1.0)
 
 
 class NasConfig(BaseModel):

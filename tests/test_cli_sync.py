@@ -10,7 +10,8 @@ def test_sync_dry_run_uses_plan_and_prints_summary(monkeypatch, tmp_path: Path):
     config_path.write_text("[romm]\nbase_url='http://localhost'\napi_token='token'\n")
 
     class DummyConfig:
-        pass
+        class romm:
+            timeout_seconds = 10.0
 
     class DummyClient:
         def __init__(self, config, **kwargs):
@@ -55,7 +56,8 @@ def test_sync_apply_calls_apply_operations(monkeypatch, tmp_path: Path):
     config_path.write_text("[romm]\nbase_url='http://localhost'\napi_token='token'\n")
 
     class DummyConfig:
-        pass
+        class romm:
+            timeout_seconds = 10.0
 
     class DummyClient:
         def __init__(self, config, **kwargs):

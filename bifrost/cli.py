@@ -452,7 +452,7 @@ def status(config_path: Path | None) -> None:
         raise SystemExit(EXIT_CONFIG_ERROR) from exc
 
     try:
-        with RommApiClient(config) as client:
+        with RommApiClient(config, timeout_seconds=config.romm.timeout_seconds) as client:
             heartbeat = client.heartbeat()
             stats = client.stats(include_platform_stats=False)
     except AuthenticationError as exc:
@@ -502,7 +502,7 @@ def scan(config_path: Path | None) -> None:
         raise SystemExit(EXIT_CONFIG_ERROR) from exc
 
     try:
-        with RommApiClient(config) as client:
+        with RommApiClient(config, timeout_seconds=config.romm.timeout_seconds) as client:
             stats = client.stats(include_platform_stats=False)
             unmatched_roms = client.roms_count(matched=False)
             missing_roms = client.roms_count(missing=True)
@@ -559,7 +559,7 @@ def gamelist(config_path: Path | None, apply: bool, no_cache: bool) -> None:
         _abort_on_preflight(run_sync_preflight(config), console)
 
     try:
-        with RommApiClient(config, no_cache=no_cache) as client:
+        with RommApiClient(config, timeout_seconds=config.romm.timeout_seconds, no_cache=no_cache) as client:
             if apply:
                 apply_results = apply_gamelist_plan(config, client)
                 rows = [
@@ -694,7 +694,7 @@ def sync(config_path: Path | None, apply: bool, no_cache: bool) -> None:
         _abort_on_preflight(run_sync_preflight(config), console)
 
     try:
-        with RommApiClient(config, no_cache=no_cache) as client:
+        with RommApiClient(config, timeout_seconds=config.romm.timeout_seconds, no_cache=no_cache) as client:
             ops = plan_symlink_operations(config, client)
             m3u_ops = plan_m3u_operations(config, client)
     except AuthenticationError as exc:
@@ -883,7 +883,7 @@ def save_sync(
     )
 
     try:
-        with RommApiClient(config, no_cache=no_cache) as client:
+        with RommApiClient(config, timeout_seconds=config.romm.timeout_seconds, no_cache=no_cache) as client:
             preview = build_save_sync_preview(
                 config,
                 client,
@@ -1073,7 +1073,7 @@ def state_sync(
         _abort_on_preflight(run_save_preflight(config), console)
 
     try:
-        with RommApiClient(config, no_cache=no_cache) as client:
+        with RommApiClient(config, timeout_seconds=config.romm.timeout_seconds, no_cache=no_cache) as client:
             preview = build_state_sync_preview(
                 config,
                 client,
@@ -1294,7 +1294,7 @@ def device_enroll(
     sync_mode_value = (sync_mode or Prompt.ask("Sync mode", default=config.sync.sync_mode)).strip()
 
     try:
-        with RommApiClient(config) as client:
+        with RommApiClient(config, timeout_seconds=config.romm.timeout_seconds) as client:
             response = client.register_device(
                 DeviceCreatePayload(
                     name=device_name_value,
@@ -1608,7 +1608,7 @@ def setup(
 
     if not skip_verify:
         try:
-            with RommApiClient(config) as client:
+            with RommApiClient(config, timeout_seconds=config.romm.timeout_seconds) as client:
                 heartbeat = client.heartbeat()
         except AuthenticationError as exc:
             console.print(f"[red]Authentication error:[/red] {exc}")
@@ -1741,7 +1741,7 @@ def doctor(config_path: Path | None, write_log: bool) -> None:
     # ── 5. RomM connectivity ─────────────────────────────────────────────
     console.print("\n[bold]RomM connectivity[/bold]")
     try:
-        with RommApiClient(config) as client:
+        with RommApiClient(config, timeout_seconds=config.romm.timeout_seconds) as client:
             hb = client.heartbeat()
         status_text = hb.status or hb.message or "ok"
         _ok("Heartbeat", f"{config.romm.url} — {status_text}")

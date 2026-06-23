@@ -13,7 +13,8 @@ def test_gamelist_dry_run_outputs_summary(monkeypatch, tmp_path: Path):
     )
 
     class DummyConfig:
-        pass
+        class romm:
+            timeout_seconds = 10.0
 
     class DummyClient:
         def __init__(self, config, **kwargs):
@@ -54,7 +55,8 @@ def test_gamelist_apply_outputs_written_count(monkeypatch, tmp_path: Path):
     )
 
     class DummyConfig:
-        pass
+        class romm:
+            timeout_seconds = 10.0
 
     class DummyClient:
         def __init__(self, config, **kwargs):
