@@ -28,6 +28,7 @@ from bifrost.config import (
     EsdeConfig,
     NasConfig,
     RommConfig,
+    SyncConfig,
     default_config_path,
     load_config,
     save_config,
@@ -1394,6 +1395,10 @@ def device_enroll(
 @click.option("--nas-library-path", type=str, default=None, help="NAS RomM library root path.")
 @click.option("--nas-resources-path", type=str, default=None, help="NAS RomM resources root path.")
 @click.option("--esde-roms-path", type=str, default=None, help="ES-DE ROMs destination path.")
+@click.option("--esde-gamelists-path", type=str, default=None, help="ES-DE gamelists path.")
+@click.option(
+    "--esde-custom-systems-path", type=str, default=None, help="ES-DE custom_systems path."
+)
 @click.option("--emudeck-bios-path", type=str, default=None, help="EmuDeck BIOS destination path.")
 @click.option(
     "--emudeck-media-path",
@@ -1401,6 +1406,7 @@ def device_enroll(
     default=None,
     help="EmuDeck media destination path for asset symlinks.",
 )
+@click.option("--emudeck-saves-path", type=str, default=None, help="EmuDeck saves root path.")
 def setup(
     romm_url: str | None,
     client_token: str | None,
@@ -1412,8 +1418,11 @@ def setup(
     nas_library_path: str | None,
     nas_resources_path: str | None,
     esde_roms_path: str | None,
+    esde_gamelists_path: str | None,
+    esde_custom_systems_path: str | None,
     emudeck_bios_path: str | None,
     emudeck_media_path: str | None,
+    emudeck_saves_path: str | None,
 ) -> None:
     """Run setup using wizard defaults or CLI options."""
 
@@ -1440,8 +1449,11 @@ def setup(
             nas_library_path,
             nas_resources_path,
             esde_roms_path,
+            esde_gamelists_path,
+            esde_custom_systems_path,
             emudeck_bios_path,
             emudeck_media_path,
+            emudeck_saves_path,
             skip_verify,
         ]
     )
@@ -1499,6 +1511,14 @@ def setup(
                 "ES-DE ROMs path",
                 default=base_config.esde.roms_path,
             )
+            esde_gamelists_value = Prompt.ask(
+                "ES-DE gamelists path",
+                default=base_config.esde.gamelists_path,
+            )
+            esde_custom_systems_value = Prompt.ask(
+                "ES-DE custom_systems path",
+                default=base_config.esde.custom_systems_path,
+            )
             emudeck_bios_value = Prompt.ask(
                 "EmuDeck BIOS path",
                 default=base_config.emudeck.bios_path,
@@ -1507,12 +1527,24 @@ def setup(
                 "EmuDeck media path",
                 default=base_config.emudeck.media_path,
             )
+            emudeck_saves_value = Prompt.ask(
+                "EmuDeck saves path",
+                default=base_config.emudeck.saves_path,
+            )
         else:
             nas_library_value = base_config.nas.library_path
             nas_resources_value = base_config.nas.resources_path
             esde_roms_value = base_config.esde.roms_path
+            esde_gamelists_value = base_config.esde.gamelists_path
+            esde_custom_systems_value = base_config.esde.custom_systems_path
             emudeck_bios_value = base_config.emudeck.bios_path
             emudeck_media_value = base_config.emudeck.media_path
+            emudeck_saves_value = base_config.emudeck.saves_path
+
+        save_sync_enabled_value = Confirm.ask(
+            "Configure save sync with RomM",
+            default=base_config.sync.save_sync_enabled,
+        )
     else:
         url_value = (romm_url or Prompt.ask("RomM URL", default=default_url)).strip().rstrip("/")
 
@@ -1564,6 +1596,19 @@ def setup(
                 if esde_roms_path is not None
                 else Prompt.ask("ES-DE ROMs path", default=base_config.esde.roms_path)
             )
+            esde_gamelists_value = (
+                esde_gamelists_path
+                if esde_gamelists_path is not None
+                else Prompt.ask("ES-DE gamelists path", default=base_config.esde.gamelists_path)
+            )
+            esde_custom_systems_value = (
+                esde_custom_systems_path
+                if esde_custom_systems_path is not None
+                else Prompt.ask(
+                    "ES-DE custom_systems path",
+                    default=base_config.esde.custom_systems_path,
+                )
+            )
             emudeck_bios_value = (
                 emudeck_bios_path
                 if emudeck_bios_path is not None
@@ -1574,12 +1619,23 @@ def setup(
                 if emudeck_media_path is not None
                 else Prompt.ask("EmuDeck media path", default=base_config.emudeck.media_path)
             )
+            emudeck_saves_value = (
+                emudeck_saves_path
+                if emudeck_saves_path is not None
+                else Prompt.ask("EmuDeck saves path", default=base_config.emudeck.saves_path)
+            )
         else:
             nas_library_value = nas_library_path or base_config.nas.library_path
             nas_resources_value = nas_resources_path or base_config.nas.resources_path
             esde_roms_value = esde_roms_path or base_config.esde.roms_path
+            esde_gamelists_value = esde_gamelists_path or base_config.esde.gamelists_path
+            esde_custom_systems_value = (
+                esde_custom_systems_path or base_config.esde.custom_systems_path
+            )
             emudeck_bios_value = emudeck_bios_path or base_config.emudeck.bios_path
             emudeck_media_value = emudeck_media_path or base_config.emudeck.media_path
+            emudeck_saves_value = emudeck_saves_path or base_config.emudeck.saves_path
+        save_sync_enabled_value = base_config.sync.save_sync_enabled
 
     if not url_value:
         console.print("[red]Configuration error:[/red] RomM URL cannot be empty.")
@@ -1603,16 +1659,21 @@ def setup(
         ),
         esde=EsdeConfig(
             roms_path=esde_roms_value,
-            gamelists_path=base_config.esde.gamelists_path,
-            custom_systems_path=base_config.esde.custom_systems_path,
+            gamelists_path=esde_gamelists_value,
+            custom_systems_path=esde_custom_systems_value,
         ),
         emudeck=EmudeckConfig(
             bios_path=emudeck_bios_value,
             media_path=emudeck_media_value,
-            saves_path=base_config.emudeck.saves_path,
+            saves_path=emudeck_saves_value,
         ),
         assets=base_config.assets,
-        sync=base_config.sync,
+        sync=SyncConfig(
+            save_sync_enabled=save_sync_enabled_value,
+            conflict_strategy=base_config.sync.conflict_strategy,
+            sync_mode=base_config.sync.sync_mode,
+            parallel_workers=base_config.sync.parallel_workers,
+        ),
         output=base_config.output,
     )
 
@@ -1943,7 +2004,18 @@ def systemd_group() -> None:
     default=None,
     help="Systemd mount unit for the NAS (e.g. mnt-nas.mount). Auto-detected if omitted.",
 )
-def systemd_install(dry_run: bool, config_path: Path | None, nas_mount_unit: str | None) -> None:
+@click.option(
+    "--no-save-sync",
+    "no_save_sync",
+    is_flag=True,
+    help="Skip installing save-sync and save-watch units (use when save sync is disabled).",
+)
+def systemd_install(
+    dry_run: bool,
+    config_path: Path | None,
+    nas_mount_unit: str | None,
+    no_save_sync: bool,
+) -> None:
     import subprocess
 
     console = Console()
@@ -1981,10 +2053,26 @@ def systemd_install(dry_run: bool, config_path: Path | None, nas_mount_unit: str
             )
 
     # ── copy (and optionally patch) unit files ───────────────────────────
+    _SAVE_SYNC_UNITS = {
+        "bifrost-save-sync.service",
+        "bifrost-save-sync.timer",
+        "bifrost-save-watch.service",
+    }
+    units_to_install = [u for u in _UNIT_FILES if not (no_save_sync and u in _SAVE_SYNC_UNITS)]
+    active_timers = [t for t in _TIMERS if not (no_save_sync and t in _SAVE_SYNC_UNITS)]
+    active_services = [
+        s for s in _PERSISTENT_SERVICES if not (no_save_sync and s in _SAVE_SYNC_UNITS)
+    ]
+
+    if no_save_sync:
+        console.print(
+            "[yellow]--no-save-sync:[/yellow] skipping save-sync and save-watch units."
+        )
+
     if not dry_run:
         dst_dir.mkdir(parents=True, exist_ok=True)
 
-    for unit in _UNIT_FILES:
+    for unit in units_to_install:
         src = src_dir / unit
         dst = dst_dir / unit
         if not src.exists():
@@ -2003,7 +2091,7 @@ def systemd_install(dry_run: bool, config_path: Path | None, nas_mount_unit: str
             console.print(f"[green]written[/green]  {dst}")
 
     if dry_run:
-        for unit in _TIMERS + _PERSISTENT_SERVICES:
+        for unit in active_timers + active_services:
             console.print(f"[cyan]would enable + start[/cyan]  {unit}")
         console.print("\n[cyan]Dry run — no changes made.[/cyan]")
         raise SystemExit(EXIT_OK)
@@ -2018,7 +2106,7 @@ def systemd_install(dry_run: bool, config_path: Path | None, nas_mount_unit: str
     if reload.returncode != 0:
         console.print(f"[yellow]daemon-reload warning:[/yellow] {reload.stderr.strip()}")
 
-    for unit in _TIMERS + _PERSISTENT_SERVICES:
+    for unit in active_timers + active_services:
         enable = _ctl("enable", "--now", unit)
         if enable.returncode == 0:
             console.print(f"[green]enabled + started[/green]  {unit}")

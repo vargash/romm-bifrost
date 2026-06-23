@@ -150,10 +150,40 @@ else
   info "Run 'bifrost setup' any time to change settings."
 fi
 
+# ── read save_sync_enabled from config ────────────────────────────────────
+_save_sync_enabled=$(python3 - <<'PYEOF'
+import tomllib, os, sys
+path = os.path.expanduser(
+    os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+    + "/bifrost/config.toml"
+)
+try:
+    with open(path, "rb") as f:
+        data = tomllib.load(f)
+    print("true" if data.get("sync", {}).get("save_sync_enabled", True) else "false")
+except Exception:
+    print("true")
+PYEOF
+)
+
+# ── device enrollment (only when save sync is enabled) ────────────────────
+if [[ "$_save_sync_enabled" == "true" ]]; then
+  echo ""
+  info "Enrolling device with RomM for save sync..."
+  if ! bifrost device-enroll; then
+    warn "Device enrollment did not complete — save sync won't work until you run 'bifrost device-enroll'"
+    _save_sync_enabled=false
+  fi
+fi
+
 # ── systemd units ─────────────────────────────────────────────────────────
 echo ""
 info "Installing systemd user units..."
-bifrost systemd install
+if [[ "$_save_sync_enabled" == "true" ]]; then
+  bifrost systemd install
+else
+  bifrost systemd install --no-save-sync
+fi
 
 # ── ensure lingering is enabled (survives game-mode logout) ───────────────
 CURRENT_USER="${USER:-$(id -un)}"
@@ -186,11 +216,15 @@ else
   warn "Gamelist sync returned a non-zero exit code"
 fi
 
-info "Running initial save sync..."
-if bifrost save-sync --apply; then
-  success "Saves synced"
+if [[ "$_save_sync_enabled" == "true" ]]; then
+  info "Running initial save sync..."
+  if bifrost save-sync --apply; then
+    success "Saves synced"
+  else
+    warn "Save sync returned a non-zero exit code"
+  fi
 else
-  warn "Save sync returned a non-zero exit code"
+  info "Save sync disabled — skipping initial save sync."
 fi
 
 # ── summary ───────────────────────────────────────────────────────────────
@@ -204,8 +238,12 @@ echo -e "  Logs:    ${CYAN}$LOG_DIR/bifrost.log${RESET}"
 echo ""
 echo -e "  Active automation:"
 echo -e "    ${GREEN}✓${RESET} ROM sync + gamelist  — at boot + every 6 hours"
-echo -e "    ${GREEN}✓${RESET} Save/state sync       — at boot + every 2 hours"
-echo -e "    ${GREEN}✓${RESET} Save file watcher     — triggers sync on every local save"
+if [[ "$_save_sync_enabled" == "true" ]]; then
+  echo -e "    ${GREEN}✓${RESET} Save/state sync       — at boot + every 2 hours"
+  echo -e "    ${GREEN}✓${RESET} Save file watcher     — triggers sync on every local save"
+else
+  echo -e "    ${YELLOW}–${RESET} Save sync              — disabled (run 'bifrost device-enroll' to enable later)"
+fi
 echo ""
 echo -e "  Useful commands:"
 echo -e "    ${CYAN}bifrost systemd status${RESET}   — check service health"
