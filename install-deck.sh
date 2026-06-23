@@ -72,12 +72,45 @@ success "Python $PY_VER — OK"
 # ── pipx ───────────────────────────────────────────────────────────────────
 info "Checking pipx..."
 if ! command -v pipx &>/dev/null; then
-  warn "pipx not found — installing via pip --user..."
-  python3 -m pip install --user --quiet pipx
-  python3 -m pipx ensurepath --force
+  warn "pipx not found — attempting install..."
+  _pipx_ok=0
+
+  # 1) system package manager (most reliable, avoids the pip-not-found problem)
+  if command -v apt-get &>/dev/null; then
+    info "Detected apt — running: sudo apt-get install -y pipx"
+    sudo apt-get install -y pipx 2>/dev/null && _pipx_ok=1
+    if [[ $_pipx_ok -eq 0 ]]; then
+      info "pipx package not found in apt — installing python3-pip first..."
+      sudo apt-get install -y python3-pip 2>/dev/null && \
+        python3 -m pip install --user --quiet pipx && _pipx_ok=1
+    fi
+  elif command -v pacman &>/dev/null; then
+    info "Detected pacman — running: sudo pacman -S --noconfirm python-pipx"
+    sudo pacman -S --noconfirm python-pipx 2>/dev/null && _pipx_ok=1
+  elif command -v dnf &>/dev/null; then
+    info "Detected dnf — running: sudo dnf install -y pipx"
+    sudo dnf install -y pipx 2>/dev/null && _pipx_ok=1
+  fi
+
+  # 2) fallback: bootstrap pip via ensurepip, then pip install pipx
+  if [[ $_pipx_ok -eq 0 ]]; then
+    warn "Package manager install failed — trying python3 -m ensurepip..."
+    if python3 -m ensurepip --upgrade 2>/dev/null; then
+      python3 -m pip install --user --quiet pipx && _pipx_ok=1
+    fi
+  fi
+
+  if [[ $_pipx_ok -eq 0 ]]; then
+    die "Could not install pipx automatically. Install it manually, then re-run:
+  Debian/Ubuntu : sudo apt-get install pipx
+  Arch/Manjaro  : sudo pacman -S python-pipx
+  Fedora        : sudo dnf install pipx"
+  fi
+
+  python3 -m pipx ensurepath --force 2>/dev/null || true
   export PATH="$HOME/.local/bin:$PATH"
   if ! command -v pipx &>/dev/null; then
-    die "pipx install failed. Try: python3 -m pip install --user pipx"
+    die "pipx installed but not found in PATH. Open a new terminal and re-run the installer."
   fi
 fi
 success "pipx — OK"
@@ -117,10 +150,40 @@ else
   info "Run 'bifrost setup' any time to change settings."
 fi
 
+# ── read save_sync_enabled from config ────────────────────────────────────
+_save_sync_enabled=$(python3 - <<'PYEOF'
+import tomllib, os, sys
+path = os.path.expanduser(
+    os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+    + "/bifrost/config.toml"
+)
+try:
+    with open(path, "rb") as f:
+        data = tomllib.load(f)
+    print("true" if data.get("sync", {}).get("save_sync_enabled", True) else "false")
+except Exception:
+    print("true")
+PYEOF
+)
+
+# ── device enrollment (only when save sync is enabled) ────────────────────
+if [[ "$_save_sync_enabled" == "true" ]]; then
+  echo ""
+  info "Enrolling device with RomM for save sync..."
+  if ! bifrost device-enroll; then
+    warn "Device enrollment did not complete — save sync won't work until you run 'bifrost device-enroll'"
+    _save_sync_enabled=false
+  fi
+fi
+
 # ── systemd units ─────────────────────────────────────────────────────────
 echo ""
 info "Installing systemd user units..."
-bifrost systemd install
+if [[ "$_save_sync_enabled" == "true" ]]; then
+  bifrost systemd install
+else
+  bifrost systemd install --no-save-sync
+fi
 
 # ── ensure lingering is enabled (survives game-mode logout) ───────────────
 CURRENT_USER="${USER:-$(id -un)}"
@@ -153,11 +216,15 @@ else
   warn "Gamelist sync returned a non-zero exit code"
 fi
 
-info "Running initial save sync..."
-if bifrost save-sync --apply; then
-  success "Saves synced"
+if [[ "$_save_sync_enabled" == "true" ]]; then
+  info "Running initial save sync..."
+  if bifrost save-sync --apply; then
+    success "Saves synced"
+  else
+    warn "Save sync returned a non-zero exit code"
+  fi
 else
-  warn "Save sync returned a non-zero exit code"
+  info "Save sync disabled — skipping initial save sync."
 fi
 
 # ── summary ───────────────────────────────────────────────────────────────
@@ -171,8 +238,12 @@ echo -e "  Logs:    ${CYAN}$LOG_DIR/bifrost.log${RESET}"
 echo ""
 echo -e "  Active automation:"
 echo -e "    ${GREEN}✓${RESET} ROM sync + gamelist  — at boot + every 6 hours"
-echo -e "    ${GREEN}✓${RESET} Save/state sync       — at boot + every 2 hours"
-echo -e "    ${GREEN}✓${RESET} Save file watcher     — triggers sync on every local save"
+if [[ "$_save_sync_enabled" == "true" ]]; then
+  echo -e "    ${GREEN}✓${RESET} Save/state sync       — at boot + every 2 hours"
+  echo -e "    ${GREEN}✓${RESET} Save file watcher     — triggers sync on every local save"
+else
+  echo -e "    ${YELLOW}–${RESET} Save sync              — disabled (run 'bifrost device-enroll' to enable later)"
+fi
 echo ""
 echo -e "  Useful commands:"
 echo -e "    ${CYAN}bifrost systemd status${RESET}   — check service health"
