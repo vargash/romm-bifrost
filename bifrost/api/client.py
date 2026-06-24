@@ -341,6 +341,12 @@ class RommApiClient:
 
         if not isinstance(data, dict):
             raise ApiError("Unexpected response type for save upload")
+        _log.debug(
+            "upload_save_file response: file=%s save_id=%s content_hash=%s",
+            save_path.name,
+            data.get("id"),
+            data.get("content_hash"),
+        )
         return data
 
     def download_save_file_content(
@@ -761,38 +767,54 @@ class RommApiClient:
         return [SaveSummary.model_validate(item) for item in data if isinstance(item, dict)]
 
     def negotiate_sync(self, payload: SyncNegotiatePayload) -> SyncNegotiateResponse:
-        data = self._request_json(
-            "POST",
-            "/api/sync/negotiate",
-            json=payload.model_dump(mode="python"),
+        dumped = payload.model_dump(mode="python")
+        _log.debug(
+            "negotiate_sync request: device_id=%s saves=%d entries=%s",
+            payload.device_id,
+            len(payload.saves),
+            [
+                {"rom_id": s.rom_id, "file_name": s.file_name, "content_hash": s.content_hash, "updated_at": s.updated_at}
+                for s in payload.saves
+            ],
         )
+        data = self._request_json("POST", "/api/sync/negotiate", json=dumped)
         if not isinstance(data, dict):
             raise ApiError("Unexpected response type for /api/sync/negotiate")
-        return SyncNegotiateResponse.model_validate(data)
+        resp = SyncNegotiateResponse.model_validate(data)
+        _log.debug(
+            "negotiate_sync response: session=%s ops=%d reasons=%s",
+            resp.session_id,
+            len(resp.operations),
+            [{"action": op.action, "file_name": op.file_name, "reason": op.reason, "save_id": op.save_id, "server_content_hash": op.server_content_hash} for op in resp.operations],
+        )
+        return resp
 
     def complete_sync_session(
         self,
         session_id: int,
         payload: SyncCompletePayload,
     ) -> CompleteOutcome:
+        dumped = payload.model_dump(mode="python")
+        _log.debug("complete_sync_session request: session=%d payload=%s", session_id, dumped)
         try:
             data = self._request_json(
                 "POST",
                 f"/api/sync/sessions/{session_id}/complete",
-                json=payload.model_dump(mode="python"),
+                json=dumped,
             )
         except ApiError as exc:
             status = exc.http_status
             if status in {404, 409, 410}:
                 _log.info(
-                    "sync session %d already finalized (HTTP %s)", session_id, status
+                    "sync session %d already finalized (HTTP %s): %s", session_id, status, exc
                 )
                 return CompleteOutcome.ALREADY_FINALIZED
             if status is not None and 400 <= status < 500:
                 _log.warning(
-                    "sync session %d complete returned %s; treating as finalized",
+                    "sync session %d complete returned %s: %s",
                     session_id,
                     status,
+                    exc,
                 )
                 return CompleteOutcome.CLIENT_ERROR
             _log.warning(
