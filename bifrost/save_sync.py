@@ -14,6 +14,7 @@ from bifrost.api.client import RommApiClient
 from bifrost.api.models import (
     ClientSaveState,
     CompleteOutcome,
+    DeviceSyncSchema,
     RomSummary,
     SaveSummary,
     SyncCompletePayload,
@@ -258,6 +259,11 @@ def _build_remote_save_index(remote_saves: list[SaveSummary]) -> dict[tuple[int,
     return index
 
 
+def _find_device_sync(save: SaveSummary, device_id: str) -> DeviceSyncSchema | None:
+    """Return the DeviceSyncSchema entry for device_id on this save, or None."""
+    return next((ds for ds in save.device_syncs if ds.device_id == device_id), None)
+
+
 def _is_redundant_upload_operation(
     operation: SyncOperationSchema,
     local_state: ClientSaveState | None,
@@ -344,11 +350,13 @@ def _legacy_negotiate(
     local_states: list[ClientSaveState],
     remote_save_index: dict[tuple[int, str], SaveSummary],
     sync_mode: str,
+    device_id: str = "",
 ) -> tuple[list[SyncOperationSchema], None]:
     """Fallback when /api/sync/negotiate is unavailable (older RomM server).
 
     Builds upload/download operations by direct local↔server comparison.
     Downloads are only added in push_pull mode.
+    Saves marked is_current for our device are skipped (already in sync).
     """
     _log.warning(
         "using legacy negotiate fallback (no session tracking); %d local saves, %d remote saves",
@@ -370,20 +378,25 @@ def _legacy_negotiate(
                     reason="Save exists on client but not on server",
                 )
             )
-        elif (
-            state.content_hash
-            and remote.content_hash
-            and state.content_hash.lower() != remote.content_hash.lower()
-        ):
-            ops.append(
-                SyncOperationSchema(
-                    action="upload",
-                    rom_id=state.rom_id,
-                    file_name=state.file_name,
-                    save_id=remote.id,
-                    reason="Client version differs from server",
+        else:
+            ds = _find_device_sync(remote, device_id) if device_id else None
+            if ds is not None and ds.is_current:
+                _log.debug("legacy: skipping upload, already current: %s", state.file_name)
+                continue
+            if (
+                state.content_hash
+                and remote.content_hash
+                and state.content_hash.lower() != remote.content_hash.lower()
+            ):
+                ops.append(
+                    SyncOperationSchema(
+                        action="upload",
+                        rom_id=state.rom_id,
+                        file_name=state.file_name,
+                        save_id=remote.id,
+                        reason="Client version differs from server",
+                    )
                 )
-            )
 
     if sync_mode == "push_pull":
         for key, remote in remote_save_index.items():
@@ -435,7 +448,17 @@ def build_save_sync_preview(
     remote_roms = client.list_roms()
     remote_rom_index = _build_remote_rom_index(remote_roms)
     remote_saves = client.list_saves(device_id=resolved_device_id)
-    remote_save_index = _build_remote_save_index(remote_saves)
+
+    # Filter out saves this device has explicitly untracked — never sync them.
+    untracked_save_ids: set[int] = set()
+    for save in remote_saves:
+        ds = _find_device_sync(save, resolved_device_id)
+        if ds is not None and ds.is_untracked:
+            untracked_save_ids.add(save.id)
+            _log.debug("skipping untracked save: %s (id=%d)", save.file_name, save.id)
+
+    tracked_remote_saves = [s for s in remote_saves if s.id not in untracked_save_ids]
+    remote_save_index = _build_remote_save_index(tracked_remote_saves)
 
     local_states: list[ClientSaveState] = []
     local_state_index: dict[tuple[int, str], ClientSaveState] = {}
@@ -478,6 +501,7 @@ def build_save_sync_preview(
                 local_states,
                 remote_save_index,
                 config.sync.direction,
+                device_id=resolved_device_id,
             )
         else:
             raise
@@ -485,7 +509,8 @@ def build_save_sync_preview(
     filtered_operations = [
         operation
         for operation in raw_operations
-        if not _is_redundant_upload_operation(
+        if operation.save_id not in untracked_save_ids
+        and not _is_redundant_upload_operation(
             operation,
             local_state_index.get(_save_lookup_key(operation.rom_id, operation.file_name)),
             remote_save_index.get(_save_lookup_key(operation.rom_id, operation.file_name)),
