@@ -22,7 +22,7 @@ from rich.table import Table
 
 from bifrost import __version__ as _bifrost_version
 from bifrost.api.client import RommApiClient, exchange_pairing_code
-from bifrost.api.models import DeviceCreatePayload
+from bifrost.api.models import DeviceCreatePayload, DeviceUpdatePayload
 from bifrost.cache import BifrostCache
 from bifrost.config import (
     AppConfig,
@@ -86,6 +86,15 @@ _ESDE_EVENT_DOWNLOAD_ONLY: frozenset[str] = frozenset({"game-start"})
 _ESDE_EVENT_UPLOAD_ONLY: frozenset[str] = frozenset(
     {"game-end", "suspend", "quit", "poweroff", "reboot"}
 )
+
+
+def _get_mac_address() -> str | None:
+    """Return primary NIC MAC address, or None if unavailable."""
+    import uuid as _uuid
+    node = _uuid.getnode()
+    if node >> 40 & 1:  # multicast bit set → random/fallback value, not a real MAC
+        return None
+    return ":".join(f"{(node >> (8 * i)) & 0xFF:02x}" for i in range(5, -1, -1))
 
 
 def _abort_on_preflight(result: PreflightResult, console: Console) -> None:
@@ -1443,6 +1452,8 @@ def device_enroll(
     ).strip()
     hostname_reported = (hostname or Prompt.ask("Hostname", default=hostname_value)).strip()
 
+    mac_address_value = _get_mac_address()
+
     try:
         with RommApiClient(config, timeout_seconds=config.romm.timeout_seconds) as client:
             response = client.register_device(
@@ -1452,11 +1463,25 @@ def device_enroll(
                     client=client_value,
                     client_version=client_version_value,
                     hostname=hostname_reported,
+                    mac_address=mac_address_value,
                     sync_mode="api",
                     allow_existing=allow_existing,
                     allow_duplicate=allow_duplicate,
                     reset_syncs=reset_syncs,
                 )
+            )
+            # POST returns existing device without updating fields; PUT syncs current values.
+            client.update_device(
+                response.device_id,
+                DeviceUpdatePayload(
+                    name=device_name_value,
+                    platform=platform_value,
+                    client=client_value,
+                    client_version=client_version_value,
+                    hostname=hostname_reported,
+                    mac_address=mac_address_value,
+                    sync_mode="api",
+                ),
             )
     except AuthenticationError as exc:
         console.print(f"[red]Authentication error:[/red] {exc}")

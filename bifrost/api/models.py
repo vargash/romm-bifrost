@@ -233,6 +233,21 @@ class DeviceCreatePayload(BaseModel):
     reset_syncs: bool = False
 
 
+class DeviceUpdatePayload(BaseModel):
+    """Request body for PUT /api/devices/{device_id}."""
+
+    name: str | None = None
+    platform: str | None = None
+    client: str | None = None
+    client_version: str | None = None
+    ip_address: str | None = None
+    mac_address: str | None = None
+    hostname: str | None = None
+    sync_mode: str | None = None
+    sync_enabled: bool | None = None
+    sync_config: dict[str, object] | None = None
+
+
 class DeviceCreateResponse(BaseModel):
     """Response body for POST /api/devices."""
 

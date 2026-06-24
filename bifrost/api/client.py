@@ -15,6 +15,7 @@ from bifrost.api.models import (
     CompleteOutcome,
     DeviceCreatePayload,
     DeviceCreateResponse,
+    DeviceUpdatePayload,
     HeartbeatResponse,
     LibrarySetupResponse,
     PlatformSummary,
@@ -768,6 +769,13 @@ class RommApiClient:
         if not isinstance(data, dict):
             raise ApiError("Unexpected response type for /api/devices")
         return DeviceCreateResponse.model_validate(data)
+
+    def update_device(self, device_id: str, payload: DeviceUpdatePayload) -> None:
+        self._request_json(
+            "PUT",
+            f"/api/devices/{device_id}",
+            json=payload.model_dump(mode="python", exclude_none=True),
+        )
 
     def list_saves(self, device_id: str | None = None) -> list[SaveSummary]:
         params: dict[str, Any] = {}
