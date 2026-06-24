@@ -19,9 +19,6 @@ def test_device_enroll_writes_device_id_and_preserves_config(monkeypatch, tmp_pa
 url = "http://romm.local"
 client_token = "rmm_token"
 device_id = ""
-
-[sync]
-sync_mode = "push_pull"
 """.strip(),
         encoding="utf-8",
     )
@@ -35,7 +32,7 @@ sync_mode = "push_pull"
             assert payload["client"] == "bifrost"
             assert payload["client_version"] == "0.1.0"
             assert payload["hostname"] == "living-room"
-            assert payload["sync_mode"] == "push_pull"
+            assert payload["sync_mode"] == "api"
             assert payload["allow_existing"] is True
             assert payload["allow_duplicate"] is False
             assert payload["reset_syncs"] is False
@@ -74,8 +71,6 @@ sync_mode = "push_pull"
             "0.1.0",
             "--hostname",
             "living-room",
-            "--sync-mode",
-            "push_pull",
         ],
     )
 

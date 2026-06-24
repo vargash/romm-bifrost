@@ -6,7 +6,7 @@ import os
 import stat
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import tomli_w
 from pydantic import BaseModel, Field, ValidationError
@@ -81,7 +81,7 @@ class SyncConfig(BaseModel):
     """Save-sync defaults."""
 
     conflict_strategy: str = "ask"
-    sync_mode: str = "push_pull"
+    direction: Literal["push_pull", "push_only", "pull_only"] = "push_pull"
     parallel_workers: int = Field(default=16, ge=1)
 
 
@@ -164,10 +164,27 @@ def _migrate_folder_map(data: dict[str, Any]) -> None:
             fm.setdefault(new_key, fm.pop(old_key))
 
 
+def _migrate_sync_mode(data: dict[str, Any]) -> None:
+    """Migrate legacy sync.sync_mode → sync.direction, in-place.
+
+    sync_mode was previously used both as the RomM device registration field and
+    as the internal sync direction ("push_pull" / "push_only" / "pull_only").
+    The registration field is now always "api"; sync.direction carries the internal meaning.
+    """
+    sync = data.get("sync")
+    if not isinstance(sync, dict):
+        return
+    old_value = sync.pop("sync_mode", None)
+    if old_value and "direction" not in sync:
+        valid = {"push_pull", "push_only", "pull_only"}
+        sync["direction"] = old_value if old_value in valid else "push_pull"
+
+
 def _parse_config(data: dict[str, Any]) -> AppConfig:
     if "romm" in data and "url" in data["romm"]:
         data["romm"]["url"] = _normalize_url(str(data["romm"]["url"]))
     _migrate_folder_map(data)
+    _migrate_sync_mode(data)
     try:
         return AppConfig.model_validate(data)
     except ValidationError as exc:

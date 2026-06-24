@@ -35,7 +35,7 @@ def make_config(tmp_path: Path, conflict_strategy: str = "ask") -> AppConfig:
             device_id="device-1",
         ),
         emudeck=EmudeckConfig(saves_path=str(tmp_path / "saves")),
-        sync=SyncConfig(conflict_strategy=conflict_strategy, sync_mode="push_pull"),
+        sync=SyncConfig(conflict_strategy=conflict_strategy, direction="push_pull"),
     )
 
 
@@ -57,7 +57,7 @@ saves_path = "{saves_root}"
 
 [sync]
 conflict_strategy = "{conflict_strategy}"
-sync_mode = "push_pull"
+direction = "push_pull"
 """.strip(),
         encoding="utf-8",
     )

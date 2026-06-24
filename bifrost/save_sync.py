@@ -442,7 +442,7 @@ def build_save_sync_preview(
             raw_operations, session_id = _legacy_negotiate(
                 local_states,
                 remote_save_index,
-                config.sync.sync_mode,
+                config.sync.direction,
             )
         else:
             raise

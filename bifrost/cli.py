@@ -18,6 +18,7 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRe
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
+from bifrost import __version__ as _bifrost_version
 from bifrost.api.client import RommApiClient, exchange_pairing_code
 from bifrost.api.models import DeviceCreatePayload
 from bifrost.cache import BifrostCache
@@ -1239,12 +1240,6 @@ def state_sync(
     help="Hostname reported to RomM.",
 )
 @click.option(
-    "--sync-mode",
-    type=str,
-    default=None,
-    help="RomM sync mode for this device (api, file_transfer, push_pull).",
-)
-@click.option(
     "--allow-duplicate/--no-allow-duplicate",
     default=False,
     help="Allow registering a duplicate device entry.",
@@ -1271,7 +1266,6 @@ def device_enroll(
     client_name: str | None,
     client_version: str | None,
     hostname: str | None,
-    sync_mode: str | None,
     allow_duplicate: bool,
     allow_existing: bool,
     reset_syncs: bool,
@@ -1302,9 +1296,10 @@ def device_enroll(
         platform or Prompt.ask("Device platform", default=sys_platform.system().lower())
     ).strip()
     client_value = (client_name or Prompt.ask("Client name", default="bifrost")).strip()
-    client_version_value = (client_version or Prompt.ask("Client version", default="0.1.0")).strip()
+    client_version_value = (
+        client_version or Prompt.ask("Client version", default=_bifrost_version)
+    ).strip()
     hostname_reported = (hostname or Prompt.ask("Hostname", default=hostname_value)).strip()
-    sync_mode_value = (sync_mode or Prompt.ask("Sync mode", default=config.sync.sync_mode)).strip()
 
     try:
         with RommApiClient(config, timeout_seconds=config.romm.timeout_seconds) as client:
@@ -1315,7 +1310,7 @@ def device_enroll(
                     client=client_value,
                     client_version=client_version_value,
                     hostname=hostname_reported,
-                    sync_mode=sync_mode_value,
+                    sync_mode="api",
                     allow_existing=allow_existing,
                     allow_duplicate=allow_duplicate,
                     reset_syncs=reset_syncs,
@@ -1345,7 +1340,7 @@ def device_enroll(
     table.add_row("Client", client_value)
     table.add_row("Version", client_version_value)
     table.add_row("Hostname", hostname_reported)
-    table.add_row("Sync mode", sync_mode_value)
+    table.add_row("Sync mode", "api")
     console.print(table)
     console.print("[green]Device enrollment saved to config.[/green]")
     raise SystemExit(EXIT_OK)
