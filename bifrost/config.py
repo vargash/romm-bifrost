@@ -95,6 +95,9 @@ class SyncConfig(BaseModel):
     direction: Literal["push_pull", "push_only", "pull_only"] = "push_pull"
     parallel_workers: int = Field(default=16, ge=1)
     profiles: SyncProfilesConfig = Field(default_factory=SyncProfilesConfig)
+    optimistic_downloads: bool = True
+    autocleanup: bool = False
+    autocleanup_limit: int = Field(default=3, ge=1)
 
 
 class OutputConfig(BaseModel):

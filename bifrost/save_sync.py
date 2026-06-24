@@ -23,6 +23,7 @@ from bifrost.api.models import (
 )
 from bifrost.config import AppConfig
 from bifrost.errors import ApiError, ConfigError
+from bifrost.play_sessions import consume_pending_sessions
 from bifrost.saves.layout import EmudeckEsdeLayout, ScannedFile
 
 _log = logging.getLogger("bifrost.save_sync")
@@ -616,6 +617,8 @@ def execute_save_sync_preview(
                         ("upload", operation.file_name, "skipped (local file not found)")
                     )
                     continue
+                _do_autocleanup = config.sync.autocleanup
+                _autocleanup_limit = config.sync.autocleanup_limit
                 try:
                     client.upload_save_file(
                         rom_id=operation.rom_id,
@@ -624,6 +627,8 @@ def execute_save_sync_preview(
                         session_id=preview.session_id,
                         save_id=operation.save_id,
                         overwrite=True,
+                        autocleanup=_do_autocleanup,
+                        autocleanup_limit=_autocleanup_limit,
                     )
                 except ApiError as exc:
                     # Legacy workaround: some RomM builds return 500 on POST when a save
@@ -675,10 +680,12 @@ def execute_save_sync_preview(
                 details.append(("download", operation.file_name, "skipped (already in sync)"))
                 continue
 
+            use_optimistic = config.sync.optimistic_downloads
             content = client.download_save_file_content(
                 save_id=operation.save_id,
                 device_id=preview.device_id,
                 session_id=preview.session_id,
+                optimistic=use_optimistic,
             )
             destination.parent.mkdir(parents=True, exist_ok=True)
             _backup_local_file(destination)
@@ -689,7 +696,10 @@ def execute_save_sync_preview(
             except Exception:
                 part.unlink(missing_ok=True)
                 raise
-            client.confirm_save_download(save_id=operation.save_id, device_id=preview.device_id)
+            if not use_optimistic:
+                client.confirm_save_download(
+                    save_id=operation.save_id, device_id=preview.device_id
+                )
             completed += 1
             details.append(("download", operation.file_name, f"ok -> {destination}"))
 
@@ -699,11 +709,17 @@ def execute_save_sync_preview(
             _log.error("save-sync op failed: %s %s: %s", operation.action, operation.file_name, exc)
 
     if preview.session_id is not None:
+        pending_play_sessions = consume_pending_sessions()
+        if pending_play_sessions:
+            _log.info(
+                "including %d pending play session(s) in complete", len(pending_play_sessions)
+            )
         outcome = client.complete_sync_session(
             preview.session_id,
             SyncCompletePayload(
                 operations_completed=completed,
                 operations_failed=failed,
+                play_sessions=pending_play_sessions if pending_play_sessions else None,
             ),
         )
         if outcome == CompleteOutcome.RETRY_LATER:

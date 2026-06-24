@@ -316,6 +316,8 @@ class RommApiClient:
         session_id: int | None = None,
         save_id: int | None = None,
         overwrite: bool = True,
+        autocleanup: bool = False,
+        autocleanup_limit: int = 3,
     ) -> dict[str, Any]:
         with save_path.open("rb") as handle:
             files = {"saveFile": (save_path.name, handle, "application/octet-stream")}
@@ -332,6 +334,9 @@ class RommApiClient:
                     params["device_id"] = device_id
                 if session_id is not None:
                     params["session_id"] = session_id
+                if autocleanup:
+                    params["autocleanup"] = True
+                    params["autocleanup_limit"] = autocleanup_limit
                 data = self._request_json("POST", "/api/saves", params=params, files=files)
 
         if not isinstance(data, dict):
@@ -343,12 +348,15 @@ class RommApiClient:
         save_id: int,
         device_id: str | None = None,
         session_id: int | None = None,
+        optimistic: bool = False,
     ) -> bytes:
         params: dict[str, Any] = {}
         if device_id:
             params["device_id"] = device_id
         if session_id is not None:
             params["session_id"] = session_id
+        if optimistic:
+            params["optimistic"] = True
         return self._request_bytes("GET", f"/api/saves/{save_id}/content", params=params)
 
     def confirm_save_download(self, save_id: int, device_id: str) -> dict[str, Any]:
