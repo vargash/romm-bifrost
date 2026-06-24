@@ -18,10 +18,22 @@ log = logging.getLogger("bifrost.watcher")
 
 _DEBOUNCE_SECONDS = 15
 _POLL_INTERVAL_SECONDS = 30
+_COOLDOWN_SECONDS = 60
+
+_last_sync_time: float = 0.0
+
+# Extensions we write ourselves; should never re-trigger a sync.
+_SKIP_SUFFIXES = frozenset({".part", ".bak"})
 
 
 def _run_sync(bifrost_bin: str) -> None:
     """Run save-sync --apply, log outcome."""
+    global _last_sync_time
+    elapsed = time.monotonic() - _last_sync_time
+    if elapsed < _COOLDOWN_SECONDS:
+        log.debug("watcher: sync cooldown (%ds remaining)", int(_COOLDOWN_SECONDS - elapsed))
+        return
+
     for cmd_args in (
         [bifrost_bin, "save-sync", "--apply"],
         # DISABILITATO (Fase 0 — state sync escluso): il watcher non invoca più state-sync.
@@ -46,6 +58,8 @@ def _run_sync(bifrost_bin: str) -> None:
         except FileNotFoundError:
             log.error("watcher: bifrost binary not found at %s", bifrost_bin)
             return
+
+    _last_sync_time = time.monotonic()
 
 
 class _DebounceTimer:
@@ -80,13 +94,14 @@ def _watch_with_watchdog(watch_path: Path, bifrost_bin: str) -> None:
 
     class _Handler(FileSystemEventHandler):
         def on_any_event(self, event: object) -> None:  # type: ignore[override]
-            # Skip directory events and hidden files
-            src = getattr(event, "src_path", "")
-            if src and Path(src).name.startswith("."):
-                return
             is_dir = getattr(event, "is_directory", False)
             if is_dir:
                 return
+            src = getattr(event, "src_path", "")
+            if src:
+                p = Path(src)
+                if p.name.startswith(".") or p.suffix in _SKIP_SUFFIXES:
+                    return
             log.debug("watcher: fs event %s", src)
             debouncer.trigger()
 
@@ -119,7 +134,7 @@ def _watch_with_polling(watch_path: Path, bifrost_bin: str) -> None:
         result: dict[str, float] = {}
         try:
             for p in root.rglob("*"):
-                if p.is_file() and not p.name.startswith("."):
+                if p.is_file() and not p.name.startswith(".") and p.suffix not in _SKIP_SUFFIXES:
                     try:
                         result[str(p)] = p.stat().st_mtime
                     except OSError:

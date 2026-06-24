@@ -511,11 +511,6 @@ def build_save_sync_preview(
         operation
         for operation in raw_operations
         if operation.save_id not in untracked_save_ids
-        and not _is_redundant_upload_operation(
-            operation,
-            local_state_index.get(_save_lookup_key(operation.rom_id, operation.file_name)),
-            remote_save_index.get(_save_lookup_key(operation.rom_id, operation.file_name)),
-        )
     ]
 
     return SaveSyncPreview(
