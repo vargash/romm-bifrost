@@ -41,8 +41,8 @@ def make_config(tmp_path: Path, conflict_strategy: str = "ask") -> AppConfig:
 
 def config_path_for(tmp_path: Path, conflict_strategy: str = "ask") -> Path:
     saves_root = tmp_path / "saves"
-    saves_root.mkdir(parents=True, exist_ok=True)
-    (saves_root / "Mario.sav").write_bytes(b"save-data")
+    (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
+    (saves_root / "retroarch/saves/Mario.sav").write_bytes(b"save-data")
 
     cfg = tmp_path / "config.toml"
     cfg.write_text(
@@ -166,7 +166,7 @@ def test_is_redundant_download_true_when_hashes_match(tmp_path: Path) -> None:
         reason="test",
         server_content_hash=server_hash,
     )
-    assert _is_redundant_download(op, tmp_path) is True
+    assert _is_redundant_download(op, local_file) is True
 
 
 def test_is_redundant_download_false_when_hashes_differ(tmp_path: Path) -> None:
@@ -181,7 +181,7 @@ def test_is_redundant_download_false_when_hashes_differ(tmp_path: Path) -> None:
         reason="test",
         server_content_hash="deadbeef00000000",
     )
-    assert _is_redundant_download(op, tmp_path) is False
+    assert _is_redundant_download(op, local_file) is False
 
 
 def test_is_redundant_download_false_when_no_server_hash(tmp_path: Path) -> None:
@@ -195,7 +195,7 @@ def test_is_redundant_download_false_when_no_server_hash(tmp_path: Path) -> None
         file_name="Mario.sav",
         reason="test",
     )
-    assert _is_redundant_download(op, tmp_path) is False
+    assert _is_redundant_download(op, local_file) is False
 
 
 def test_is_redundant_download_false_when_file_missing(tmp_path: Path) -> None:
@@ -207,7 +207,7 @@ def test_is_redundant_download_false_when_file_missing(tmp_path: Path) -> None:
         reason="test",
         server_content_hash="aabbcc",
     )
-    assert _is_redundant_download(op, tmp_path) is False
+    assert _is_redundant_download(op, tmp_path / "Missing.sav") is False
 
 
 # ---------------------------------------------------------------------------
@@ -218,8 +218,9 @@ def test_is_redundant_download_false_when_file_missing(tmp_path: Path) -> None:
 def test_execute_conflict_server_wins_triggers_download(tmp_path: Path) -> None:
     config = make_config(tmp_path, conflict_strategy="server_wins")
     saves_root = Path(config.emudeck.saves_path)
-    saves_root.mkdir(parents=True, exist_ok=True)
-    (saves_root / "Mario.sav").write_bytes(b"local-data")
+    profile_dir = saves_root / "retroarch/saves"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    (profile_dir / "Mario.sav").write_bytes(b"local-data")
 
     calls: dict[str, int] = {"download": 0, "confirm": 0, "complete": 0}
 
@@ -290,11 +291,12 @@ def test_execute_conflict_server_wins_triggers_download(tmp_path: Path) -> None:
     assert calls["complete"] == 1
     assert result.executed == 1
     assert result.failed == 0
-    # Verify backup was created
-    assert (saves_root / "Mario.sav.bak").exists()
-    assert (saves_root / "Mario.sav.bak").read_bytes() == b"local-data"
-    # Verify server content was written
-    assert (saves_root / "Mario.sav").read_bytes() == b"server-data"
+    # Verify backup was created in the profile directory
+    profile_dir = saves_root / "retroarch/saves"
+    assert (profile_dir / "Mario.sav.bak").exists()
+    assert (profile_dir / "Mario.sav.bak").read_bytes() == b"local-data"
+    # Verify server content was written to the profile directory
+    assert (profile_dir / "Mario.sav").read_bytes() == b"server-data"
 
 
 # ---------------------------------------------------------------------------
@@ -305,8 +307,8 @@ def test_execute_conflict_server_wins_triggers_download(tmp_path: Path) -> None:
 def test_execute_conflict_local_wins_triggers_upload(tmp_path: Path) -> None:
     config = make_config(tmp_path, conflict_strategy="local_wins")
     saves_root = Path(config.emudeck.saves_path)
-    saves_root.mkdir(parents=True, exist_ok=True)
-    (saves_root / "Mario.sav").write_bytes(b"local-data")
+    (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
+    (saves_root / "retroarch/saves/Mario.sav").write_bytes(b"local-data")
 
     calls: dict[str, int] = {"upload": 0, "track": 0, "complete": 0}
 
@@ -396,8 +398,8 @@ def test_execute_conflict_ask_headless_resolves_as_upload(tmp_path: Path) -> Non
     """is_interactive=False with ask strategy should auto-resolve to upload."""
     config = make_config(tmp_path, conflict_strategy="ask")
     saves_root = Path(config.emudeck.saves_path)
-    saves_root.mkdir(parents=True, exist_ok=True)
-    (saves_root / "Mario.sav").write_bytes(b"local-data")
+    (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
+    (saves_root / "retroarch/saves/Mario.sav").write_bytes(b"local-data")
 
     calls: dict[str, int] = {"upload": 0}
 
@@ -482,10 +484,10 @@ def test_execute_download_skipped_when_hash_matches(tmp_path: Path) -> None:
     """If local file already matches server_content_hash, skip the download."""
     config = make_config(tmp_path)
     saves_root = Path(config.emudeck.saves_path)
-    saves_root.mkdir(parents=True, exist_ok=True)
+    (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
     content = b"identical-content"
     server_hash = hashlib.md5(content).hexdigest()
-    (saves_root / "Mario.sav").write_bytes(content)
+    (saves_root / "retroarch/saves/Mario.sav").write_bytes(content)
 
     calls: dict[str, int] = {"download": 0}
 
@@ -561,8 +563,8 @@ def test_execute_download_skipped_when_hash_matches(tmp_path: Path) -> None:
 def test_execute_download_creates_backup_of_existing_file(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     saves_root = Path(config.emudeck.saves_path)
-    saves_root.mkdir(parents=True, exist_ok=True)
-    (saves_root / "Mario.sav").write_bytes(b"old-local-data")
+    (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
+    (saves_root / "retroarch/saves/Mario.sav").write_bytes(b"old-local-data")
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/roms":
@@ -624,10 +626,11 @@ def test_execute_download_creates_backup_of_existing_file(tmp_path: Path) -> Non
     client.close()
 
     assert result.executed == 1
+    profile_dir = saves_root / "retroarch/saves"
     # Backup preserves original
-    assert (saves_root / "Mario.sav.bak").read_bytes() == b"old-local-data"
+    assert (profile_dir / "Mario.sav.bak").read_bytes() == b"old-local-data"
     # New content from server
-    assert (saves_root / "Mario.sav").read_bytes() == b"new-server-data"
+    assert (profile_dir / "Mario.sav").read_bytes() == b"new-server-data"
 
 
 # ---------------------------------------------------------------------------
@@ -638,8 +641,8 @@ def test_execute_download_creates_backup_of_existing_file(tmp_path: Path) -> Non
 def test_build_preview_uses_legacy_fallback_on_negotiate_404(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     saves_root = Path(config.emudeck.saves_path)
-    saves_root.mkdir(parents=True, exist_ok=True)
-    (saves_root / "Mario.sav").write_bytes(b"save-data")
+    (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
+    (saves_root / "retroarch/saves/Mario.sav").write_bytes(b"save-data")
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/roms":
@@ -668,8 +671,8 @@ def test_build_preview_uses_legacy_fallback_on_negotiate_404(tmp_path: Path) -> 
 def test_build_preview_uses_legacy_fallback_on_negotiate_405(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     saves_root = Path(config.emudeck.saves_path)
-    saves_root.mkdir(parents=True, exist_ok=True)
-    (saves_root / "Zelda.sav").write_bytes(b"save-data")
+    (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
+    (saves_root / "retroarch/saves/Zelda.sav").write_bytes(b"save-data")
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/roms":
@@ -697,9 +700,9 @@ def test_legacy_fallback_includes_download_in_push_pull_mode(tmp_path: Path) -> 
     """In push_pull mode legacy fallback should also generate download ops for server-only saves."""
     config = make_config(tmp_path)
     saves_root = Path(config.emudeck.saves_path)
-    saves_root.mkdir(parents=True, exist_ok=True)
+    (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
     # No local save for "Zelda" — server has one
-    (saves_root / "Mario.sav").write_bytes(b"save-data")
+    (saves_root / "retroarch/saves/Mario.sav").write_bytes(b"save-data")
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/roms":

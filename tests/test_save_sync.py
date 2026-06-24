@@ -28,8 +28,9 @@ def make_config(tmp_path: Path) -> AppConfig:
 def test_build_save_sync_preview_negotiates_local_saves(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     saves_root = Path(config.emudeck.saves_path).expanduser()
-    saves_root.mkdir(parents=True, exist_ok=True)
-    save_file = saves_root / "Mario.sav"
+    profile_dir = saves_root / "retroarch/saves"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    save_file = profile_dir / "Mario.sav"
     save_file.write_bytes(b"save-data")
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -90,8 +91,8 @@ def test_build_save_sync_preview_negotiates_local_saves(tmp_path: Path) -> None:
 def test_save_sync_command_prints_preview(monkeypatch, tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     saves_root = tmp_path / "saves"
-    saves_root.mkdir(parents=True, exist_ok=True)
-    (saves_root / "Mario.sav").write_bytes(b"save-data")
+    (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
+    (saves_root / "retroarch/saves/Mario.sav").write_bytes(b"save-data")
     config_path.write_text(
         f"""
 [romm]
@@ -158,9 +159,9 @@ def test_save_sync_apply_only_file_executes_single_upload(
 ) -> None:
     config_path = tmp_path / "config.toml"
     saves_root = tmp_path / "saves"
-    saves_root.mkdir(parents=True, exist_ok=True)
-    (saves_root / "Mario.sav").write_bytes(b"save-data")
-    (saves_root / "Zelda.sav").write_bytes(b"save-data")
+    (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
+    (saves_root / "retroarch/saves/Mario.sav").write_bytes(b"save-data")
+    (saves_root / "retroarch/saves/Zelda.sav").write_bytes(b"save-data")
     config_path.write_text(
         f"""
 [romm]
@@ -302,8 +303,8 @@ def test_save_sync_apply_upload_fallback_to_existing_save_on_post_failure(
 ) -> None:
     config_path = tmp_path / "config.toml"
     saves_root = tmp_path / "saves"
-    saves_root.mkdir(parents=True, exist_ok=True)
-    (saves_root / "Monkey Hero (Europe) (En,Fr,De,It).srm").write_bytes(b"save-data")
+    (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
+    (saves_root / "retroarch/saves/Monkey Hero (Europe) (En,Fr,De,It).srm").write_bytes(b"save-data")
     config_path.write_text(
         f"""
 [romm]
@@ -464,8 +465,8 @@ def test_save_sync_apply_upload_fallback_uses_global_save_lookup(
 ) -> None:
     config_path = tmp_path / "config.toml"
     saves_root = tmp_path / "saves"
-    saves_root.mkdir(parents=True, exist_ok=True)
-    (saves_root / "Monkey Hero (Europe) (En,Fr,De,It).srm").write_bytes(b"save-data")
+    (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
+    (saves_root / "retroarch/saves/Monkey Hero (Europe) (En,Fr,De,It).srm").write_bytes(b"save-data")
     config_path.write_text(
         f"""
 [romm]
@@ -612,8 +613,9 @@ saves_path = "{saves_root}"
 def test_build_save_sync_preview_matches_tagged_save_name(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     saves_root = Path(config.emudeck.saves_path).expanduser()
-    saves_root.mkdir(parents=True, exist_ok=True)
-    save_file = saves_root / "Final Fantasy (USA) [2026-06-09_05-08-00].srm"
+    profile_dir = saves_root / "retroarch/saves"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    save_file = profile_dir / "Final Fantasy (USA) [2026-06-09_05-08-00].srm"
     save_file.write_bytes(b"save-data")
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -662,8 +664,9 @@ def test_build_save_sync_preview_matches_tagged_save_name(tmp_path: Path) -> Non
 def test_build_save_sync_preview_filters_redundant_upload_when_hash_matches(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     saves_root = Path(config.emudeck.saves_path).expanduser()
-    saves_root.mkdir(parents=True, exist_ok=True)
-    save_file = saves_root / "Monkey Hero (Europe) (En,Fr,De,It).srm"
+    profile_dir = saves_root / "retroarch/saves"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    save_file = profile_dir / "Monkey Hero (Europe) (En,Fr,De,It).srm"
     payload = b"save-data"
     save_file.write_bytes(payload)
 
@@ -729,9 +732,11 @@ def test_build_save_sync_preview_filters_redundant_upload_when_hash_matches(tmp_
 def test_build_save_sync_preview_excludes_state_files_from_save_payload(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     saves_root = Path(config.emudeck.saves_path).expanduser()
-    saves_root.mkdir(parents=True, exist_ok=True)
-    (saves_root / "Monkey Hero (Europe) (En,Fr,De,It).srm").write_bytes(b"save-data")
-    (saves_root / "Monkey Hero (Europe) (En,Fr,De,It).state").write_bytes(b"state-data")
+    profile_dir = saves_root / "retroarch/saves"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    (profile_dir / "Monkey Hero (Europe) (En,Fr,De,It).srm").write_bytes(b"save-data")
+    # .state files are excluded by the retroarch profile globs — not scanned at all
+    (profile_dir / "Monkey Hero (Europe) (En,Fr,De,It).state").write_bytes(b"state-data")
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/roms":
@@ -770,7 +775,7 @@ def test_build_save_sync_preview_excludes_state_files_from_save_payload(tmp_path
     client = RommApiClient(config, transport=httpx.MockTransport(handler))
     preview = build_save_sync_preview(config, client)
 
-    assert preview.scanned_files == 2
+    assert preview.scanned_files == 1  # .state excluded by profile globs, not counted
     assert preview.mapped_files == 1
-    assert preview.skipped_files == 1
+    assert preview.skipped_files == 0
     client.close()

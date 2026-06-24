@@ -21,12 +21,14 @@ from bifrost.api.models import (
 )
 from bifrost.config import AppConfig
 from bifrost.errors import ApiError, ConfigError
+from bifrost.saves.layout import EmudeckEsdeLayout, ScannedFile
 
 _log = logging.getLogger("bifrost.save_sync")
 
 _MULTISPACE_RE = re.compile(r"\s+")
 _TRAILING_TAG_RE = re.compile(r"\s*\[[^\]]+\]$")
 _STATE_FILE_RE = re.compile(r"\.state\d*(\.png)?$", re.IGNORECASE)
+_SLOT_SUFFIX_RE = re.compile(r"_\d+$")
 _SUPPORTED_SAVE_EXTENSIONS = {
     ".srm",
     ".sav",
@@ -65,6 +67,13 @@ class SaveSyncPreview:
     operations: list[SyncOperationSchema]
     skipped_paths: list[Path]
     session_id: int | None = None
+    # Maps file_name (basename) → destination directory for profile-aware downloads.
+    # Falls back to save_root when a file_name is not present.
+    profile_destinations: dict[str, Path] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.profile_destinations is None:
+            object.__setattr__(self, "profile_destinations", {})
 
 
 @dataclass(frozen=True)
@@ -85,6 +94,18 @@ def _hash_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _scanned_to_local(sf: ScannedFile) -> LocalSaveFile:
+    """Convert a layout-provider ScannedFile into a LocalSaveFile."""
+    stat_result = sf.path.stat()
+    return LocalSaveFile(
+        path=sf.path,
+        file_name=sf.path.name,
+        file_size_bytes=stat_result.st_size,
+        updated_at=datetime.fromtimestamp(stat_result.st_mtime, tz=UTC).isoformat(),
+        content_hash=_hash_file(sf.path),
+    )
 
 
 def scan_local_save_files(root: Path) -> list[LocalSaveFile]:
@@ -187,8 +208,12 @@ def _build_remote_rom_index(remote_roms: list[RomSummary]) -> dict[str, RomSumma
 def _build_local_save_state(
     local_save: LocalSaveFile,
     remote_index: dict[str, RomSummary],
+    emulator: str | None = None,
+    strip_slot_suffix: bool = False,
 ) -> tuple[ClientSaveState | None, str | None]:
     file_name_no_ext = local_save.path.stem
+    if strip_slot_suffix:
+        file_name_no_ext = _SLOT_SUFFIX_RE.sub("", file_name_no_ext)
     stripped_name = _strip_trailing_tags(file_name_no_ext)
     candidates = [local_save.file_name, file_name_no_ext, stripped_name]
 
@@ -209,7 +234,7 @@ def _build_local_save_state(
             rom_id=remote.id,
             file_name=local_save.file_name,
             slot=None,
-            emulator=None,
+            emulator=emulator,
             content_hash=local_save.content_hash,
             updated_at=local_save.updated_at,
             file_size_bytes=local_save.file_size_bytes,
@@ -249,15 +274,14 @@ def _is_redundant_upload_operation(
     return False
 
 
-def _is_redundant_download(operation: SyncOperationSchema, save_root: Path) -> bool:
-    """Return True if the local file already matches the server's content hash."""
+def _is_redundant_download(operation: SyncOperationSchema, destination: Path) -> bool:
+    """Return True if destination already matches the server's content hash."""
     server_hash = operation.server_content_hash
     if not server_hash:
         return False
-    local_path = save_root / operation.file_name
-    if not local_path.exists():
+    if not destination.exists():
         return False
-    return _hash_file(local_path).lower() == server_hash.lower()
+    return _hash_file(destination).lower() == server_hash.lower()
 
 
 def _backup_local_file(path: Path) -> Path | None:
@@ -390,14 +414,22 @@ def build_save_sync_preview(
         )
 
     save_root = _expand_path(config.emudeck.saves_path)
-    all_local_files = scan_local_save_files(save_root)
+    enabled_emulators = config.sync.profiles.enabled or None
+    layout = EmudeckEsdeLayout()
+    all_scanned = layout.scan_saves(save_root, enabled_emulators=enabled_emulators)
 
-    local_files = [
-        item
-        for item in all_local_files
-        if _matches_file_filter(item.file_name, file_filters)
-        or _matches_file_filter(str(item.path), file_filters)
+    # Apply optional file filters (--only-file / --rom-path scoping)
+    scanned_files = [
+        sf
+        for sf in all_scanned
+        if _matches_file_filter(sf.path.name, file_filters)
+        or _matches_file_filter(str(sf.path), file_filters)
     ]
+
+    # Build profile destination map for download path resolution in execute
+    profile_destinations: dict[str, Path] = {
+        sf.path.name: sf.path.parent for sf in all_scanned
+    }
 
     remote_roms = client.list_roms()
     remote_rom_index = _build_remote_rom_index(remote_roms)
@@ -408,14 +440,16 @@ def build_save_sync_preview(
     local_state_index: dict[tuple[int, str], ClientSaveState] = {}
     skipped_paths: list[Path] = []
 
-    for local_save in local_files:
-        # State files and non-save extensions are not synced by this module
-        if not _is_syncable_save_file(local_save.path):
-            skipped_paths.append(local_save.path)
-            continue
-        state, _rom_name = _build_local_save_state(local_save, remote_rom_index)
+    for sf in scanned_files:
+        local_save = _scanned_to_local(sf)
+        state, _rom_name = _build_local_save_state(
+            local_save,
+            remote_rom_index,
+            emulator=sf.profile.romm_emulator,
+            strip_slot_suffix=sf.profile.strip_slot_suffix,
+        )
         if state is None:
-            skipped_paths.append(local_save.path)
+            skipped_paths.append(sf.path)
             continue
         local_states.append(state)
         local_state_index[_save_lookup_key(state.rom_id, state.file_name)] = state
@@ -459,13 +493,14 @@ def build_save_sync_preview(
 
     return SaveSyncPreview(
         device_id=resolved_device_id,
-        scanned_files=len(local_files),
+        scanned_files=len(scanned_files),
         mapped_files=len(local_states),
         skipped_files=len(skipped_paths),
         local_saves=local_states,
         operations=filtered_operations,
         skipped_paths=skipped_paths,
         session_id=session_id,
+        profile_destinations=profile_destinations,
     )
 
 
@@ -607,8 +642,12 @@ def execute_save_sync_preview(
                 details.append(("download", operation.file_name, "failed (missing save_id)"))
                 continue
 
+            # Resolve destination directory: prefer profile-aware path, fall back to save_root
+            dest_dir = preview.profile_destinations.get(operation.file_name, save_root)
+            destination = dest_dir / operation.file_name
+
             # Skip download if local already matches server
-            if _is_redundant_download(operation, save_root):
+            if _is_redundant_download(operation, destination):
                 skipped += 1
                 details.append(("download", operation.file_name, "skipped (already in sync)"))
                 continue
@@ -618,7 +657,6 @@ def execute_save_sync_preview(
                 device_id=preview.device_id,
                 session_id=preview.session_id,
             )
-            destination = save_root / operation.file_name
             destination.parent.mkdir(parents=True, exist_ok=True)
             _backup_local_file(destination)
             destination.write_bytes(content)

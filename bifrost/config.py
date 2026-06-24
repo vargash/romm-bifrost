@@ -77,12 +77,23 @@ class AssetsConfig(BaseModel):
     )
 
 
+class SyncProfilesConfig(BaseModel):
+    """Per-emulator profile gating for save sync.
+
+    enabled: list of emulator ids to scan (e.g. ["retroarch", "mgba"]).
+    Empty list (default) means all supported profiles are active.
+    """
+
+    enabled: list[str] = Field(default_factory=list)
+
+
 class SyncConfig(BaseModel):
     """Save-sync defaults."""
 
     conflict_strategy: str = "ask"
     direction: Literal["push_pull", "push_only", "pull_only"] = "push_pull"
     parallel_workers: int = Field(default=16, ge=1)
+    profiles: SyncProfilesConfig = Field(default_factory=SyncProfilesConfig)
 
 
 class OutputConfig(BaseModel):
