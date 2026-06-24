@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -11,6 +12,7 @@ from typing import Any
 import httpx
 
 from bifrost.api.models import (
+    CompleteOutcome,
     DeviceCreatePayload,
     DeviceCreateResponse,
     HeartbeatResponse,
@@ -21,7 +23,6 @@ from bifrost.api.models import (
     StateSummary,
     StatsReturn,
     SyncCompletePayload,
-    SyncCompleteResponse,
     SyncNegotiatePayload,
     SyncNegotiateResponse,
 )
@@ -31,6 +32,7 @@ from bifrost.errors import ApiError, AuthenticationError, NetworkError
 
 RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
 DEFAULT_COLLECTION_PAGE_SIZE = 1000
+_log = logging.getLogger("bifrost.api.client")
 
 
 def _find_rmm_token(payload: Any) -> str | None:
@@ -758,15 +760,38 @@ class RommApiClient:
         self,
         session_id: int,
         payload: SyncCompletePayload,
-    ) -> SyncCompleteResponse:
-        data = self._request_json(
-            "POST",
-            f"/api/sync/sessions/{session_id}/complete",
-            json=payload.model_dump(mode="python"),
-        )
+    ) -> CompleteOutcome:
+        try:
+            data = self._request_json(
+                "POST",
+                f"/api/sync/sessions/{session_id}/complete",
+                json=payload.model_dump(mode="python"),
+            )
+        except ApiError as exc:
+            status = exc.http_status
+            if status in {404, 409, 410}:
+                _log.info(
+                    "sync session %d already finalized (HTTP %s)", session_id, status
+                )
+                return CompleteOutcome.ALREADY_FINALIZED
+            if status is not None and 400 <= status < 500:
+                _log.warning(
+                    "sync session %d complete returned %s; treating as finalized",
+                    session_id,
+                    status,
+                )
+                return CompleteOutcome.CLIENT_ERROR
+            _log.warning(
+                "sync session %d complete failed (%s); will not retry", session_id, exc
+            )
+            return CompleteOutcome.RETRY_LATER
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("sync session %d complete network error: %s", session_id, exc)
+            return CompleteOutcome.RETRY_LATER
         if not isinstance(data, dict):
-            raise ApiError("Unexpected response type for /api/sync/sessions/{session_id}/complete")
-        return SyncCompleteResponse.model_validate(data)
+            _log.warning("sync session %d complete: unexpected response type", session_id)
+            return CompleteOutcome.RETRY_LATER
+        return CompleteOutcome.ACCEPTED
 
     def clear_cache(self) -> None:
         self._platforms_cache = None

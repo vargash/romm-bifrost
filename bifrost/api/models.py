@@ -2,7 +2,18 @@
 
 from __future__ import annotations
 
+from enum import StrEnum
+
 from pydantic import BaseModel, Field
+
+
+class CompleteOutcome(StrEnum):
+    """Result of complete_sync_session — mirrors HTTP semantics."""
+
+    ACCEPTED = "accepted"
+    ALREADY_FINALIZED = "already_finalized"  # 404/409/410
+    CLIENT_ERROR = "client_error"  # other 4xx (treated as finalized; logged as warning)
+    RETRY_LATER = "retry_later"  # 5xx / network
 
 
 class HeartbeatResponse(BaseModel):

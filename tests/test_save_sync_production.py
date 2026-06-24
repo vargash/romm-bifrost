@@ -11,7 +11,7 @@ import pytest
 from click.testing import CliRunner
 
 from bifrost.api.client import RommApiClient
-from bifrost.api.models import SyncOperationSchema
+from bifrost.api.models import CompleteOutcome, SyncCompletePayload, SyncOperationSchema
 from bifrost.cli import main
 from bifrost.config import AppConfig, EmudeckConfig, RommConfig, SyncConfig
 from bifrost.save_sync import (
@@ -383,7 +383,7 @@ def test_execute_conflict_local_wins_triggers_upload(tmp_path: Path) -> None:
     client.close()
 
     assert calls["upload"] == 1
-    assert calls["track"] == 1
+    assert calls["track"] == 0  # track_save removed post-upload (redundant)
     assert calls["complete"] == 1
     assert result.executed == 1
     assert result.failed == 0
@@ -824,3 +824,173 @@ def test_cli_save_sync_conflict_server_wins(
     assert result.exit_code == 0
     assert calls["download"] == 1
     assert "Save Sync Execution" in result.output
+
+
+# ---------------------------------------------------------------------------
+# F2: complete_sync_session resilience (404/409/410 → ALREADY_FINALIZED)
+# ---------------------------------------------------------------------------
+
+
+def _make_client_for_complete(tmp_path: Path, status_code: int) -> tuple[RommApiClient, AppConfig]:
+    from bifrost.api.client import RetryConfig
+
+    config = make_config(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/api/sync/sessions/" in request.url.path:
+            return httpx.Response(status_code, json={"detail": "gone"})
+        return httpx.Response(404, json={})
+
+    # attempts=1 avoids retries+sleep for 5xx responses
+    client = RommApiClient(  # noqa: E501
+        config, transport=httpx.MockTransport(handler), retry=RetryConfig(attempts=1)
+    )
+    return client, config
+
+
+def test_complete_sync_session_404_returns_already_finalized(tmp_path: Path) -> None:
+    client, config = _make_client_for_complete(tmp_path, 404)
+    outcome = client.complete_sync_session(99, SyncCompletePayload())
+    client.close()
+    assert outcome == CompleteOutcome.ALREADY_FINALIZED
+
+
+def test_complete_sync_session_409_returns_already_finalized(tmp_path: Path) -> None:
+    client, config = _make_client_for_complete(tmp_path, 409)
+    outcome = client.complete_sync_session(99, SyncCompletePayload())
+    client.close()
+    assert outcome == CompleteOutcome.ALREADY_FINALIZED
+
+
+def test_complete_sync_session_410_returns_already_finalized(tmp_path: Path) -> None:
+    client, config = _make_client_for_complete(tmp_path, 410)
+    outcome = client.complete_sync_session(99, SyncCompletePayload())
+    client.close()
+    assert outcome == CompleteOutcome.ALREADY_FINALIZED
+
+
+def test_complete_sync_session_other_4xx_returns_client_error(tmp_path: Path) -> None:
+    client, config = _make_client_for_complete(tmp_path, 422)
+    outcome = client.complete_sync_session(99, SyncCompletePayload())
+    client.close()
+    assert outcome == CompleteOutcome.CLIENT_ERROR
+
+
+def test_complete_sync_session_5xx_returns_retry_later(tmp_path: Path) -> None:
+    client, config = _make_client_for_complete(tmp_path, 500)
+    outcome = client.complete_sync_session(99, SyncCompletePayload())
+    client.close()
+    assert outcome == CompleteOutcome.RETRY_LATER
+
+
+def test_complete_sync_session_200_returns_accepted(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/api/sync/sessions/" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "session": {
+                        "id": 99,
+                        "device_id": "device-1",
+                        "user_id": 1,
+                        "status": "completed",
+                        "initiated_at": "2026-06-22T00:00:00Z",
+                        "completed_at": "2026-06-22T00:00:01Z",
+                        "operations_planned": 0,
+                        "operations_completed": 0,
+                        "operations_failed": 0,
+                        "error_message": None,
+                        "created_at": "2026-06-22T00:00:00Z",
+                        "updated_at": "2026-06-22T00:00:01Z",
+                    }
+                },
+            )
+        return httpx.Response(404, json={})
+
+    client = RommApiClient(config, transport=httpx.MockTransport(handler))
+    outcome = client.complete_sync_session(99, SyncCompletePayload())
+    client.close()
+    assert outcome == CompleteOutcome.ACCEPTED
+
+
+# ---------------------------------------------------------------------------
+# F2: execute does NOT call track after upload
+# ---------------------------------------------------------------------------
+
+
+def test_execute_upload_does_not_call_track(tmp_path: Path) -> None:
+    """track_save not called after upload — upload already sets DeviceSaveSync."""
+    config = make_config(tmp_path)
+    saves_root = Path(config.emudeck.saves_path)
+    (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
+    (saves_root / "retroarch/saves/Mario.sav").write_bytes(b"local-data")
+
+    track_calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/roms":
+            return httpx.Response(
+                200,
+                json={"items": [{"id": 10, "name": "Mario", "fs_name": "Mario.zip"}], "total": 1},
+            )
+        if request.url.path == "/api/saves" and request.method == "GET":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/api/sync/negotiate":
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": 77,
+                    "operations": [
+                        {
+                            "action": "upload",
+                            "rom_id": 10,
+                            "save_id": None,
+                            "file_name": "Mario.sav",
+                            "reason": "New save",
+                        }
+                    ],
+                    "total_upload": 1,
+                    "total_download": 0,
+                    "total_conflict": 0,
+                    "total_no_op": 0,
+                },
+            )
+        if request.url.path == "/api/saves" and request.method == "POST":
+            return httpx.Response(
+                200,
+                json={"id": 55, "rom_id": 10, "file_name": "Mario.sav", "updated_at": "2026-06-22T00:00:00Z"},  # noqa: E501
+            )
+        if "/track" in request.url.path:
+            track_calls.append(request.url.path)
+            return httpx.Response(200, json={"id": 55})
+        if "/api/sync/sessions/" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "session": {
+                        "id": 77,
+                        "device_id": "device-1",
+                        "user_id": 1,
+                        "status": "completed",
+                        "initiated_at": "2026-06-22T00:00:00Z",
+                        "completed_at": "2026-06-22T00:00:01Z",
+                        "operations_planned": 1,
+                        "operations_completed": 1,
+                        "operations_failed": 0,
+                        "error_message": None,
+                        "created_at": "2026-06-22T00:00:00Z",
+                        "updated_at": "2026-06-22T00:00:01Z",
+                    }
+                },
+            )
+        return httpx.Response(404, json={})
+
+    client = RommApiClient(config, transport=httpx.MockTransport(handler))
+    preview = build_save_sync_preview(config, client)
+    result = execute_save_sync_preview(config, client, preview, is_interactive=False)
+    client.close()
+
+    assert result.executed == 1
+    assert track_calls == [], f"track was called unexpectedly: {track_calls}"

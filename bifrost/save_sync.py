@@ -13,6 +13,7 @@ from pathlib import Path
 from bifrost.api.client import RommApiClient
 from bifrost.api.models import (
     ClientSaveState,
+    CompleteOutcome,
     RomSummary,
     SaveSummary,
     SyncCompletePayload,
@@ -591,7 +592,7 @@ def execute_save_sync_preview(
                     )
                     continue
                 try:
-                    upload_response = client.upload_save_file(
+                    client.upload_save_file(
                         rom_id=operation.rom_id,
                         save_path=local_file.path,
                         device_id=preview.device_id,
@@ -615,7 +616,7 @@ def execute_save_sync_preview(
                             _save_lookup_key(operation.rom_id, operation.file_name)
                         )
                         if existing is not None:
-                            upload_response = client.upload_save_file(
+                            client.upload_save_file(
                                 rom_id=operation.rom_id,
                                 save_path=local_file.path,
                                 device_id=preview.device_id,
@@ -627,11 +628,6 @@ def execute_save_sync_preview(
                             raise exc
                     else:
                         raise exc
-                uploaded_id = (
-                    upload_response.get("id") if isinstance(upload_response, dict) else None
-                )
-                if isinstance(uploaded_id, int):
-                    client.track_save(uploaded_id, preview.device_id)
                 completed += 1
                 details.append(("upload", operation.file_name, "ok"))
                 continue
@@ -670,16 +666,17 @@ def execute_save_sync_preview(
             _log.error("save-sync op failed: %s %s: %s", operation.action, operation.file_name, exc)
 
     if preview.session_id is not None:
-        try:
-            client.complete_sync_session(
-                preview.session_id,
-                SyncCompletePayload(
-                    operations_completed=completed,
-                    operations_failed=failed,
-                ),
+        outcome = client.complete_sync_session(
+            preview.session_id,
+            SyncCompletePayload(
+                operations_completed=completed,
+                operations_failed=failed,
+            ),
+        )
+        if outcome == CompleteOutcome.RETRY_LATER:
+            _log.warning(
+                "sync session %d not confirmed; may auto-expire on server", preview.session_id
             )
-        except Exception as exc:  # noqa: BLE001
-            _log.warning("failed to complete sync session %d: %s", preview.session_id, exc)
 
     _log.info(
         "save-sync execute done: completed=%d failed=%d skipped=%d",

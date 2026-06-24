@@ -293,7 +293,7 @@ saves_path = "{saves_root}"
 
     assert result.exit_code == 0
     assert calls["upload"] == 1
-    assert calls["track"] == 1
+    assert calls["track"] == 0  # track_save removed post-upload (redundant)
     assert calls["complete"] == 1
     assert "Save Sync Execution" in result.output
 
@@ -304,7 +304,7 @@ def test_save_sync_apply_upload_fallback_to_existing_save_on_post_failure(
     config_path = tmp_path / "config.toml"
     saves_root = tmp_path / "saves"
     (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
-    (saves_root / "retroarch/saves/Monkey Hero (Europe) (En,Fr,De,It).srm").write_bytes(b"save-data")
+    (saves_root / "retroarch/saves/Monkey Hero (Europe) (En,Fr,De,It).srm").write_bytes(b"save-data")  # noqa: E501
     config_path.write_text(
         f"""
 [romm]
@@ -454,7 +454,7 @@ saves_path = "{saves_root}"
     assert result.exit_code == 0
     assert calls["post_upload"] == 3
     assert calls["put_upload"] == 1
-    assert calls["track"] == 1
+    assert calls["track"] == 0  # track_save removed post-upload (redundant)
     assert calls["complete"] == 1
     assert "Operations" in result.output
     assert "download" not in result.output
@@ -466,7 +466,7 @@ def test_save_sync_apply_upload_fallback_uses_global_save_lookup(
     config_path = tmp_path / "config.toml"
     saves_root = tmp_path / "saves"
     (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
-    (saves_root / "retroarch/saves/Monkey Hero (Europe) (En,Fr,De,It).srm").write_bytes(b"save-data")
+    (saves_root / "retroarch/saves/Monkey Hero (Europe) (En,Fr,De,It).srm").write_bytes(b"save-data")  # noqa: E501
     config_path.write_text(
         f"""
 [romm]
@@ -607,7 +607,7 @@ saves_path = "{saves_root}"
     assert result.exit_code == 0
     assert calls["post_upload"] == 3
     assert calls["put_upload"] == 1
-    assert calls["track"] == 1
+    assert calls["track"] == 0  # track_save removed post-upload (redundant)
 
 
 def test_build_save_sync_preview_matches_tagged_save_name(tmp_path: Path) -> None:
