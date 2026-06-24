@@ -680,7 +680,13 @@ def execute_save_sync_preview(
             )
             destination.parent.mkdir(parents=True, exist_ok=True)
             _backup_local_file(destination)
-            destination.write_bytes(content)
+            part = destination.with_name(destination.name + ".part")
+            try:
+                part.write_bytes(content)
+                os.replace(part, destination)
+            except Exception:
+                part.unlink(missing_ok=True)
+                raise
             client.confirm_save_download(save_id=operation.save_id, device_id=preview.device_id)
             completed += 1
             details.append(("download", operation.file_name, f"ok -> {destination}"))

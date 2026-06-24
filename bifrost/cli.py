@@ -34,6 +34,7 @@ from bifrost.config import (
     save_config,
 )
 from bifrost.errors import ApiError, AuthenticationError, ConfigError, NetworkError
+from bifrost.locking import SaveSyncLockError, save_sync_lock
 from bifrost.gamelist import apply_gamelist_plan, build_gamelist_plan
 from bifrost.logging_setup import setup_file_logging
 from bifrost.multidisc import (
@@ -927,14 +928,20 @@ def save_sync(
 
             execution = None
             if apply:
-                execution = execute_save_sync_preview(
-                    config,
-                    client,
-                    preview,
-                    file_filters=list(only_files),
-                    is_interactive=is_interactive,
-                    conflict_overrides=conflict_overrides if conflict_overrides else None,
-                )
+                try:
+                    with save_sync_lock():
+                        execution = execute_save_sync_preview(
+                            config,
+                            client,
+                            preview,
+                            file_filters=list(only_files),
+                            is_interactive=is_interactive,
+                            conflict_overrides=conflict_overrides if conflict_overrides else None,
+                        )
+                except SaveSyncLockError as exc:
+                    _cli_log.error("lock error: %s", exc)
+                    console.print(f"[red]Save sync already running:[/red] {exc}")
+                    raise SystemExit(EXIT_CONFIG_ERROR) from exc
     except AuthenticationError as exc:
         _cli_log.error("authentication error: %s", exc)
         console.print(f"[red]Authentication error:[/red] {exc}")
