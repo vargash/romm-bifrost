@@ -626,8 +626,10 @@ def execute_save_sync_preview(
                         overwrite=True,
                     )
                 except ApiError as exc:
-                    # Some RomM builds return 500 on POST when save already exists.
-                    if operation.save_id is None:
+                    # Legacy workaround: some RomM builds return 500 on POST when a save
+                    # already exists. Re-list saves to find the existing id and retry with PUT.
+                    # Only active when romm.legacy_upload_fallback = true in config.
+                    if operation.save_id is None and config.romm.legacy_upload_fallback:
                         if remote_save_index is None:
                             device_scoped = client.list_saves(device_id=preview.device_id)
                             global_scoped = client.list_saves()

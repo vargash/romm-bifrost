@@ -24,6 +24,7 @@ class RommConfig(BaseModel):
     client_token: str = Field(min_length=5)
     device_id: str = ""
     timeout_seconds: float = Field(default=10.0, ge=1.0)
+    legacy_upload_fallback: bool = False
 
 
 class NasConfig(BaseModel):

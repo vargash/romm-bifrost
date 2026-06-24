@@ -727,6 +727,12 @@ class RommApiClient:
             raise ApiError(f"Unexpected response type for /api/roms/{rom_id}")
         return data
 
+    def get_device(self, device_id: str) -> dict[str, Any]:
+        data = self._request_json("GET", f"/api/devices/{device_id}")
+        if not isinstance(data, dict):
+            raise ApiError(f"Unexpected response type for /api/devices/{device_id}")
+        return data
+
     def register_device(self, payload: DeviceCreatePayload) -> DeviceCreateResponse:
         data = self._request_json(
             "POST",

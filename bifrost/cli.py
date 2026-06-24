@@ -45,7 +45,13 @@ from bifrost.multidisc import (
     evaluate_m3u_operation,
     plan_m3u_operations,
 )
-from bifrost.preflight import PreflightResult, run_nas_check, run_save_preflight, run_sync_preflight
+from bifrost.preflight import (
+    PreflightResult,
+    run_nas_check,
+    run_save_api_preflight,
+    run_save_preflight,
+    run_sync_preflight,
+)
 from bifrost.save_sync import build_save_sync_preview, execute_save_sync_preview
 from bifrost.state_sync import build_state_sync_preview, execute_state_sync_preview
 from bifrost.symlink_manager import (
@@ -960,6 +966,11 @@ def save_sync(
             with RommApiClient(
                 config, timeout_seconds=config.romm.timeout_seconds, no_cache=no_cache
             ) as client:
+                # API-level preflight: device enrolled + negotiate capability
+                # Skipped in hook mode (adds latency; timeout + fail-open cover it)
+                if apply and on_event is None:
+                    _abort_on_preflight(run_save_api_preflight(config, client), console)
+
                 preview = build_save_sync_preview(
                     config,
                     client,
