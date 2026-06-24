@@ -1453,6 +1453,7 @@ def device_enroll(
     hostname_reported = (hostname or Prompt.ask("Hostname", default=hostname_value)).strip()
 
     mac_address_value = _get_mac_address()
+    existing_device_id = config.romm.device_id  # non-empty only if previously enrolled
 
     try:
         with RommApiClient(config, timeout_seconds=config.romm.timeout_seconds) as client:
@@ -1470,19 +1471,21 @@ def device_enroll(
                     reset_syncs=reset_syncs,
                 )
             )
-            # POST returns existing device without updating fields; PUT syncs current values.
-            client.update_device(
-                response.device_id,
-                DeviceUpdatePayload(
-                    name=device_name_value,
-                    platform=platform_value,
-                    client=client_value,
-                    client_version=client_version_value,
-                    hostname=hostname_reported,
-                    mac_address=mac_address_value,
-                    sync_mode="api",
-                ),
-            )
+            # POST with allow_existing returns the existing device without updating its fields.
+            # If the config already had this device_id, the device pre-existed → PUT to sync.
+            if existing_device_id and existing_device_id == response.device_id:
+                client.update_device(
+                    response.device_id,
+                    DeviceUpdatePayload(
+                        name=device_name_value,
+                        platform=platform_value,
+                        client=client_value,
+                        client_version=client_version_value,
+                        hostname=hostname_reported,
+                        mac_address=mac_address_value,
+                        sync_mode="api",
+                    ),
+                )
     except AuthenticationError as exc:
         console.print(f"[red]Authentication error:[/red] {exc}")
         raise SystemExit(EXIT_AUTH_ERROR) from exc
