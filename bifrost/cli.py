@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 import platform as sys_platform
 import re
 import shutil
+import signal
 import sys
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -62,6 +64,22 @@ EXIT_AUTH_ERROR = 3
 EXIT_API_ERROR = 4
 
 PAIRING_CODE_PATTERN = re.compile(r"^[A-Z0-9]{4}-?[A-Z0-9]{4}$", re.IGNORECASE)
+
+# ES-DE hook events: (event-name, installed-script-filename)
+_ESDE_HOOK_EVENTS: list[tuple[str, str]] = [
+    ("startup", "10-bifrost-sync.sh"),
+    ("game-start", "10-bifrost-pull.sh"),
+    ("game-end", "10-bifrost-push.sh"),
+    ("quit", "10-bifrost-flush.sh"),
+    ("poweroff", "10-bifrost-flush.sh"),
+    ("reboot", "10-bifrost-flush.sh"),
+    ("suspend", "10-bifrost-push.sh"),
+]
+
+_ESDE_EVENT_DOWNLOAD_ONLY: frozenset[str] = frozenset({"game-start"})
+_ESDE_EVENT_UPLOAD_ONLY: frozenset[str] = frozenset(
+    {"game-end", "suspend", "quit", "poweroff", "reboot"}
+)
 
 
 def _abort_on_preflight(result: PreflightResult, console: Console) -> None:
@@ -863,12 +881,38 @@ def sync(config_path: Path | None, apply: bool, no_cache: bool) -> None:
     help="Filter sync to one or more file names/path fragments.",
 )
 @click.option("--no-cache", "no_cache", is_flag=True, help="Bypass disk cache for this run.")
+@click.option(
+    "--on-event",
+    "on_event",
+    type=click.Choice(
+        ["startup", "game-start", "game-end", "quit", "poweroff", "reboot", "suspend"]
+    ),
+    default=None,
+    help="Run as ES-DE event hook; constrains direction and enables fail-open behavior.",
+)
+@click.option(
+    "--rom-path",
+    "rom_path",
+    type=str,
+    default=None,
+    help="Scope sync to this ROM file (ES-DE $1 argument; stem used as file filter).",
+)
+@click.option(
+    "--timeout",
+    "timeout_seconds",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Hard timeout in seconds; exits 0 on expiry (fail-open, for ES-DE event hooks).",
+)
 def save_sync(
     config_path: Path | None,
     device_id: str | None,
     apply: bool,
     only_files: tuple[str, ...],
     no_cache: bool,
+    on_event: str | None,
+    rom_path: str | None,
+    timeout_seconds: int | None,
 ) -> None:
     """Scan local saves and preview the RomM sync negotiation."""
 
@@ -888,76 +932,140 @@ def save_sync(
 
     is_interactive = sys.stdin.isatty() and sys.stdout.isatty()
     _cli_log.info(
-        "save-sync started: apply=%s interactive=%s filters=%s",
+        "save-sync started: apply=%s interactive=%s filters=%s on_event=%s",
         apply,
         is_interactive,
         list(only_files),
+        on_event,
     )
 
+    # Merge --rom-path stem into file filters
+    effective_filters: list[str] = list(only_files)
+    if rom_path:
+        rom_stem = Path(rom_path).stem
+        if rom_stem and rom_stem not in effective_filters:
+            effective_filters.append(rom_stem)
+
+    # Hard timeout via SIGALRM — fail-open on expiry
+    _timeout_active = timeout_seconds is not None
+    _prev_alarm_handler: Any = None
+    if _timeout_active:
+        def _alarm_handler(signum: int, frame: Any) -> None:
+            raise TimeoutError()
+        _prev_alarm_handler = signal.signal(signal.SIGALRM, _alarm_handler)
+        signal.alarm(timeout_seconds)  # type: ignore[arg-type]
+
     try:
-        with RommApiClient(config, timeout_seconds=config.romm.timeout_seconds, no_cache=no_cache) as client:
-            preview = build_save_sync_preview(
-                config,
-                client,
-                device_id=device_id,
-                file_filters=list(only_files),
-            )
+        try:
+            with RommApiClient(
+                config, timeout_seconds=config.romm.timeout_seconds, no_cache=no_cache
+            ) as client:
+                preview = build_save_sync_preview(
+                    config,
+                    client,
+                    device_id=device_id,
+                    file_filters=effective_filters if effective_filters else None,
+                )
 
-            # Interactive conflict resolution for "ask" strategy
-            conflict_overrides: dict[str, str] = {}
-            if apply and is_interactive and config.sync.conflict_strategy == "ask":
-                conflict_ops = [op for op in preview.operations if op.action == "conflict"]
-                if conflict_ops:
-                    console.print(
-                        f"[yellow]{len(conflict_ops)} conflict(s) require resolution:[/yellow]"
-                    )
-                for op in conflict_ops:
-                    console.print(
-                        f"  [bold]{op.file_name}[/bold] (rom_id={op.rom_id}): {op.reason}"
-                    )
-                    choice = Prompt.ask(
-                        "  Resolve as [u]pload (local wins), [d]ownload (server wins), or [s]kip?",
-                        choices=["u", "d", "s"],
-                        default="u",
-                    )
-                    conflict_overrides[op.file_name] = {
-                        "u": "upload",
-                        "d": "download",
-                        "s": "skip",
-                    }[choice]
+                # Event-based direction filtering
+                if on_event in _ESDE_EVENT_DOWNLOAD_ONLY:
+                    _allowed_actions: frozenset[str] | None = frozenset({"download", "conflict"})
+                    _event_conflict_res: str | None = "download"
+                elif on_event in _ESDE_EVENT_UPLOAD_ONLY:
+                    _allowed_actions = frozenset({"upload", "conflict"})
+                    _event_conflict_res = "upload"
+                else:
+                    _allowed_actions = None
+                    _event_conflict_res = None
 
-            execution = None
-            if apply:
-                try:
-                    with save_sync_lock():
-                        execution = execute_save_sync_preview(
-                            config,
-                            client,
-                            preview,
-                            file_filters=list(only_files),
-                            is_interactive=is_interactive,
-                            conflict_overrides=conflict_overrides if conflict_overrides else None,
+                if _allowed_actions is not None:
+                    preview = dataclasses.replace(
+                        preview,
+                        operations=[
+                            op for op in preview.operations if op.action in _allowed_actions
+                        ],
+                    )
+
+                # Conflict resolution: event-based auto-resolve or interactive
+                conflict_overrides: dict[str, str] = {}
+                if _event_conflict_res is not None:
+                    conflict_overrides = {
+                        op.file_name: _event_conflict_res
+                        for op in preview.operations
+                        if op.action == "conflict"
+                    }
+                elif apply and is_interactive and config.sync.conflict_strategy == "ask":
+                    conflict_ops = [op for op in preview.operations if op.action == "conflict"]
+                    if conflict_ops:
+                        console.print(
+                            f"[yellow]{len(conflict_ops)} conflict(s) require resolution:[/yellow]"
                         )
-                except SaveSyncLockError as exc:
-                    _cli_log.error("lock error: %s", exc)
-                    console.print(f"[red]Save sync already running:[/red] {exc}")
-                    raise SystemExit(EXIT_CONFIG_ERROR) from exc
-    except AuthenticationError as exc:
-        _cli_log.error("authentication error: %s", exc)
-        console.print(f"[red]Authentication error:[/red] {exc}")
-        raise SystemExit(EXIT_AUTH_ERROR) from exc
-    except ConfigError as exc:
-        _cli_log.error("config error: %s", exc)
-        console.print(f"[red]Configuration error:[/red] {exc}")
-        raise SystemExit(EXIT_CONFIG_ERROR) from exc
-    except (NetworkError, ApiError) as exc:
-        _cli_log.error("api/network error: %s", exc)
-        console.print(f"[red]API error:[/red] {exc}")
-        raise SystemExit(EXIT_API_ERROR) from exc
+                    for op in conflict_ops:
+                        console.print(
+                            f"  [bold]{op.file_name}[/bold] (rom_id={op.rom_id}): {op.reason}"
+                        )
+                        choice = Prompt.ask(
+                            "  Resolve as [u]pload (local wins),"
+                            " [d]ownload (server wins), or [s]kip?",
+                            choices=["u", "d", "s"],
+                            default="u",
+                        )
+                        conflict_overrides[op.file_name] = {
+                            "u": "upload",
+                            "d": "download",
+                            "s": "skip",
+                        }[choice]
+
+                execution = None
+                if apply:
+                    try:
+                        with save_sync_lock():
+                            execution = execute_save_sync_preview(
+                                config,
+                                client,
+                                preview,
+                                file_filters=effective_filters if effective_filters else None,
+                                is_interactive=is_interactive,
+                                conflict_overrides=conflict_overrides if conflict_overrides else None,
+                            )
+                    except SaveSyncLockError as exc:
+                        if on_event is not None:
+                            _cli_log.info(
+                                "save-sync already running; skipping hook (%s)", on_event
+                            )
+                            raise SystemExit(EXIT_OK) from exc
+                        _cli_log.error("lock error: %s", exc)
+                        console.print(f"[red]Save sync already running:[/red] {exc}")
+                        raise SystemExit(EXIT_CONFIG_ERROR) from exc
+        except AuthenticationError as exc:
+            _cli_log.error("authentication error: %s", exc)
+            console.print(f"[red]Authentication error:[/red] {exc}")
+            raise SystemExit(EXIT_AUTH_ERROR) from exc
+        except ConfigError as exc:
+            _cli_log.error("config error: %s", exc)
+            console.print(f"[red]Configuration error:[/red] {exc}")
+            raise SystemExit(EXIT_CONFIG_ERROR) from exc
+        except (NetworkError, ApiError) as exc:
+            _cli_log.error("api/network error: %s", exc)
+            console.print(f"[red]API error:[/red] {exc}")
+            raise SystemExit(EXIT_API_ERROR) from exc
+
+    except TimeoutError:
+        _cli_log.warning(
+            "save-sync timed out after %ds (on_event=%s); fail-open exit 0",
+            timeout_seconds,
+            on_event,
+        )
+        raise SystemExit(EXIT_OK)
+
+    finally:
+        if _timeout_active:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, _prev_alarm_handler)
 
     selected_operations = preview.operations
-    if only_files:
-        lowered_filters = [item.lower() for item in only_files]
+    if effective_filters:
+        lowered_filters = [item.lower() for item in effective_filters]
         selected_operations = [
             op
             for op in preview.operations
@@ -977,8 +1085,10 @@ def save_sync(
     summary.add_row("Operations", str(len(selected_operations)))
     if conflict_count:
         summary.add_row("Conflicts", str(conflict_count))
-    if only_files:
-        summary.add_row("File filter", ", ".join(only_files))
+    if effective_filters:
+        summary.add_row("File filter", ", ".join(effective_filters))
+    if on_event:
+        summary.add_row("Event", on_event)
     console.print(summary)
 
     operations_table = Table(title="Sync Operations")
@@ -987,7 +1097,9 @@ def save_sync(
     operations_table.add_column("Save")
     operations_table.add_column("Reason")
     _SAVE_ACTION_PRIORITY = {"conflict": 0, "download": 1, "upload": 2, "skip": 3}
-    for operation in sorted(selected_operations, key=lambda o: _SAVE_ACTION_PRIORITY.get(o.action, 9))[:25]:
+    for operation in sorted(
+        selected_operations, key=lambda o: _SAVE_ACTION_PRIORITY.get(o.action, 9)
+    )[:25]:
         operations_table.add_row(
             operation.action,
             str(operation.rom_id),
@@ -2125,6 +2237,189 @@ def systemd_uninstall(yes: bool) -> None:
             console.print(f"[red]removed[/red]  {dst}")
 
     console.print("\n[green]Uninstall complete.[/green]")
+    raise SystemExit(EXIT_OK)
+
+
+# ---------------------------------------------------------------------------
+# esde-hooks
+# ---------------------------------------------------------------------------
+
+
+def _esde_scripts_dir() -> Path:
+    return Path("~/ES-DE/scripts").expanduser()
+
+
+def _esde_script_content(event: str, bifrost_bin: str) -> str:
+    b = bifrost_bin
+    if event == "startup":
+        return (
+            "#!/bin/sh\n"
+            "# Bifrost save sync — full sync when ES-DE starts.\n"
+            "# Managed by bifrost esde-hooks install — do not edit manually.\n"
+            f'setsid "{b}" save-sync --apply \\\n'
+            "    --on-event startup >/dev/null 2>&1 &\n"
+            "exit 0\n"
+        )
+    if event == "game-start":
+        return (
+            "#!/bin/sh\n"
+            "# Bifrost save sync — pull save before game launch.\n"
+            "# Managed by bifrost esde-hooks install — do not edit manually.\n"
+            f'exec "{b}" save-sync --apply \\\n'
+            '    --rom-path "$1" --on-event game-start --timeout 8 >/dev/null 2>&1 || exit 0\n'
+        )
+    if event == "game-end":
+        return (
+            "#!/bin/sh\n"
+            "# Bifrost save sync — push save after game exits.\n"
+            "# Managed by bifrost esde-hooks install — do not edit manually.\n"
+            f'setsid "{b}" save-sync --apply \\\n'
+            '    --rom-path "$1" --on-event game-end >/dev/null 2>&1 &\n'
+            "exit 0\n"
+        )
+    if event in {"quit", "poweroff", "reboot"}:
+        return (
+            "#!/bin/sh\n"
+            f"# Bifrost save sync — flush saves on {event}.\n"
+            "# Managed by bifrost esde-hooks install — do not edit manually.\n"
+            f'"{b}" save-sync --apply \\\n'
+            f"    --on-event {event} --timeout 30 >/dev/null 2>&1 || exit 0\n"
+        )
+    if event == "suspend":
+        return (
+            "#!/bin/sh\n"
+            "# Bifrost save sync — best-effort push on suspend.\n"
+            "# Managed by bifrost esde-hooks install — do not edit manually.\n"
+            f'setsid "{b}" save-sync --apply \\\n'
+            "    --on-event suspend >/dev/null 2>&1 &\n"
+            "exit 0\n"
+        )
+    raise ValueError(f"Unknown ES-DE event: {event}")
+
+
+@main.group(name="esde-hooks", help="Install and manage Bifrost ES-DE custom event scripts.")
+def esde_hooks_group() -> None:
+    """ES-DE event script management."""
+
+
+@esde_hooks_group.command(name="install", help="Write Bifrost event scripts to ~/ES-DE/scripts/.")
+@click.option(
+    "--scripts-path",
+    "scripts_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Override ES-DE scripts root (default: ~/ES-DE/scripts/).",
+)
+@click.option(
+    "--bifrost-bin",
+    "bifrost_bin",
+    type=str,
+    default=None,
+    help="Override path to the bifrost binary.",
+)
+@click.option("--dry-run", is_flag=True, help="Show what would be written without making changes.")
+def esde_hooks_install(
+    scripts_path: Path | None,
+    bifrost_bin: str | None,
+    dry_run: bool,
+) -> None:
+    console = Console()
+    dst_root = scripts_path or _esde_scripts_dir()
+
+    resolved_bin = bifrost_bin or shutil.which("bifrost") or (sys.executable + " -m bifrost")
+
+    if not dry_run:
+        dst_root.mkdir(parents=True, exist_ok=True)
+
+    for event, script_name in _ESDE_HOOK_EVENTS:
+        event_dir = dst_root / event
+        script_path = event_dir / script_name
+        content = _esde_script_content(event, resolved_bin)
+
+        if dry_run:
+            console.print(f"[cyan]would write[/cyan]  {script_path}")
+        else:
+            event_dir.mkdir(parents=True, exist_ok=True)
+            script_path.write_text(content, encoding="utf-8")
+            script_path.chmod(0o755)
+            console.print(f"[green]written[/green]  {script_path}")
+
+    if dry_run:
+        console.print("\n[cyan]Dry run — no changes made.[/cyan]")
+    else:
+        console.print(
+            "\n[green]ES-DE hooks installed.[/green]\n"
+            "Enable in ES-DE: [bold]Main menu → Other settings → Enable custom event scripts[/bold]"
+        )
+    raise SystemExit(EXIT_OK)
+
+
+@esde_hooks_group.command(
+    name="status", help="Show status of installed Bifrost ES-DE event scripts."
+)
+@click.option(
+    "--scripts-path",
+    "scripts_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Override ES-DE scripts root (default: ~/ES-DE/scripts/).",
+)
+def esde_hooks_status(scripts_path: Path | None) -> None:
+    console = Console()
+    dst_root = scripts_path or _esde_scripts_dir()
+
+    table = Table(title="Bifrost ES-DE Hooks")
+    table.add_column("Event")
+    table.add_column("Script")
+    table.add_column("Exists")
+    table.add_column("Executable")
+
+    for event, script_name in _ESDE_HOOK_EVENTS:
+        script_path = dst_root / event / script_name
+        exists = script_path.exists()
+        executable = exists and os.access(script_path, os.X_OK)
+        table.add_row(
+            event,
+            str(script_path),
+            "[green]yes[/green]" if exists else "[red]no[/red]",
+            "[green]yes[/green]" if executable else ("[yellow]no[/yellow]" if exists else "—"),
+        )
+
+    console.print(table)
+    console.print(
+        f"\n[dim]ES-DE scripts root: {dst_root}[/dim]\n"
+        "[dim]Enable in ES-DE: Main menu → Other settings → Enable custom event scripts[/dim]"
+    )
+    raise SystemExit(EXIT_OK)
+
+
+@esde_hooks_group.command(name="uninstall", help="Remove Bifrost ES-DE event scripts.")
+@click.option(
+    "--scripts-path",
+    "scripts_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Override ES-DE scripts root (default: ~/ES-DE/scripts/).",
+)
+@click.option("--yes", is_flag=True, help="Skip confirmation prompt.")
+def esde_hooks_uninstall(scripts_path: Path | None, yes: bool) -> None:
+    console = Console()
+    dst_root = scripts_path or _esde_scripts_dir()
+
+    if not yes:
+        if not Confirm.ask("Remove all Bifrost ES-DE event scripts?"):
+            console.print("Aborted.")
+            raise SystemExit(EXIT_OK)
+
+    removed = 0
+    for event, script_name in _ESDE_HOOK_EVENTS:
+        script_path = dst_root / event / script_name
+        if script_path.exists():
+            script_path.unlink()
+            console.print(f"[red]removed[/red]  {script_path}")
+            removed += 1
+
+    console.print(f"\n[green]Removed {removed} script(s).[/green]")
     raise SystemExit(EXIT_OK)
 
 
