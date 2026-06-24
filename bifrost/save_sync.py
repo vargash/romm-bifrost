@@ -615,7 +615,7 @@ def execute_save_sync_preview(
                 _do_autocleanup = config.sync.autocleanup
                 _autocleanup_limit = config.sync.autocleanup_limit
                 try:
-                    client.upload_save_file(
+                    upload_result = client.upload_save_file(
                         rom_id=operation.rom_id,
                         save_path=local_file.path,
                         device_id=preview.device_id,
@@ -643,7 +643,7 @@ def execute_save_sync_preview(
                             _save_lookup_key(operation.rom_id, operation.file_name)
                         )
                         if existing is not None:
-                            client.upload_save_file(
+                            upload_result = client.upload_save_file(
                                 rom_id=operation.rom_id,
                                 save_path=local_file.path,
                                 device_id=preview.device_id,
@@ -655,6 +655,11 @@ def execute_save_sync_preview(
                             raise exc
                     else:
                         raise exc
+                # Establish device-save sync link so negotiate sees this device as current.
+                # POST /api/saves does not create DeviceSyncSchema automatically.
+                uploaded_save_id = upload_result.get("id") if isinstance(upload_result, dict) else None
+                if uploaded_save_id is not None:
+                    client.track_save_for_device(int(uploaded_save_id), preview.device_id)
                 completed += 1
                 details.append(("upload", operation.file_name, "ok"))
                 continue

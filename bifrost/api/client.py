@@ -365,6 +365,18 @@ class RommApiClient:
             params["optimistic"] = True
         return self._request_bytes("GET", f"/api/saves/{save_id}/content", params=params)
 
+    def track_save_for_device(self, save_id: int, device_id: str) -> None:
+        """POST /api/saves/{id}/track — create/enable DeviceSyncSchema for device."""
+        try:
+            self._request_json(
+                "POST",
+                f"/api/saves/{save_id}/track",
+                json={"device_id": device_id},
+            )
+            _log.debug("track_save_for_device: save_id=%d device_id=%s ok", save_id, device_id)
+        except ApiError as exc:
+            _log.warning("track_save_for_device: save_id=%d failed (%s); continuing", save_id, exc)
+
     def confirm_save_download(self, save_id: int, device_id: str) -> dict[str, Any]:
         data = self._request_json(
             "POST",
@@ -827,6 +839,7 @@ class RommApiClient:
         if not isinstance(data, dict):
             _log.warning("sync session %d complete: unexpected response type", session_id)
             return CompleteOutcome.RETRY_LATER
+        _log.debug("complete_sync_session response: session=%d data=%s", session_id, data)
         return CompleteOutcome.ACCEPTED
 
     def clear_cache(self) -> None:
