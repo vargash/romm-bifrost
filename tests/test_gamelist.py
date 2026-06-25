@@ -498,3 +498,37 @@ def test_apply_gamelist_plan_preserves_alternative_emulator_absolute_path(tmp_pa
     xml = gamelist_path.read_text(encoding="utf-8")
     assert "<alternativeEmulator>mesen libretro</alternativeEmulator>" in xml
     assert "<playcount>5</playcount>" in xml
+
+
+def test_apply_gamelist_plan_preserves_platform_level_alternative_emulator(tmp_path: Path):
+    """Platform-level <alternativeEmulator> sits outside <gameList>; must survive write."""
+    config = make_config(tmp_path)
+    gamelist_path = tmp_path / "gamelists" / "nes" / "gamelist.xml"
+    gamelist_path.parent.mkdir(parents=True, exist_ok=True)
+    gamelist_path.write_text(
+        """<?xml version="1.0"?>
+<alternativeEmulator>
+    <label>DuckStation (Standalone)</label>
+</alternativeEmulator>
+<gameList>
+  <game>
+    <path>./Mario.nes</path>
+    <name>Super Mario Bros</name>
+    <playcount>3</playcount>
+    <lastplayed>20260622T173611</lastplayed>
+  </game>
+</gameList>
+""",
+        encoding="utf-8",
+    )
+
+    results = apply_gamelist_plan(config, StubClient())
+
+    assert len(results) == 1
+    xml = gamelist_path.read_text(encoding="utf-8")
+    assert "<alternativeEmulator>" in xml
+    assert "DuckStation (Standalone)" in xml
+    assert "<playcount>3</playcount>" in xml
+    assert "<lastplayed>20260622T173611</lastplayed>" in xml
+    # gameList must still be present and well-formed
+    assert "<gameList>" in xml

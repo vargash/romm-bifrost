@@ -367,9 +367,16 @@ def _reroute_path_to_m3u(game: ET.Element) -> None:
         path_node.text += ".m3u"
 
 
-def _parse_existing_tree(path: Path) -> ET.Element:
+def _parse_existing_file(path: Path) -> tuple[ET.Element, list[ET.Element]]:
+    """Parse gamelist.xml → (gamelist_element, top_level_siblings).
+
+    ES-DE writes platform-level settings (e.g. <alternativeEmulator>) as
+    siblings of <gameList> at the document root, producing technically-invalid
+    XML with multiple root elements. The siblings are captured and re-emitted
+    verbatim by _render_xml so they survive Bifrost round-trips.
+    """
     if not path.exists():
-        return ET.Element("gameList")
+        return ET.Element("gameList"), []
 
     try:
         root = ET.parse(path).getroot()
@@ -377,32 +384,36 @@ def _parse_existing_tree(path: Path) -> ET.Element:
         try:
             raw_xml = path.read_text(encoding="utf-8")
         except OSError:
-            return ET.Element("gameList")
+            return ET.Element("gameList"), []
 
-        # ES-DE can emit malformed documents with top-level nodes outside
-        # <gameList>; wrap and recover the embedded game list when possible.
         raw_xml = re.sub(r"^\s*<\?xml[^>]*\?>", "", raw_xml, count=1)
         wrapped = f"<bifrostRoot>{raw_xml}</bifrostRoot>"
         try:
             wrapped_root = ET.fromstring(wrapped)
         except ET.ParseError:
-            return ET.Element("gameList")
+            return ET.Element("gameList"), []
 
         recovered = wrapped_root.find("gameList")
         if recovered is None:
             recovered = wrapped_root.find(".//gameList")
         if recovered is None:
-            return ET.Element("gameList")
-        return deepcopy(recovered)
+            return ET.Element("gameList"), []
+        siblings = [deepcopy(child) for child in wrapped_root if child.tag != "gameList"]
+        return deepcopy(recovered), siblings
 
     if root.tag != "gameList":
         recovered = root.find("gameList")
         if recovered is None:
             recovered = root.find(".//gameList")
         if recovered is not None:
-            return deepcopy(recovered)
-        return ET.Element("gameList")
-    return root
+            return deepcopy(recovered), []
+        return ET.Element("gameList"), []
+    return root, []
+
+
+def _parse_existing_tree(path: Path) -> ET.Element:
+    gamelist, _ = _parse_existing_file(path)
+    return gamelist
 
 
 def _normalize_gamelist_path(path_text: str) -> str:
@@ -466,11 +477,16 @@ def _merge_game(existing_game: ET.Element, generated_game: ET.Element) -> bool:
     return True
 
 
-def _render_xml(root: ET.Element) -> str:
+def _render_xml(root: ET.Element, top_level_siblings: list[ET.Element] | None = None) -> str:
     root_for_write = deepcopy(root)
     ET.indent(root_for_write, space="  ")
-    xml = ET.tostring(root_for_write, encoding="unicode")
-    return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" + xml + "\n"
+    parts = ['<?xml version="1.0" encoding="UTF-8"?>']
+    for sibling in (top_level_siblings or []):
+        sib = deepcopy(sibling)
+        ET.indent(sib, space="  ")
+        parts.append(ET.tostring(sib, encoding="unicode"))
+    parts.append(ET.tostring(root_for_write, encoding="unicode"))
+    return "\n".join(parts) + "\n"
 
 
 def _roms_by_platform(roms: list[dict[str, Any]]) -> dict[int, list[dict[str, Any]]]:
@@ -621,7 +637,7 @@ def apply_gamelist_plan(config: AppConfig, client: RommApiClient) -> list[Gameli
             continue
 
         output_path = gamelists_root / platform.fs_slug / "gamelist.xml"
-        root = _parse_existing_tree(output_path)
+        root, top_level_siblings = _parse_existing_file(output_path)
 
         existing_by_path: dict[str, ET.Element] = {}
         for game in root.findall("game"):
@@ -716,7 +732,7 @@ def apply_gamelist_plan(config: AppConfig, client: RommApiClient) -> list[Gameli
 
         written = False
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(_render_xml(root), encoding="utf-8")
+        output_path.write_text(_render_xml(root, top_level_siblings), encoding="utf-8")
         written = True
 
         results.append(GamelistApplyResult(plan=plan, written=written))

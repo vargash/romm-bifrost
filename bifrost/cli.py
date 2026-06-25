@@ -2393,10 +2393,11 @@ def _esde_script_content(event: str, bifrost_bin: str) -> str:
     if event == "startup":
         return (
             "#!/bin/sh\n"
-            "# Bifrost save sync — full sync when ES-DE starts.\n"
+            "# Bifrost startup — save sync + gamelist update.\n"
             "# Managed by bifrost esde-hooks install — do not edit manually.\n"
             f'setsid "{b}" save-sync --apply \\\n'
             "    --on-event startup >/dev/null 2>&1 &\n"
+            f'setsid "{b}" gamelist --apply >/dev/null 2>&1 &\n'
             "exit 0\n"
         )
     if event == "game-start":
