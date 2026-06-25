@@ -319,14 +319,23 @@ class RommApiClient:
         overwrite: bool = True,
         autocleanup: bool = False,
         autocleanup_limit: int = 3,
+        emulator: str | None = None,
+        slot: str | None = None,
     ) -> dict[str, Any]:
         with save_path.open("rb") as handle:
             files = {"saveFile": (save_path.name, handle, "application/octet-stream")}
             if save_id is not None:
+                put_params: dict[str, Any] = {}
+                if device_id:
+                    put_params["device_id"] = device_id
+                if emulator:
+                    put_params["emulator"] = emulator
+                if slot:
+                    put_params["slot"] = slot
                 data = self._request_json(
                     "PUT",
                     f"/api/saves/{save_id}",
-                    params={"device_id": device_id} if device_id else None,
+                    params=put_params or None,
                     files=files,
                 )
             else:
@@ -338,6 +347,10 @@ class RommApiClient:
                 if autocleanup:
                     params["autocleanup"] = True
                     params["autocleanup_limit"] = autocleanup_limit
+                if emulator:
+                    params["emulator"] = emulator
+                if slot:
+                    params["slot"] = slot
                 data = self._request_json("POST", "/api/saves", params=params, files=files)
 
         if not isinstance(data, dict):
@@ -793,7 +806,8 @@ class RommApiClient:
             payload.device_id,
             len(payload.saves),
             [
-                {"rom_id": s.rom_id, "file_name": s.file_name, "content_hash": s.content_hash, "updated_at": s.updated_at}
+                {"rom_id": s.rom_id, "file_name": s.file_name, "content_hash": s.content_hash,
+                 "updated_at": s.updated_at, "emulator": s.emulator, "slot": s.slot}
                 for s in payload.saves
             ],
         )

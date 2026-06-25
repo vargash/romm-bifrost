@@ -215,8 +215,14 @@ def _build_local_save_state(
     strip_slot_suffix: bool = False,
 ) -> tuple[ClientSaveState | None, str | None]:
     file_name_no_ext = local_save.path.stem
+    slot: str | None = None
     if strip_slot_suffix:
+        slot_match = _SLOT_SUFFIX_RE.search(file_name_no_ext)
+        if slot_match:
+            slot = slot_match.group().lstrip("_")
         file_name_no_ext = _SLOT_SUFFIX_RE.sub("", file_name_no_ext)
+    if slot is None:
+        slot = "1"
     stripped_name = _strip_trailing_tags(file_name_no_ext)
     candidates = [local_save.file_name, file_name_no_ext, stripped_name]
 
@@ -236,7 +242,7 @@ def _build_local_save_state(
         ClientSaveState(
             rom_id=remote.id,
             file_name=local_save.file_name,
-            slot=None,
+            slot=slot,
             emulator=emulator,
             content_hash=local_save.content_hash,
             updated_at=local_save.updated_at,
@@ -448,7 +454,31 @@ def build_save_sync_preview(
 
     remote_roms = client.list_roms()
     remote_rom_index = _build_remote_rom_index(remote_roms)
-    remote_saves = client.list_saves(device_id=resolved_device_id)
+
+    # Detect orphan saves: this device uploaded them (origin_device_id matches) but
+    # DeviceSyncSchema was never created, so GET /api/saves?device_id=X excludes them.
+    # Repair by calling /track, then re-fetch the device-filtered list.
+    # NOTE: GET /api/saves (unfiltered) always returns device_syncs=[], so orphan
+    # detection must compare IDs between the two fetches, not inspect device_syncs.
+    all_remote_saves = client.list_saves()
+    device_saves = client.list_saves(device_id=resolved_device_id)
+    device_save_ids = {s.id for s in device_saves}
+
+    repaired = False
+    for save in all_remote_saves:
+        if save.origin_device_id == resolved_device_id and save.id not in device_save_ids:
+            _log.warning(
+                "repairing missing device_sync for save %d (%s) — calling /track",
+                save.id,
+                save.file_name,
+            )
+            try:
+                client.track_save_for_device(save.id, resolved_device_id)
+                repaired = True
+            except ApiError as exc:
+                _log.warning("track repair failed for save %d: %s", save.id, exc)
+
+    remote_saves = client.list_saves(device_id=resolved_device_id) if repaired else device_saves
 
     # Filter out saves this device has explicitly untracked — never sync them.
     untracked_save_ids: set[int] = set()
@@ -546,6 +576,12 @@ def execute_save_sync_preview(
     for local_save in local_files:
         local_index.setdefault(local_save.file_name.lower(), []).append(local_save)
 
+    # Index emulator/slot from negotiated local states for use during upload.
+    local_state_meta: dict[tuple[int, str], tuple[str | None, str | None]] = {
+        (s.rom_id, s.file_name.lower()): (s.emulator, s.slot)
+        for s in preview.local_saves
+    }
+
     selected_ops = [
         op
         for op in preview.operations
@@ -614,6 +650,9 @@ def execute_save_sync_preview(
                     continue
                 _do_autocleanup = config.sync.autocleanup
                 _autocleanup_limit = config.sync.autocleanup_limit
+                _emulator, _slot = local_state_meta.get(
+                    (operation.rom_id, operation.file_name.lower()), (None, None)
+                )
                 try:
                     upload_result = client.upload_save_file(
                         rom_id=operation.rom_id,
@@ -624,6 +663,8 @@ def execute_save_sync_preview(
                         overwrite=True,
                         autocleanup=_do_autocleanup,
                         autocleanup_limit=_autocleanup_limit,
+                        emulator=_emulator,
+                        slot=_slot,
                     )
                 except ApiError as exc:
                     # Legacy workaround: some RomM builds return 500 on POST when a save
@@ -650,6 +691,8 @@ def execute_save_sync_preview(
                                 session_id=preview.session_id,
                                 save_id=existing.id,
                                 overwrite=True,
+                                emulator=_emulator,
+                                slot=_slot,
                             )
                         else:
                             raise exc
