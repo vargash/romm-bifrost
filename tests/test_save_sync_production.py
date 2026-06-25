@@ -11,7 +11,7 @@ import pytest
 from click.testing import CliRunner
 
 from bifrost.api.client import RommApiClient
-from bifrost.api.models import SyncOperationSchema
+from bifrost.api.models import CompleteOutcome, SyncCompletePayload, SyncOperationSchema
 from bifrost.cli import main
 from bifrost.config import AppConfig, EmudeckConfig, RommConfig, SyncConfig
 from bifrost.save_sync import (
@@ -35,14 +35,14 @@ def make_config(tmp_path: Path, conflict_strategy: str = "ask") -> AppConfig:
             device_id="device-1",
         ),
         emudeck=EmudeckConfig(saves_path=str(tmp_path / "saves")),
-        sync=SyncConfig(conflict_strategy=conflict_strategy, sync_mode="push_pull"),
+        sync=SyncConfig(conflict_strategy=conflict_strategy, direction="push_pull"),
     )
 
 
 def config_path_for(tmp_path: Path, conflict_strategy: str = "ask") -> Path:
     saves_root = tmp_path / "saves"
-    saves_root.mkdir(parents=True, exist_ok=True)
-    (saves_root / "Mario.sav").write_bytes(b"save-data")
+    (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
+    (saves_root / "retroarch/saves/Mario.sav").write_bytes(b"save-data")
 
     cfg = tmp_path / "config.toml"
     cfg.write_text(
@@ -57,7 +57,7 @@ saves_path = "{saves_root}"
 
 [sync]
 conflict_strategy = "{conflict_strategy}"
-sync_mode = "push_pull"
+direction = "push_pull"
 """.strip(),
         encoding="utf-8",
     )
@@ -166,7 +166,7 @@ def test_is_redundant_download_true_when_hashes_match(tmp_path: Path) -> None:
         reason="test",
         server_content_hash=server_hash,
     )
-    assert _is_redundant_download(op, tmp_path) is True
+    assert _is_redundant_download(op, local_file) is True
 
 
 def test_is_redundant_download_false_when_hashes_differ(tmp_path: Path) -> None:
@@ -181,7 +181,7 @@ def test_is_redundant_download_false_when_hashes_differ(tmp_path: Path) -> None:
         reason="test",
         server_content_hash="deadbeef00000000",
     )
-    assert _is_redundant_download(op, tmp_path) is False
+    assert _is_redundant_download(op, local_file) is False
 
 
 def test_is_redundant_download_false_when_no_server_hash(tmp_path: Path) -> None:
@@ -195,7 +195,7 @@ def test_is_redundant_download_false_when_no_server_hash(tmp_path: Path) -> None
         file_name="Mario.sav",
         reason="test",
     )
-    assert _is_redundant_download(op, tmp_path) is False
+    assert _is_redundant_download(op, local_file) is False
 
 
 def test_is_redundant_download_false_when_file_missing(tmp_path: Path) -> None:
@@ -207,7 +207,7 @@ def test_is_redundant_download_false_when_file_missing(tmp_path: Path) -> None:
         reason="test",
         server_content_hash="aabbcc",
     )
-    assert _is_redundant_download(op, tmp_path) is False
+    assert _is_redundant_download(op, tmp_path / "Missing.sav") is False
 
 
 # ---------------------------------------------------------------------------
@@ -218,8 +218,9 @@ def test_is_redundant_download_false_when_file_missing(tmp_path: Path) -> None:
 def test_execute_conflict_server_wins_triggers_download(tmp_path: Path) -> None:
     config = make_config(tmp_path, conflict_strategy="server_wins")
     saves_root = Path(config.emudeck.saves_path)
-    saves_root.mkdir(parents=True, exist_ok=True)
-    (saves_root / "Mario.sav").write_bytes(b"local-data")
+    profile_dir = saves_root / "retroarch/saves"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    (profile_dir / "Mario.sav").write_bytes(b"local-data")
 
     calls: dict[str, int] = {"download": 0, "confirm": 0, "complete": 0}
 
@@ -290,11 +291,12 @@ def test_execute_conflict_server_wins_triggers_download(tmp_path: Path) -> None:
     assert calls["complete"] == 1
     assert result.executed == 1
     assert result.failed == 0
-    # Verify backup was created
-    assert (saves_root / "Mario.sav.bak").exists()
-    assert (saves_root / "Mario.sav.bak").read_bytes() == b"local-data"
-    # Verify server content was written
-    assert (saves_root / "Mario.sav").read_bytes() == b"server-data"
+    # Verify backup was created in the profile directory
+    profile_dir = saves_root / "retroarch/saves"
+    assert (profile_dir / "Mario.sav.bak").exists()
+    assert (profile_dir / "Mario.sav.bak").read_bytes() == b"local-data"
+    # Verify server content was written to the profile directory
+    assert (profile_dir / "Mario.sav").read_bytes() == b"server-data"
 
 
 # ---------------------------------------------------------------------------
@@ -305,8 +307,8 @@ def test_execute_conflict_server_wins_triggers_download(tmp_path: Path) -> None:
 def test_execute_conflict_local_wins_triggers_upload(tmp_path: Path) -> None:
     config = make_config(tmp_path, conflict_strategy="local_wins")
     saves_root = Path(config.emudeck.saves_path)
-    saves_root.mkdir(parents=True, exist_ok=True)
-    (saves_root / "Mario.sav").write_bytes(b"local-data")
+    (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
+    (saves_root / "retroarch/saves/Mario.sav").write_bytes(b"local-data")
 
     calls: dict[str, int] = {"upload": 0, "track": 0, "complete": 0}
 
@@ -381,7 +383,7 @@ def test_execute_conflict_local_wins_triggers_upload(tmp_path: Path) -> None:
     client.close()
 
     assert calls["upload"] == 1
-    assert calls["track"] == 1
+    assert calls["track"] == 0  # track_save removed post-upload (redundant)
     assert calls["complete"] == 1
     assert result.executed == 1
     assert result.failed == 0
@@ -396,8 +398,8 @@ def test_execute_conflict_ask_headless_resolves_as_upload(tmp_path: Path) -> Non
     """is_interactive=False with ask strategy should auto-resolve to upload."""
     config = make_config(tmp_path, conflict_strategy="ask")
     saves_root = Path(config.emudeck.saves_path)
-    saves_root.mkdir(parents=True, exist_ok=True)
-    (saves_root / "Mario.sav").write_bytes(b"local-data")
+    (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
+    (saves_root / "retroarch/saves/Mario.sav").write_bytes(b"local-data")
 
     calls: dict[str, int] = {"upload": 0}
 
@@ -482,10 +484,10 @@ def test_execute_download_skipped_when_hash_matches(tmp_path: Path) -> None:
     """If local file already matches server_content_hash, skip the download."""
     config = make_config(tmp_path)
     saves_root = Path(config.emudeck.saves_path)
-    saves_root.mkdir(parents=True, exist_ok=True)
+    (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
     content = b"identical-content"
     server_hash = hashlib.md5(content).hexdigest()
-    (saves_root / "Mario.sav").write_bytes(content)
+    (saves_root / "retroarch/saves/Mario.sav").write_bytes(content)
 
     calls: dict[str, int] = {"download": 0}
 
@@ -561,8 +563,8 @@ def test_execute_download_skipped_when_hash_matches(tmp_path: Path) -> None:
 def test_execute_download_creates_backup_of_existing_file(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     saves_root = Path(config.emudeck.saves_path)
-    saves_root.mkdir(parents=True, exist_ok=True)
-    (saves_root / "Mario.sav").write_bytes(b"old-local-data")
+    (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
+    (saves_root / "retroarch/saves/Mario.sav").write_bytes(b"old-local-data")
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/roms":
@@ -624,10 +626,11 @@ def test_execute_download_creates_backup_of_existing_file(tmp_path: Path) -> Non
     client.close()
 
     assert result.executed == 1
+    profile_dir = saves_root / "retroarch/saves"
     # Backup preserves original
-    assert (saves_root / "Mario.sav.bak").read_bytes() == b"old-local-data"
+    assert (profile_dir / "Mario.sav.bak").read_bytes() == b"old-local-data"
     # New content from server
-    assert (saves_root / "Mario.sav").read_bytes() == b"new-server-data"
+    assert (profile_dir / "Mario.sav").read_bytes() == b"new-server-data"
 
 
 # ---------------------------------------------------------------------------
@@ -638,8 +641,8 @@ def test_execute_download_creates_backup_of_existing_file(tmp_path: Path) -> Non
 def test_build_preview_uses_legacy_fallback_on_negotiate_404(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     saves_root = Path(config.emudeck.saves_path)
-    saves_root.mkdir(parents=True, exist_ok=True)
-    (saves_root / "Mario.sav").write_bytes(b"save-data")
+    (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
+    (saves_root / "retroarch/saves/Mario.sav").write_bytes(b"save-data")
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/roms":
@@ -668,8 +671,8 @@ def test_build_preview_uses_legacy_fallback_on_negotiate_404(tmp_path: Path) -> 
 def test_build_preview_uses_legacy_fallback_on_negotiate_405(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     saves_root = Path(config.emudeck.saves_path)
-    saves_root.mkdir(parents=True, exist_ok=True)
-    (saves_root / "Zelda.sav").write_bytes(b"save-data")
+    (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
+    (saves_root / "retroarch/saves/Zelda.sav").write_bytes(b"save-data")
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/roms":
@@ -697,9 +700,9 @@ def test_legacy_fallback_includes_download_in_push_pull_mode(tmp_path: Path) -> 
     """In push_pull mode legacy fallback should also generate download ops for server-only saves."""
     config = make_config(tmp_path)
     saves_root = Path(config.emudeck.saves_path)
-    saves_root.mkdir(parents=True, exist_ok=True)
+    (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
     # No local save for "Zelda" — server has one
-    (saves_root / "Mario.sav").write_bytes(b"save-data")
+    (saves_root / "retroarch/saves/Mario.sav").write_bytes(b"save-data")
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/roms":
@@ -821,3 +824,370 @@ def test_cli_save_sync_conflict_server_wins(
     assert result.exit_code == 0
     assert calls["download"] == 1
     assert "Save Sync Execution" in result.output
+
+
+# ---------------------------------------------------------------------------
+# F2: complete_sync_session resilience (404/409/410 → ALREADY_FINALIZED)
+# ---------------------------------------------------------------------------
+
+
+def _make_client_for_complete(tmp_path: Path, status_code: int) -> tuple[RommApiClient, AppConfig]:
+    from bifrost.api.client import RetryConfig
+
+    config = make_config(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/api/sync/sessions/" in request.url.path:
+            return httpx.Response(status_code, json={"detail": "gone"})
+        return httpx.Response(404, json={})
+
+    # attempts=1 avoids retries+sleep for 5xx responses
+    client = RommApiClient(  # noqa: E501
+        config, transport=httpx.MockTransport(handler), retry=RetryConfig(attempts=1)
+    )
+    return client, config
+
+
+def test_complete_sync_session_404_returns_already_finalized(tmp_path: Path) -> None:
+    client, config = _make_client_for_complete(tmp_path, 404)
+    outcome = client.complete_sync_session(99, SyncCompletePayload())
+    client.close()
+    assert outcome == CompleteOutcome.ALREADY_FINALIZED
+
+
+def test_complete_sync_session_409_returns_already_finalized(tmp_path: Path) -> None:
+    client, config = _make_client_for_complete(tmp_path, 409)
+    outcome = client.complete_sync_session(99, SyncCompletePayload())
+    client.close()
+    assert outcome == CompleteOutcome.ALREADY_FINALIZED
+
+
+def test_complete_sync_session_410_returns_already_finalized(tmp_path: Path) -> None:
+    client, config = _make_client_for_complete(tmp_path, 410)
+    outcome = client.complete_sync_session(99, SyncCompletePayload())
+    client.close()
+    assert outcome == CompleteOutcome.ALREADY_FINALIZED
+
+
+def test_complete_sync_session_other_4xx_returns_client_error(tmp_path: Path) -> None:
+    client, config = _make_client_for_complete(tmp_path, 422)
+    outcome = client.complete_sync_session(99, SyncCompletePayload())
+    client.close()
+    assert outcome == CompleteOutcome.CLIENT_ERROR
+
+
+def test_complete_sync_session_5xx_returns_retry_later(tmp_path: Path) -> None:
+    client, config = _make_client_for_complete(tmp_path, 500)
+    outcome = client.complete_sync_session(99, SyncCompletePayload())
+    client.close()
+    assert outcome == CompleteOutcome.RETRY_LATER
+
+
+def test_complete_sync_session_200_returns_accepted(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/api/sync/sessions/" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "session": {
+                        "id": 99,
+                        "device_id": "device-1",
+                        "user_id": 1,
+                        "status": "completed",
+                        "initiated_at": "2026-06-22T00:00:00Z",
+                        "completed_at": "2026-06-22T00:00:01Z",
+                        "operations_planned": 0,
+                        "operations_completed": 0,
+                        "operations_failed": 0,
+                        "error_message": None,
+                        "created_at": "2026-06-22T00:00:00Z",
+                        "updated_at": "2026-06-22T00:00:01Z",
+                    }
+                },
+            )
+        return httpx.Response(404, json={})
+
+    client = RommApiClient(config, transport=httpx.MockTransport(handler))
+    outcome = client.complete_sync_session(99, SyncCompletePayload())
+    client.close()
+    assert outcome == CompleteOutcome.ACCEPTED
+
+
+# ---------------------------------------------------------------------------
+# F2: execute does NOT call track after upload
+# ---------------------------------------------------------------------------
+
+
+def test_execute_upload_does_not_call_track(tmp_path: Path) -> None:
+    """track_save not called after upload — upload already sets DeviceSaveSync."""
+    config = make_config(tmp_path)
+    saves_root = Path(config.emudeck.saves_path)
+    (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
+    (saves_root / "retroarch/saves/Mario.sav").write_bytes(b"local-data")
+
+    track_calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/roms":
+            return httpx.Response(
+                200,
+                json={"items": [{"id": 10, "name": "Mario", "fs_name": "Mario.zip"}], "total": 1},
+            )
+        if request.url.path == "/api/saves" and request.method == "GET":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/api/sync/negotiate":
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": 77,
+                    "operations": [
+                        {
+                            "action": "upload",
+                            "rom_id": 10,
+                            "save_id": None,
+                            "file_name": "Mario.sav",
+                            "reason": "New save",
+                        }
+                    ],
+                    "total_upload": 1,
+                    "total_download": 0,
+                    "total_conflict": 0,
+                    "total_no_op": 0,
+                },
+            )
+        if request.url.path == "/api/saves" and request.method == "POST":
+            return httpx.Response(
+                200,
+                json={"id": 55, "rom_id": 10, "file_name": "Mario.sav", "updated_at": "2026-06-22T00:00:00Z"},  # noqa: E501
+            )
+        if "/track" in request.url.path:
+            track_calls.append(request.url.path)
+            return httpx.Response(200, json={"id": 55})
+        if "/api/sync/sessions/" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "session": {
+                        "id": 77,
+                        "device_id": "device-1",
+                        "user_id": 1,
+                        "status": "completed",
+                        "initiated_at": "2026-06-22T00:00:00Z",
+                        "completed_at": "2026-06-22T00:00:01Z",
+                        "operations_planned": 1,
+                        "operations_completed": 1,
+                        "operations_failed": 0,
+                        "error_message": None,
+                        "created_at": "2026-06-22T00:00:00Z",
+                        "updated_at": "2026-06-22T00:00:01Z",
+                    }
+                },
+            )
+        return httpx.Response(404, json={})
+
+    client = RommApiClient(config, transport=httpx.MockTransport(handler))
+    preview = build_save_sync_preview(config, client)
+    result = execute_save_sync_preview(config, client, preview, is_interactive=False)
+    client.close()
+
+    assert result.executed == 1
+    assert track_calls == [], f"track was called unexpectedly: {track_calls}"
+
+
+# ---------------------------------------------------------------------------
+# F3: is_untracked / is_current filtering
+# ---------------------------------------------------------------------------
+
+
+def _device_sync_entry(
+    device_id: str,
+    *,
+    is_untracked: bool = False,
+    is_current: bool = False,
+) -> dict[str, object]:
+    return {
+        "device_id": device_id,
+        "device_name": None,
+        "last_synced_at": "2026-06-22T00:00:00Z",
+        "is_untracked": is_untracked,
+        "is_current": is_current,
+    }
+
+
+def test_untracked_save_excluded_from_preview(tmp_path: Path) -> None:
+    """A save marked is_untracked for our device must not appear as any operation."""
+    config = make_config(tmp_path)
+    saves_root = Path(config.emudeck.saves_path)
+    (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
+    # No local file for Mario — server has it but we untracked it
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/roms":
+            return httpx.Response(
+                200,
+                json={"items": [{"id": 10, "name": "Mario", "fs_name": "Mario.zip"}], "total": 1},
+            )
+        if request.url.path == "/api/saves" and request.method == "GET":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 99,
+                        "rom_id": 10,
+                        "user_id": 1,
+                        "file_name": "Mario.sav",
+                        "file_name_no_tags": "Mario",
+                        "file_name_no_ext": "Mario",
+                        "file_extension": "sav",
+                        "file_path": "/saves",
+                        "file_size_bytes": 100,
+                        "full_path": "/saves/Mario.sav",
+                        "download_path": "/api/saves/99/content",
+                        "missing_from_fs": False,
+                        "created_at": "2026-06-22T00:00:00Z",
+                        "updated_at": "2026-06-22T00:00:00Z",
+                        "emulator": "retroarch",
+                        "content_hash": "aabbcc",
+                        "origin_device_id": "other-device",
+                        "device_syncs": [_device_sync_entry("device-1", is_untracked=True)],
+                    }
+                ],
+            )
+        if request.url.path == "/api/sync/negotiate":
+            # Server returns a download op — client must still filter it out
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": 55,
+                    "operations": [
+                        {
+                            "action": "download",
+                            "rom_id": 10,
+                            "save_id": 99,
+                            "file_name": "Mario.sav",
+                            "reason": "Server version is newer",
+                        }
+                    ],
+                    "total_upload": 0,
+                    "total_download": 1,
+                    "total_conflict": 0,
+                    "total_no_op": 0,
+                },
+            )
+        return httpx.Response(404, json={})
+
+    client = RommApiClient(config, transport=httpx.MockTransport(handler))
+    preview = build_save_sync_preview(config, client)
+    client.close()
+
+    assert all(op.save_id != 99 for op in preview.operations), (
+        "untracked save_id=99 should not appear in operations"
+    )
+
+
+def test_untracked_save_excluded_legacy_path(tmp_path: Path) -> None:
+    """is_untracked save is skipped in legacy negotiate (404 fallback)."""
+    config = make_config(tmp_path)
+    saves_root = Path(config.emudeck.saves_path)
+    (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/roms":
+            return httpx.Response(
+                200,
+                json={"items": [{"id": 10, "name": "Mario", "fs_name": "Mario.zip"}], "total": 1},
+            )
+        if request.url.path == "/api/saves" and request.method == "GET":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 99,
+                        "rom_id": 10,
+                        "user_id": 1,
+                        "file_name": "Mario.sav",
+                        "file_name_no_tags": "Mario",
+                        "file_name_no_ext": "Mario",
+                        "file_extension": "sav",
+                        "file_path": "/saves",
+                        "file_size_bytes": 100,
+                        "full_path": "/saves/Mario.sav",
+                        "download_path": "/api/saves/99/content",
+                        "missing_from_fs": False,
+                        "created_at": "2026-06-22T00:00:00Z",
+                        "updated_at": "2026-06-22T00:00:00Z",
+                        "emulator": "retroarch",
+                        "content_hash": "aabbcc",
+                        "origin_device_id": "other-device",
+                        "device_syncs": [_device_sync_entry("device-1", is_untracked=True)],
+                    }
+                ],
+            )
+        if request.url.path == "/api/sync/negotiate":
+            return httpx.Response(404, json={"detail": "Not Found"})
+        return httpx.Response(404, json={})
+
+    client = RommApiClient(config, transport=httpx.MockTransport(handler))
+    preview = build_save_sync_preview(config, client)
+    client.close()
+
+    assert preview.session_id is None  # legacy path
+    assert len(preview.operations) == 0, "untracked save must not produce operations in legacy path"
+
+
+def test_is_current_skips_upload_in_legacy_path(tmp_path: Path) -> None:
+    """is_current=True in legacy path: no upload op generated."""
+    import hashlib
+
+    config = make_config(tmp_path)
+    saves_root = Path(config.emudeck.saves_path)
+    (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
+    local_content = b"local-data"
+    (saves_root / "retroarch/saves/Mario.sav").write_bytes(local_content)
+    local_hash = hashlib.md5(local_content).hexdigest()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/roms":
+            return httpx.Response(
+                200,
+                json={"items": [{"id": 10, "name": "Mario", "fs_name": "Mario.zip"}], "total": 1},
+            )
+        if request.url.path == "/api/saves" and request.method == "GET":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 88,
+                        "rom_id": 10,
+                        "user_id": 1,
+                        "file_name": "Mario.sav",
+                        "file_name_no_tags": "Mario",
+                        "file_name_no_ext": "Mario",
+                        "file_extension": "sav",
+                        "file_path": "/saves",
+                        "file_size_bytes": len(local_content),
+                        "full_path": "/saves/Mario.sav",
+                        "download_path": "/api/saves/88/content",
+                        "missing_from_fs": False,
+                        "created_at": "2026-06-22T00:00:00Z",
+                        "updated_at": "2026-06-22T00:00:00Z",
+                        "emulator": "retroarch",
+                        "content_hash": local_hash,
+                        "origin_device_id": "device-1",
+                        "device_syncs": [_device_sync_entry("device-1", is_current=True)],
+                    }
+                ],
+            )
+        if request.url.path == "/api/sync/negotiate":
+            return httpx.Response(404, json={"detail": "Not Found"})
+        return httpx.Response(404, json={})
+
+    client = RommApiClient(config, transport=httpx.MockTransport(handler))
+    preview = build_save_sync_preview(config, client)
+    client.close()
+
+    assert preview.session_id is None  # legacy path
+    upload_ops = [op for op in preview.operations if op.action == "upload"]
+    assert len(upload_ops) == 0, "is_current save must not generate upload in legacy path"

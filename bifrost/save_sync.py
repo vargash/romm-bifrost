@@ -13,6 +13,8 @@ from pathlib import Path
 from bifrost.api.client import RommApiClient
 from bifrost.api.models import (
     ClientSaveState,
+    CompleteOutcome,
+    DeviceSyncSchema,
     RomSummary,
     SaveSummary,
     SyncCompletePayload,
@@ -21,12 +23,15 @@ from bifrost.api.models import (
 )
 from bifrost.config import AppConfig
 from bifrost.errors import ApiError, ConfigError
+from bifrost.play_sessions import consume_pending_sessions
+from bifrost.saves.layout import EmudeckEsdeLayout, ScannedFile
 
 _log = logging.getLogger("bifrost.save_sync")
 
 _MULTISPACE_RE = re.compile(r"\s+")
 _TRAILING_TAG_RE = re.compile(r"\s*\[[^\]]+\]$")
 _STATE_FILE_RE = re.compile(r"\.state\d*(\.png)?$", re.IGNORECASE)
+_SLOT_SUFFIX_RE = re.compile(r"_\d+$")
 _SUPPORTED_SAVE_EXTENSIONS = {
     ".srm",
     ".sav",
@@ -65,6 +70,13 @@ class SaveSyncPreview:
     operations: list[SyncOperationSchema]
     skipped_paths: list[Path]
     session_id: int | None = None
+    # Maps file_name (basename) → destination directory for profile-aware downloads.
+    # Falls back to save_root when a file_name is not present.
+    profile_destinations: dict[str, Path] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.profile_destinations is None:
+            object.__setattr__(self, "profile_destinations", {})
 
 
 @dataclass(frozen=True)
@@ -85,6 +97,18 @@ def _hash_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _scanned_to_local(sf: ScannedFile) -> LocalSaveFile:
+    """Convert a layout-provider ScannedFile into a LocalSaveFile."""
+    stat_result = sf.path.stat()
+    return LocalSaveFile(
+        path=sf.path,
+        file_name=sf.path.name,
+        file_size_bytes=stat_result.st_size,
+        updated_at=datetime.fromtimestamp(stat_result.st_mtime, tz=UTC).isoformat(),
+        content_hash=_hash_file(sf.path),
+    )
 
 
 def scan_local_save_files(root: Path) -> list[LocalSaveFile]:
@@ -187,8 +211,18 @@ def _build_remote_rom_index(remote_roms: list[RomSummary]) -> dict[str, RomSumma
 def _build_local_save_state(
     local_save: LocalSaveFile,
     remote_index: dict[str, RomSummary],
+    emulator: str | None = None,
+    strip_slot_suffix: bool = False,
 ) -> tuple[ClientSaveState | None, str | None]:
     file_name_no_ext = local_save.path.stem
+    slot: str | None = None
+    if strip_slot_suffix:
+        slot_match = _SLOT_SUFFIX_RE.search(file_name_no_ext)
+        if slot_match:
+            slot = slot_match.group().lstrip("_")
+        file_name_no_ext = _SLOT_SUFFIX_RE.sub("", file_name_no_ext)
+    if slot is None:
+        slot = "1"
     stripped_name = _strip_trailing_tags(file_name_no_ext)
     candidates = [local_save.file_name, file_name_no_ext, stripped_name]
 
@@ -208,8 +242,8 @@ def _build_local_save_state(
         ClientSaveState(
             rom_id=remote.id,
             file_name=local_save.file_name,
-            slot=None,
-            emulator=None,
+            slot=slot,
+            emulator=emulator,
             content_hash=local_save.content_hash,
             updated_at=local_save.updated_at,
             file_size_bytes=local_save.file_size_bytes,
@@ -232,6 +266,11 @@ def _build_remote_save_index(remote_saves: list[SaveSummary]) -> dict[tuple[int,
     return index
 
 
+def _find_device_sync(save: SaveSummary, device_id: str) -> DeviceSyncSchema | None:
+    """Return the DeviceSyncSchema entry for device_id on this save, or None."""
+    return next((ds for ds in save.device_syncs if ds.device_id == device_id), None)
+
+
 def _is_redundant_upload_operation(
     operation: SyncOperationSchema,
     local_state: ClientSaveState | None,
@@ -249,15 +288,14 @@ def _is_redundant_upload_operation(
     return False
 
 
-def _is_redundant_download(operation: SyncOperationSchema, save_root: Path) -> bool:
-    """Return True if the local file already matches the server's content hash."""
+def _is_redundant_download(operation: SyncOperationSchema, destination: Path) -> bool:
+    """Return True if destination already matches the server's content hash."""
     server_hash = operation.server_content_hash
     if not server_hash:
         return False
-    local_path = save_root / operation.file_name
-    if not local_path.exists():
+    if not destination.exists():
         return False
-    return _hash_file(local_path).lower() == server_hash.lower()
+    return _hash_file(destination).lower() == server_hash.lower()
 
 
 def _backup_local_file(path: Path) -> Path | None:
@@ -319,11 +357,13 @@ def _legacy_negotiate(
     local_states: list[ClientSaveState],
     remote_save_index: dict[tuple[int, str], SaveSummary],
     sync_mode: str,
+    device_id: str = "",
 ) -> tuple[list[SyncOperationSchema], None]:
     """Fallback when /api/sync/negotiate is unavailable (older RomM server).
 
     Builds upload/download operations by direct local↔server comparison.
     Downloads are only added in push_pull mode.
+    Saves marked is_current for our device are skipped (already in sync).
     """
     _log.warning(
         "using legacy negotiate fallback (no session tracking); %d local saves, %d remote saves",
@@ -345,20 +385,25 @@ def _legacy_negotiate(
                     reason="Save exists on client but not on server",
                 )
             )
-        elif (
-            state.content_hash
-            and remote.content_hash
-            and state.content_hash.lower() != remote.content_hash.lower()
-        ):
-            ops.append(
-                SyncOperationSchema(
-                    action="upload",
-                    rom_id=state.rom_id,
-                    file_name=state.file_name,
-                    save_id=remote.id,
-                    reason="Client version differs from server",
+        else:
+            ds = _find_device_sync(remote, device_id) if device_id else None
+            if ds is not None and ds.is_current:
+                _log.debug("legacy: skipping upload, already current: %s", state.file_name)
+                continue
+            if (
+                state.content_hash
+                and remote.content_hash
+                and state.content_hash.lower() != remote.content_hash.lower()
+            ):
+                ops.append(
+                    SyncOperationSchema(
+                        action="upload",
+                        rom_id=state.rom_id,
+                        file_name=state.file_name,
+                        save_id=remote.id,
+                        reason="Client version differs from server",
+                    )
                 )
-            )
 
     if sync_mode == "push_pull":
         for key, remote in remote_save_index.items():
@@ -390,32 +435,76 @@ def build_save_sync_preview(
         )
 
     save_root = _expand_path(config.emudeck.saves_path)
-    all_local_files = scan_local_save_files(save_root)
+    enabled_emulators = config.sync.profiles.enabled or None
+    layout = EmudeckEsdeLayout()
+    all_scanned = layout.scan_saves(save_root, enabled_emulators=enabled_emulators)
 
-    local_files = [
-        item
-        for item in all_local_files
-        if _matches_file_filter(item.file_name, file_filters)
-        or _matches_file_filter(str(item.path), file_filters)
+    # Apply optional file filters (--only-file / --rom-path scoping)
+    scanned_files = [
+        sf
+        for sf in all_scanned
+        if _matches_file_filter(sf.path.name, file_filters)
+        or _matches_file_filter(str(sf.path), file_filters)
     ]
+
+    # Build profile destination map for download path resolution in execute
+    profile_destinations: dict[str, Path] = {
+        sf.path.name: sf.path.parent for sf in all_scanned
+    }
 
     remote_roms = client.list_roms()
     remote_rom_index = _build_remote_rom_index(remote_roms)
-    remote_saves = client.list_saves(device_id=resolved_device_id)
-    remote_save_index = _build_remote_save_index(remote_saves)
+
+    # Detect orphan saves: this device uploaded them (origin_device_id matches) but
+    # DeviceSyncSchema was never created, so GET /api/saves?device_id=X excludes them.
+    # Repair by calling /track, then re-fetch the device-filtered list.
+    # NOTE: GET /api/saves (unfiltered) always returns device_syncs=[], so orphan
+    # detection must compare IDs between the two fetches, not inspect device_syncs.
+    all_remote_saves = client.list_saves()
+    device_saves = client.list_saves(device_id=resolved_device_id)
+    device_save_ids = {s.id for s in device_saves}
+
+    repaired = False
+    for save in all_remote_saves:
+        if save.origin_device_id == resolved_device_id and save.id not in device_save_ids:
+            _log.warning(
+                "repairing missing device_sync for save %d (%s) — calling /track",
+                save.id,
+                save.file_name,
+            )
+            try:
+                client.track_save_for_device(save.id, resolved_device_id)
+                repaired = True
+            except ApiError as exc:
+                _log.warning("track repair failed for save %d: %s", save.id, exc)
+
+    remote_saves = client.list_saves(device_id=resolved_device_id) if repaired else device_saves
+
+    # Filter out saves this device has explicitly untracked — never sync them.
+    untracked_save_ids: set[int] = set()
+    for save in remote_saves:
+        ds = _find_device_sync(save, resolved_device_id)
+        if ds is not None and ds.is_untracked:
+            untracked_save_ids.add(save.id)
+            _log.debug("skipping untracked save: %s (id=%d)", save.file_name, save.id)
+
+    tracked_remote_saves = [s for s in remote_saves if s.id not in untracked_save_ids]
+    remote_save_index = _build_remote_save_index(tracked_remote_saves)
 
     local_states: list[ClientSaveState] = []
     local_state_index: dict[tuple[int, str], ClientSaveState] = {}
     skipped_paths: list[Path] = []
 
-    for local_save in local_files:
-        # State files and non-save extensions are not synced by this module
-        if not _is_syncable_save_file(local_save.path):
-            skipped_paths.append(local_save.path)
-            continue
-        state, _rom_name = _build_local_save_state(local_save, remote_rom_index)
+    for sf in scanned_files:
+        local_save = _scanned_to_local(sf)
+        state, _rom_name = _build_local_save_state(
+            local_save,
+            remote_rom_index,
+            emulator=sf.profile.romm_emulator,
+            strip_slot_suffix=sf.profile.strip_slot_suffix,
+        )
         if state is None:
-            skipped_paths.append(local_save.path)
+            skipped_paths.append(sf.path)
             continue
         local_states.append(state)
         local_state_index[_save_lookup_key(state.rom_id, state.file_name)] = state
@@ -442,7 +531,8 @@ def build_save_sync_preview(
             raw_operations, session_id = _legacy_negotiate(
                 local_states,
                 remote_save_index,
-                config.sync.sync_mode,
+                config.sync.direction,
+                device_id=resolved_device_id,
             )
         else:
             raise
@@ -450,22 +540,19 @@ def build_save_sync_preview(
     filtered_operations = [
         operation
         for operation in raw_operations
-        if not _is_redundant_upload_operation(
-            operation,
-            local_state_index.get(_save_lookup_key(operation.rom_id, operation.file_name)),
-            remote_save_index.get(_save_lookup_key(operation.rom_id, operation.file_name)),
-        )
+        if operation.save_id not in untracked_save_ids
     ]
 
     return SaveSyncPreview(
         device_id=resolved_device_id,
-        scanned_files=len(local_files),
+        scanned_files=len(scanned_files),
         mapped_files=len(local_states),
         skipped_files=len(skipped_paths),
         local_saves=local_states,
         operations=filtered_operations,
         skipped_paths=skipped_paths,
         session_id=session_id,
+        profile_destinations=profile_destinations,
     )
 
 
@@ -488,6 +575,12 @@ def execute_save_sync_preview(
     local_index: dict[str, list[LocalSaveFile]] = {}
     for local_save in local_files:
         local_index.setdefault(local_save.file_name.lower(), []).append(local_save)
+
+    # Index emulator/slot from negotiated local states for use during upload.
+    local_state_meta: dict[tuple[int, str], tuple[str | None, str | None]] = {
+        (s.rom_id, s.file_name.lower()): (s.emulator, s.slot)
+        for s in preview.local_saves
+    }
 
     selected_ops = [
         op
@@ -555,18 +648,29 @@ def execute_save_sync_preview(
                         ("upload", operation.file_name, "skipped (local file not found)")
                     )
                     continue
+                _do_autocleanup = config.sync.autocleanup
+                _autocleanup_limit = config.sync.autocleanup_limit
+                _emulator, _slot = local_state_meta.get(
+                    (operation.rom_id, operation.file_name.lower()), (None, None)
+                )
                 try:
-                    upload_response = client.upload_save_file(
+                    upload_result = client.upload_save_file(
                         rom_id=operation.rom_id,
                         save_path=local_file.path,
                         device_id=preview.device_id,
                         session_id=preview.session_id,
                         save_id=operation.save_id,
                         overwrite=True,
+                        autocleanup=_do_autocleanup,
+                        autocleanup_limit=_autocleanup_limit,
+                        emulator=_emulator,
+                        slot=_slot,
                     )
                 except ApiError as exc:
-                    # Some RomM builds return 500 on POST when save already exists.
-                    if operation.save_id is None:
+                    # Legacy workaround: some RomM builds return 500 on POST when a save
+                    # already exists. Re-list saves to find the existing id and retry with PUT.
+                    # Only active when romm.legacy_upload_fallback = true in config.
+                    if operation.save_id is None and config.romm.legacy_upload_fallback:
                         if remote_save_index is None:
                             device_scoped = client.list_saves(device_id=preview.device_id)
                             global_scoped = client.list_saves()
@@ -580,23 +684,25 @@ def execute_save_sync_preview(
                             _save_lookup_key(operation.rom_id, operation.file_name)
                         )
                         if existing is not None:
-                            upload_response = client.upload_save_file(
+                            upload_result = client.upload_save_file(
                                 rom_id=operation.rom_id,
                                 save_path=local_file.path,
                                 device_id=preview.device_id,
                                 session_id=preview.session_id,
                                 save_id=existing.id,
                                 overwrite=True,
+                                emulator=_emulator,
+                                slot=_slot,
                             )
                         else:
                             raise exc
                     else:
                         raise exc
-                uploaded_id = (
-                    upload_response.get("id") if isinstance(upload_response, dict) else None
-                )
-                if isinstance(uploaded_id, int):
-                    client.track_save(uploaded_id, preview.device_id)
+                # Establish device-save sync link so negotiate sees this device as current.
+                # POST /api/saves does not create DeviceSyncSchema automatically.
+                uploaded_save_id = upload_result.get("id") if isinstance(upload_result, dict) else None
+                if uploaded_save_id is not None:
+                    client.track_save_for_device(int(uploaded_save_id), preview.device_id)
                 completed += 1
                 details.append(("upload", operation.file_name, "ok"))
                 continue
@@ -607,22 +713,36 @@ def execute_save_sync_preview(
                 details.append(("download", operation.file_name, "failed (missing save_id)"))
                 continue
 
+            # Resolve destination directory: prefer profile-aware path, fall back to save_root
+            dest_dir = preview.profile_destinations.get(operation.file_name, save_root)
+            destination = dest_dir / operation.file_name
+
             # Skip download if local already matches server
-            if _is_redundant_download(operation, save_root):
+            if _is_redundant_download(operation, destination):
                 skipped += 1
                 details.append(("download", operation.file_name, "skipped (already in sync)"))
                 continue
 
+            use_optimistic = config.sync.optimistic_downloads
             content = client.download_save_file_content(
                 save_id=operation.save_id,
                 device_id=preview.device_id,
                 session_id=preview.session_id,
+                optimistic=use_optimistic,
             )
-            destination = save_root / operation.file_name
             destination.parent.mkdir(parents=True, exist_ok=True)
             _backup_local_file(destination)
-            destination.write_bytes(content)
-            client.confirm_save_download(save_id=operation.save_id, device_id=preview.device_id)
+            part = destination.with_name(destination.name + ".part")
+            try:
+                part.write_bytes(content)
+                os.replace(part, destination)
+            except Exception:
+                part.unlink(missing_ok=True)
+                raise
+            if not use_optimistic:
+                client.confirm_save_download(
+                    save_id=operation.save_id, device_id=preview.device_id
+                )
             completed += 1
             details.append(("download", operation.file_name, f"ok -> {destination}"))
 
@@ -632,16 +752,23 @@ def execute_save_sync_preview(
             _log.error("save-sync op failed: %s %s: %s", operation.action, operation.file_name, exc)
 
     if preview.session_id is not None:
-        try:
-            client.complete_sync_session(
-                preview.session_id,
-                SyncCompletePayload(
-                    operations_completed=completed,
-                    operations_failed=failed,
-                ),
+        pending_play_sessions = consume_pending_sessions()
+        if pending_play_sessions:
+            _log.info(
+                "including %d pending play session(s) in complete", len(pending_play_sessions)
             )
-        except Exception as exc:  # noqa: BLE001
-            _log.warning("failed to complete sync session %d: %s", preview.session_id, exc)
+        outcome = client.complete_sync_session(
+            preview.session_id,
+            SyncCompletePayload(
+                operations_completed=completed,
+                operations_failed=failed,
+                play_sessions=pending_play_sessions if pending_play_sessions else None,
+            ),
+        )
+        if outcome == CompleteOutcome.RETRY_LATER:
+            _log.warning(
+                "sync session %d not confirmed; may auto-expire on server", preview.session_id
+            )
 
     _log.info(
         "save-sync execute done: completed=%d failed=%d skipped=%d",

@@ -6,7 +6,7 @@ import os
 import stat
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import tomli_w
 from pydantic import BaseModel, Field, ValidationError
@@ -24,6 +24,7 @@ class RommConfig(BaseModel):
     client_token: str = Field(min_length=5)
     device_id: str = ""
     timeout_seconds: float = Field(default=10.0, ge=1.0)
+    legacy_upload_fallback: bool = False
 
 
 class NasConfig(BaseModel):
@@ -77,13 +78,27 @@ class AssetsConfig(BaseModel):
     )
 
 
+class SyncProfilesConfig(BaseModel):
+    """Per-emulator profile gating for save sync.
+
+    enabled: list of emulator ids to scan (e.g. ["retroarch", "mgba"]).
+    Empty list (default) means all supported profiles are active.
+    """
+
+    enabled: list[str] = Field(default_factory=list)
+
+
 class SyncConfig(BaseModel):
     """Save-sync defaults."""
 
     save_sync_enabled: bool = True
     conflict_strategy: str = "ask"
-    sync_mode: str = "push_pull"
+    direction: Literal["push_pull", "push_only", "pull_only"] = "push_pull"
     parallel_workers: int = Field(default=16, ge=1)
+    profiles: SyncProfilesConfig = Field(default_factory=SyncProfilesConfig)
+    optimistic_downloads: bool = True
+    autocleanup: bool = False
+    autocleanup_limit: int = Field(default=3, ge=1)
 
 
 class OutputConfig(BaseModel):
@@ -165,10 +180,27 @@ def _migrate_folder_map(data: dict[str, Any]) -> None:
             fm.setdefault(new_key, fm.pop(old_key))
 
 
+def _migrate_sync_mode(data: dict[str, Any]) -> None:
+    """Migrate legacy sync.sync_mode → sync.direction, in-place.
+
+    sync_mode was previously used both as the RomM device registration field and
+    as the internal sync direction ("push_pull" / "push_only" / "pull_only").
+    The registration field is now always "api"; sync.direction carries the internal meaning.
+    """
+    sync = data.get("sync")
+    if not isinstance(sync, dict):
+        return
+    old_value = sync.pop("sync_mode", None)
+    if old_value and "direction" not in sync:
+        valid = {"push_pull", "push_only", "pull_only"}
+        sync["direction"] = old_value if old_value in valid else "push_pull"
+
+
 def _parse_config(data: dict[str, Any]) -> AppConfig:
     if "romm" in data and "url" in data["romm"]:
         data["romm"]["url"] = _normalize_url(str(data["romm"]["url"]))
     _migrate_folder_map(data)
+    _migrate_sync_mode(data)
     try:
         return AppConfig.model_validate(data)
     except ValidationError as exc:

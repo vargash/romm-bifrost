@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -11,8 +12,10 @@ from typing import Any
 import httpx
 
 from bifrost.api.models import (
+    CompleteOutcome,
     DeviceCreatePayload,
     DeviceCreateResponse,
+    DeviceUpdatePayload,
     HeartbeatResponse,
     LibrarySetupResponse,
     PlatformSummary,
@@ -21,7 +24,6 @@ from bifrost.api.models import (
     StateSummary,
     StatsReturn,
     SyncCompletePayload,
-    SyncCompleteResponse,
     SyncNegotiatePayload,
     SyncNegotiateResponse,
 )
@@ -31,6 +33,7 @@ from bifrost.errors import ApiError, AuthenticationError, NetworkError
 
 RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
 DEFAULT_COLLECTION_PAGE_SIZE = 1000
+_log = logging.getLogger("bifrost.api.client")
 
 
 def _find_rmm_token(payload: Any) -> str | None:
@@ -314,14 +317,25 @@ class RommApiClient:
         session_id: int | None = None,
         save_id: int | None = None,
         overwrite: bool = True,
+        autocleanup: bool = False,
+        autocleanup_limit: int = 3,
+        emulator: str | None = None,
+        slot: str | None = None,
     ) -> dict[str, Any]:
         with save_path.open("rb") as handle:
             files = {"saveFile": (save_path.name, handle, "application/octet-stream")}
             if save_id is not None:
+                put_params: dict[str, Any] = {}
+                if device_id:
+                    put_params["device_id"] = device_id
+                if emulator:
+                    put_params["emulator"] = emulator
+                if slot:
+                    put_params["slot"] = slot
                 data = self._request_json(
                     "PUT",
                     f"/api/saves/{save_id}",
-                    params={"device_id": device_id} if device_id else None,
+                    params=put_params or None,
                     files=files,
                 )
             else:
@@ -330,10 +344,23 @@ class RommApiClient:
                     params["device_id"] = device_id
                 if session_id is not None:
                     params["session_id"] = session_id
+                if autocleanup:
+                    params["autocleanup"] = True
+                    params["autocleanup_limit"] = autocleanup_limit
+                if emulator:
+                    params["emulator"] = emulator
+                if slot:
+                    params["slot"] = slot
                 data = self._request_json("POST", "/api/saves", params=params, files=files)
 
         if not isinstance(data, dict):
             raise ApiError("Unexpected response type for save upload")
+        _log.debug(
+            "upload_save_file response: file=%s save_id=%s content_hash=%s",
+            save_path.name,
+            data.get("id"),
+            data.get("content_hash"),
+        )
         return data
 
     def download_save_file_content(
@@ -341,13 +368,28 @@ class RommApiClient:
         save_id: int,
         device_id: str | None = None,
         session_id: int | None = None,
+        optimistic: bool = False,
     ) -> bytes:
         params: dict[str, Any] = {}
         if device_id:
             params["device_id"] = device_id
         if session_id is not None:
             params["session_id"] = session_id
+        if optimistic:
+            params["optimistic"] = True
         return self._request_bytes("GET", f"/api/saves/{save_id}/content", params=params)
+
+    def track_save_for_device(self, save_id: int, device_id: str) -> None:
+        """POST /api/saves/{id}/track — create/enable DeviceSyncSchema for device."""
+        try:
+            self._request_json(
+                "POST",
+                f"/api/saves/{save_id}/track",
+                json={"device_id": device_id},
+            )
+            _log.debug("track_save_for_device: save_id=%d device_id=%s ok", save_id, device_id)
+        except ApiError as exc:
+            _log.warning("track_save_for_device: save_id=%d failed (%s); continuing", save_id, exc)
 
     def confirm_save_download(self, save_id: int, device_id: str) -> dict[str, Any]:
         data = self._request_json(
@@ -725,6 +767,12 @@ class RommApiClient:
             raise ApiError(f"Unexpected response type for /api/roms/{rom_id}")
         return data
 
+    def get_device(self, device_id: str) -> dict[str, Any]:
+        data = self._request_json("GET", f"/api/devices/{device_id}")
+        if not isinstance(data, dict):
+            raise ApiError(f"Unexpected response type for /api/devices/{device_id}")
+        return data
+
     def register_device(self, payload: DeviceCreatePayload) -> DeviceCreateResponse:
         data = self._request_json(
             "POST",
@@ -734,6 +782,13 @@ class RommApiClient:
         if not isinstance(data, dict):
             raise ApiError("Unexpected response type for /api/devices")
         return DeviceCreateResponse.model_validate(data)
+
+    def update_device(self, device_id: str, payload: DeviceUpdatePayload) -> None:
+        self._request_json(
+            "PUT",
+            f"/api/devices/{device_id}",
+            json=payload.model_dump(mode="python", exclude_none=True),
+        )
 
     def list_saves(self, device_id: str | None = None) -> list[SaveSummary]:
         params: dict[str, Any] = {}
@@ -745,28 +800,69 @@ class RommApiClient:
         return [SaveSummary.model_validate(item) for item in data if isinstance(item, dict)]
 
     def negotiate_sync(self, payload: SyncNegotiatePayload) -> SyncNegotiateResponse:
-        data = self._request_json(
-            "POST",
-            "/api/sync/negotiate",
-            json=payload.model_dump(mode="python"),
+        dumped = payload.model_dump(mode="python")
+        _log.debug(
+            "negotiate_sync request: device_id=%s saves=%d entries=%s",
+            payload.device_id,
+            len(payload.saves),
+            [
+                {"rom_id": s.rom_id, "file_name": s.file_name, "content_hash": s.content_hash,
+                 "updated_at": s.updated_at, "emulator": s.emulator, "slot": s.slot}
+                for s in payload.saves
+            ],
         )
+        data = self._request_json("POST", "/api/sync/negotiate", json=dumped)
         if not isinstance(data, dict):
             raise ApiError("Unexpected response type for /api/sync/negotiate")
-        return SyncNegotiateResponse.model_validate(data)
+        resp = SyncNegotiateResponse.model_validate(data)
+        _log.debug(
+            "negotiate_sync response: session=%s ops=%d reasons=%s",
+            resp.session_id,
+            len(resp.operations),
+            [{"action": op.action, "file_name": op.file_name, "reason": op.reason, "save_id": op.save_id, "server_content_hash": op.server_content_hash} for op in resp.operations],
+        )
+        return resp
 
     def complete_sync_session(
         self,
         session_id: int,
         payload: SyncCompletePayload,
-    ) -> SyncCompleteResponse:
-        data = self._request_json(
-            "POST",
-            f"/api/sync/sessions/{session_id}/complete",
-            json=payload.model_dump(mode="python"),
-        )
+    ) -> CompleteOutcome:
+        dumped = payload.model_dump(mode="python")
+        _log.debug("complete_sync_session request: session=%d payload=%s", session_id, dumped)
+        try:
+            data = self._request_json(
+                "POST",
+                f"/api/sync/sessions/{session_id}/complete",
+                json=dumped,
+            )
+        except ApiError as exc:
+            status = exc.http_status
+            if status in {404, 409, 410}:
+                _log.info(
+                    "sync session %d already finalized (HTTP %s): %s", session_id, status, exc
+                )
+                return CompleteOutcome.ALREADY_FINALIZED
+            if status is not None and 400 <= status < 500:
+                _log.warning(
+                    "sync session %d complete returned %s: %s",
+                    session_id,
+                    status,
+                    exc,
+                )
+                return CompleteOutcome.CLIENT_ERROR
+            _log.warning(
+                "sync session %d complete failed (%s); will not retry", session_id, exc
+            )
+            return CompleteOutcome.RETRY_LATER
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("sync session %d complete network error: %s", session_id, exc)
+            return CompleteOutcome.RETRY_LATER
         if not isinstance(data, dict):
-            raise ApiError("Unexpected response type for /api/sync/sessions/{session_id}/complete")
-        return SyncCompleteResponse.model_validate(data)
+            _log.warning("sync session %d complete: unexpected response type", session_id)
+            return CompleteOutcome.RETRY_LATER
+        _log.debug("complete_sync_session response: session=%d data=%s", session_id, data)
+        return CompleteOutcome.ACCEPTED
 
     def clear_cache(self) -> None:
         self._platforms_cache = None

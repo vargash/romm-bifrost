@@ -91,6 +91,46 @@ fanart = "fanart"
     assert fm.get("fanart") == "fanart"
 
 
+def test_load_config_migrates_legacy_sync_mode_to_direction(tmp_path: Path) -> None:
+    """Old sync.sync_mode is remapped to sync.direction; sync_mode field removed."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[romm]
+url = "http://romm.local"
+client_token = "rmm_token"
+
+[sync]
+sync_mode = "push_pull"
+""".strip(),
+        encoding="utf-8",
+    )
+    config_file.chmod(0o600)
+
+    config = load_config(config_file)
+    assert config.sync.direction == "push_pull"
+
+
+def test_load_config_migrates_sync_mode_unknown_value_to_default(tmp_path: Path) -> None:
+    """sync.sync_mode with a value not valid for direction defaults to push_pull."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[romm]
+url = "http://romm.local"
+client_token = "rmm_token"
+
+[sync]
+sync_mode = "api"
+""".strip(),
+        encoding="utf-8",
+    )
+    config_file.chmod(0o600)
+
+    config = load_config(config_file)
+    assert config.sync.direction == "push_pull"
+
+
 def test_save_config_sets_secure_mode(tmp_path: Path) -> None:
     app_config = AppConfig(romm=RommConfig(url="http://romm.local", client_token="rmm_token"))
     config_file = tmp_path / "config.toml"

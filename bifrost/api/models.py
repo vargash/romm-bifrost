@@ -2,7 +2,18 @@
 
 from __future__ import annotations
 
+from enum import StrEnum
+
 from pydantic import BaseModel, Field
+
+
+class CompleteOutcome(StrEnum):
+    """Result of complete_sync_session — mirrors HTTP semantics."""
+
+    ACCEPTED = "accepted"
+    ALREADY_FINALIZED = "already_finalized"  # 404/409/410
+    CLIENT_ERROR = "client_error"  # other 4xx (treated as finalized; logged as warning)
+    RETRY_LATER = "retry_later"  # 5xx / network
 
 
 class HeartbeatResponse(BaseModel):
@@ -74,6 +85,16 @@ class StatsReturn(BaseModel):
     REGION_BREAKDOWN: dict[str, object] | None = None
 
 
+class DeviceSyncSchema(BaseModel):
+    """Per-device sync metadata attached to each save (DeviceSaveSync on the server)."""
+
+    device_id: str
+    device_name: str | None = None
+    last_synced_at: str
+    is_untracked: bool
+    is_current: bool
+
+
 class SaveSummary(BaseModel):
     """Subset of save fields needed for sync preview."""
 
@@ -94,6 +115,8 @@ class SaveSummary(BaseModel):
     emulator: str | None = None
     slot: str | None = None
     content_hash: str | None = None
+    origin_device_id: str | None = None
+    device_syncs: list[DeviceSyncSchema] = Field(default_factory=list)
 
 
 class StateSummary(BaseModel):
@@ -208,6 +231,21 @@ class DeviceCreatePayload(BaseModel):
     allow_existing: bool = True
     allow_duplicate: bool = False
     reset_syncs: bool = False
+
+
+class DeviceUpdatePayload(BaseModel):
+    """Request body for PUT /api/devices/{device_id}."""
+
+    name: str | None = None
+    platform: str | None = None
+    client: str | None = None
+    client_version: str | None = None
+    ip_address: str | None = None
+    mac_address: str | None = None
+    hostname: str | None = None
+    sync_mode: str | None = None
+    sync_enabled: bool | None = None
+    sync_config: dict[str, object] | None = None
 
 
 class DeviceCreateResponse(BaseModel):

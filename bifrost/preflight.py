@@ -10,8 +10,13 @@ from __future__ import annotations
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from bifrost.config import AppConfig
+from bifrost.errors import ApiError, AuthenticationError, NetworkError
+
+if TYPE_CHECKING:
+    from bifrost.api.client import RommApiClient
 
 _MIN_FREE_MB = 200
 
@@ -123,5 +128,77 @@ def run_save_preflight(config: AppConfig) -> PreflightResult:
 
     _check_dir_writable("saves dir", saves, result)
     _check_disk_space("home", Path.home(), result)
+
+    return result
+
+
+def run_save_api_preflight(config: AppConfig, client: "RommApiClient") -> PreflightResult:
+    """API-level pre-flight for save-sync --apply (requires an open RommApiClient).
+
+    Checks:
+    (b) device_id configured + device exists in RomM
+    (c) POST /api/sync/negotiate capability ping:
+        200  → modern negotiate available
+        404/405 → legacy fallback mode (warn)
+        401/403 → token missing sync scopes (error)
+        other  → warn only (fail-open; RomM may be temporarily degraded)
+    """
+    from bifrost.api.models import SyncNegotiatePayload
+
+    result = PreflightResult()
+
+    device_id = config.romm.device_id.strip()
+    if not device_id:
+        result.errors.append(
+            "No device_id configured. Run 'bifrost device-enroll' first."
+        )
+        return result
+
+    # (b) Device exists
+    try:
+        client.get_device(device_id)
+    except ApiError as exc:
+        if exc.http_status == 404:
+            result.errors.append(
+                f"Device '{device_id}' not found in RomM. "
+                "Run 'bifrost device-enroll --replace' to re-register."
+            )
+        elif exc.http_status in {401, 403}:
+            result.errors.append(
+                f"Token lacks permission to read device info (HTTP {exc.http_status}). "
+                "Check token scopes in RomM."
+            )
+        else:
+            result.warnings.append(
+                f"Could not verify device '{device_id}' (HTTP {exc.http_status}): {exc}"
+            )
+    except (NetworkError, AuthenticationError) as exc:
+        result.warnings.append(f"Could not verify device (network/auth error): {exc}")
+
+    if not result.ok:
+        return result
+
+    # (c) Negotiate capability ping
+    try:
+        client.negotiate_sync(SyncNegotiatePayload(device_id=device_id, saves=[]))
+    except ApiError as exc:
+        if exc.http_status in {404, 405}:
+            result.warnings.append(
+                f"RomM /sync/negotiate not available (HTTP {exc.http_status}) — "
+                "legacy upload fallback will be used. "
+                "Set romm.legacy_upload_fallback = true in config.toml to suppress this warning."
+            )
+        elif exc.http_status in {401, 403}:
+            result.errors.append(
+                f"Token missing sync scopes (HTTP {exc.http_status}). "
+                "Ensure the token has 'saves.write' and 'sync' permissions in RomM."
+            )
+        else:
+            result.warnings.append(
+                f"Negotiate capability check returned HTTP {exc.http_status} — "
+                "sync may use legacy fallback."
+            )
+    except (NetworkError, AuthenticationError) as exc:
+        result.warnings.append(f"Negotiate capability check failed (will proceed): {exc}")
 
     return result

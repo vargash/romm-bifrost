@@ -27,12 +27,13 @@ def setup_file_logging(verbose: bool = False) -> Path:
     """Configure rotating file logger. Returns the log file path.
 
     Idempotent: safe to call multiple times per process.
+    Set BIFROST_DEBUG=1 in environment to force DEBUG level.
     """
     log_dir = _log_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "bifrost.log"
 
-    level = logging.DEBUG if verbose else logging.INFO
+    level = logging.DEBUG if (verbose or os.environ.get("BIFROST_DEBUG") == "1") else logging.INFO
 
     logger = logging.getLogger("bifrost")
     if logger.handlers:
