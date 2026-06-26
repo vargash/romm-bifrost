@@ -3,6 +3,7 @@ from pathlib import Path
 from click.testing import CliRunner
 
 from bifrost import cli
+from bifrost.config import CacheConfig
 
 
 def test_sync_dry_run_uses_plan_and_prints_summary(monkeypatch, tmp_path: Path):
@@ -15,6 +16,8 @@ def test_sync_dry_run_uses_plan_and_prints_summary(monkeypatch, tmp_path: Path):
 
         class sync:
             parallel_workers = 1
+
+        cache = CacheConfig(enabled=False)
 
     class DummyClient:
         def __init__(self, config, **kwargs):
@@ -64,6 +67,8 @@ def test_sync_apply_calls_apply_operations(monkeypatch, tmp_path: Path):
 
         class sync:
             parallel_workers = 1
+
+        cache = CacheConfig(enabled=False)
 
     class DummyClient:
         def __init__(self, config, **kwargs):

@@ -14,6 +14,9 @@ from bifrost.config import CacheConfig
 CACHE_KEYS: frozenset[str] = frozenset({"firmware", "platforms", "roms"})
 _FORMAT_VERSION = 1
 
+_META_LAST_APPLIED = "last_applied"
+_META_LAST_FULL_SYNC = "last_full_sync"
+
 
 @dataclass(frozen=True)
 class CacheKeyStatus:
@@ -159,13 +162,73 @@ class BifrostCache:
             tmp.chmod(0o600)
         tmp.replace(data_path)
 
+        now = datetime.now(UTC)
         meta = self._load_meta()
         meta["cache_format_version"] = _FORMAT_VERSION
-        meta[key] = {
-            "fetched_at": datetime.now(UTC).isoformat(),
+        key_meta: dict[str, Any] = {
+            "fetched_at": now.isoformat(),
             "item_count": len(data),
             "full_fetch": full_fetch,
         }
+        if key == "roms" and full_fetch:
+            key_meta["id_set"] = [
+                item["id"] for item in data if isinstance(item.get("id"), int)
+            ]
+            meta[_META_LAST_FULL_SYNC] = now.isoformat()
+        meta[key] = key_meta
+        meta[_META_LAST_APPLIED] = now.isoformat()
+        self._save_meta(meta)
+
+    # ------------------------------------------------------------------
+    # Sync state helpers
+    # ------------------------------------------------------------------
+
+    def get_last_applied(self) -> datetime | None:
+        """Return timestamp of last successful sync (full or incremental)."""
+        meta = self._load_meta()
+        ts_str = meta.get(_META_LAST_APPLIED)
+        if not isinstance(ts_str, str):
+            return None
+        try:
+            return datetime.fromisoformat(ts_str)
+        except ValueError:
+            return None
+
+    def set_last_applied(self, ts: datetime | None = None) -> None:
+        """Record timestamp of a completed sync run."""
+        meta = self._load_meta()
+        meta[_META_LAST_APPLIED] = (ts or datetime.now(UTC)).isoformat()
+        self._save_meta(meta)
+
+    def get_last_full_sync(self) -> datetime | None:
+        """Return timestamp of last full ROM fetch (full_fetch=True)."""
+        meta = self._load_meta()
+        ts_str = meta.get(_META_LAST_FULL_SYNC)
+        if not isinstance(ts_str, str):
+            return None
+        try:
+            return datetime.fromisoformat(ts_str)
+        except ValueError:
+            return None
+
+    def get_rom_id_set(self) -> set[int] | None:
+        """Return the ROM ID set stored during last full sync, or None if unavailable."""
+        meta = self._load_meta()
+        roms_meta = meta.get("roms")
+        if not isinstance(roms_meta, dict):
+            return None
+        id_list = roms_meta.get("id_set")
+        if not isinstance(id_list, list):
+            return None
+        return {item for item in id_list if isinstance(item, int)}
+
+    def update_rom_id_set(self, server_ids: list[int]) -> None:
+        """Overwrite the stored ROM ID set (called after --check-stale)."""
+        meta = self._load_meta()
+        roms_meta = meta.get("roms")
+        if isinstance(roms_meta, dict):
+            roms_meta["id_set"] = server_ids
+            meta["roms"] = roms_meta
         self._save_meta(meta)
 
     def invalidate(self, key: str | None = None) -> None:

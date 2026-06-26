@@ -22,7 +22,7 @@ from rich.table import Table
 
 from bifrost import __version__ as _bifrost_version
 from bifrost.api.client import RommApiClient, exchange_pairing_code
-from bifrost.api.models import DeviceCreatePayload, DeviceUpdatePayload
+from bifrost.api.models import DeviceCreatePayload, DeviceUpdatePayload, RomSummary
 from bifrost.cache import BifrostCache
 from bifrost.config import (
     AppConfig,
@@ -38,7 +38,7 @@ from bifrost.config import (
 )
 from bifrost.errors import ApiError, AuthenticationError, ConfigError, NetworkError
 from bifrost.locking import SaveSyncLockError, save_sync_lock
-from bifrost.gamelist import apply_gamelist_plan, build_gamelist_plan
+from bifrost.gamelist import apply_gamelist_delta, apply_gamelist_plan, build_gamelist_plan
 from bifrost.logging_setup import setup_file_logging
 from bifrost.multidisc import (
     M3uOperation,
@@ -61,7 +61,9 @@ from bifrost.symlink_manager import (
     apply_remove_operation,
     evaluate_operations,
     evaluate_remove_operation,
+    plan_incremental_symlink_ops,
     plan_stale_removals,
+    plan_stale_removals_from_deleted_ids,
     plan_symlink_operations,
 )
 
@@ -698,96 +700,62 @@ def gamelist(config_path: Path | None, apply: bool, no_cache: bool) -> None:
     raise SystemExit(EXIT_OK)
 
 
-@main.command(help="Plan/apply ROM, BIOS and asset symlinks for ES-DE.")
-@click.option(
-    "--config",
-    "config_path",
-    type=click.Path(path_type=Path, dir_okay=False),
-    default=None,
-    help="Override config file path (default: ~/.config/bifrost/config.toml).",
-)
-@click.option(
-    "--apply",
-    is_flag=True,
-    help="Apply filesystem changes. Without this flag, sync runs in dry-run mode.",
-)
-@click.option("--no-cache", "no_cache", is_flag=True, help="Bypass disk cache for this run.")
-def sync(config_path: Path | None, apply: bool, no_cache: bool) -> None:
-    """Create a dry-run plan or apply symlink operations."""
+def _sync_apply_ops(
+    all_ops: list[Any],
+    workers: int,
+    console: Console,
+    quiet: bool,
+) -> list[Any]:
+    """Apply a mixed list of sync operations in parallel, with optional progress."""
+    if not all_ops:
+        return []
 
-    console = Console()
-    resolved_path = config_path or default_config_path()
-
-    try:
-        config = load_config(resolved_path)
-    except ConfigError as exc:
-        console.print(f"[red]Configuration error:[/red] {exc}")
-        raise SystemExit(EXIT_CONFIG_ERROR) from exc
-
-    # NAS check runs in both dry-run and --apply: a down NAS makes the plan meaningless.
-    _abort_on_preflight(run_nas_check(config), console)
-
-    if apply:
-        _abort_on_preflight(run_sync_preflight(config), console)
-
-    try:
-        with RommApiClient(config, timeout_seconds=config.romm.timeout_seconds, no_cache=no_cache) as client:
-            ops = plan_symlink_operations(config, client)
-            m3u_ops = plan_m3u_operations(config, client)
-    except AuthenticationError as exc:
-        console.print(f"[red]Authentication error:[/red] {exc}")
-        raise SystemExit(EXIT_AUTH_ERROR) from exc
-    except (NetworkError, ApiError) as exc:
-        console.print(f"[red]API error:[/red] {exc}")
-        raise SystemExit(EXIT_API_ERROR) from exc
-
-    remove_ops = plan_stale_removals(config, ops)
-    all_ops: list[Any] = list(ops) + list(m3u_ops) + list(remove_ops)
-
-    workers = config.sync.parallel_workers
-    results: list[Any]
-    if apply:
-        if not all_ops:
-            results = []
-        else:
-            results = []
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TextColumn("{task.completed}/{task.total}"),
-                TimeRemainingColumn(),
-                console=console,
-            ) as progress:
-                task_id = progress.add_task("Applying sync", total=len(all_ops))
-                pending: list[Future[Any]] = []
-                with ThreadPoolExecutor(max_workers=workers) as ex:
-                    for op in all_ops:
-                        if isinstance(op, M3uOperation):
-                            results.append(apply_m3u_operation(op))
-                            progress.advance(task_id)
-                        elif isinstance(op, RemoveSymlinkOperation):
-                            results.append(apply_remove_operation(op))
-                            progress.advance(task_id)
-                        else:
-                            pending.append(ex.submit(apply_operation, op))
-                    for future in as_completed(pending):
-                        results.append(future.result())
-                        progress.advance(task_id)
-        mode_label = "apply"
+    results: list[Any] = []
+    if quiet:
+        pending: list[Future[Any]] = []
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for op in all_ops:
+                if isinstance(op, M3uOperation):
+                    results.append(apply_m3u_operation(op))
+                elif isinstance(op, RemoveSymlinkOperation):
+                    results.append(apply_remove_operation(op))
+                else:
+                    pending.append(ex.submit(apply_operation, op))
+            for future in as_completed(pending):
+                results.append(future.result())
     else:
-        sym_ops = [op for op in all_ops if not isinstance(op, (M3uOperation, RemoveSymlinkOperation))]
-        sym_results = iter(evaluate_operations(sym_ops, workers=workers))
-        results = []
-        for op in all_ops:
-            if isinstance(op, M3uOperation):
-                results.append(evaluate_m3u_operation(op))
-            elif isinstance(op, RemoveSymlinkOperation):
-                results.append(evaluate_remove_operation(op))
-            else:
-                results.append(next(sym_results))
-        mode_label = "dry-run"
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("{task.completed}/{task.total}"),
+            TimeRemainingColumn(),
+            console=console,
+        ) as progress:
+            task_id = progress.add_task("Applying sync", total=len(all_ops))
+            pending2: list[Future[Any]] = []
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                for op in all_ops:
+                    if isinstance(op, M3uOperation):
+                        results.append(apply_m3u_operation(op))
+                        progress.advance(task_id)
+                    elif isinstance(op, RemoveSymlinkOperation):
+                        results.append(apply_remove_operation(op))
+                        progress.advance(task_id)
+                    else:
+                        pending2.append(ex.submit(apply_operation, op))
+                for future in as_completed(pending2):
+                    results.append(future.result())
+                    progress.advance(task_id)
+    return results
 
+
+def _print_sync_summary(
+    results: list[Any],
+    mode_label: str,
+    console: Console,
+) -> dict[str, int]:
+    """Print sync summary and details tables. Returns action counts."""
     counts: dict[str, int] = {}
     by_category: dict[str, int] = {}
     error_by_category: dict[str, int] = {}
@@ -817,19 +785,18 @@ def sync(config_path: Path | None, apply: bool, no_cache: bool) -> None:
     summary.add_row("Errors", str(counts.get("error", 0)))
     console.print(summary)
 
-    details = Table(title="Sync Operation Preview")
-    details.add_column("Category")
-    details.add_column("Action")
-    details.add_column("Destination")
-    details.add_column("Target")
-    details.add_column("Detail")
-
     _SYNC_ACTION_PRIORITY = {
         "error": 0, "conflict": 1, "create": 2, "replace": 3, "remove": 4,
         "broken": 5, "missing-target": 6, "ok": 7, "skip": 8,
     }
     preview_results = sorted(results, key=lambda r: _SYNC_ACTION_PRIORITY.get(r.action, 9))
     max_rows = 25
+    details = Table(title="Sync Operation Preview")
+    details.add_column("Category")
+    details.add_column("Action")
+    details.add_column("Destination")
+    details.add_column("Target")
+    details.add_column("Detail")
     for result in preview_results[:max_rows]:
         details.add_row(
             result.operation.category,
@@ -838,13 +805,10 @@ def sync(config_path: Path | None, apply: bool, no_cache: bool) -> None:
             str(result.operation.target),
             result.detail,
         )
-
     if results:
         console.print(details)
         if len(results) > max_rows:
-            console.print(
-                f"[yellow]Showing first {max_rows} operations out of {len(results)}.[/yellow]"
-            )
+            console.print(f"[yellow]Showing first {max_rows} operations out of {len(results)}.[/yellow]")
 
     if error_by_category:
         error_table = Table(title="Sync Errors by Category")
@@ -854,17 +818,281 @@ def sync(config_path: Path | None, apply: bool, no_cache: bool) -> None:
             error_table.add_row(category, str(error_by_category[category]))
         console.print(error_table)
 
-    if not apply:
-        console.print(
-            "[cyan]Dry-run mode: no filesystem changes were made. "
-            "Re-run with --apply to execute.[/cyan]"
-        )
+    return counts
 
-    if apply and counts.get("error", 0):
-        console.print(
-            "[yellow]Apply completed with filesystem errors. "
-            "Check paths/permissions and re-run sync --apply.[/yellow]"
-        )
+
+@main.command(help="Plan/apply ROM, BIOS and asset symlinks for ES-DE.")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=None,
+    help="Override config file path (default: ~/.config/bifrost/config.toml).",
+)
+@click.option(
+    "--apply",
+    is_flag=True,
+    help="Apply filesystem changes. Without this flag, sync runs in dry-run mode.",
+)
+@click.option("--no-cache", "no_cache", is_flag=True, help="Bypass disk cache for this run.")
+@click.option(
+    "--incremental",
+    is_flag=True,
+    help=(
+        "Fast path: sync only ROMs updated since last sync (uses updated_after filter). "
+        "Skips stale removal. Falls back to full sync if no prior sync timestamp exists."
+    ),
+)
+@click.option(
+    "--check-stale",
+    "check_stale",
+    is_flag=True,
+    help=(
+        "Remove ROM symlinks whose IDs are no longer present in RomM "
+        "(uses GET /api/roms/identifiers). Does not require --apply."
+    ),
+)
+@click.option(
+    "--quiet",
+    is_flag=True,
+    help="Suppress all Rich output. Exits with non-zero code on errors only. For ES-DE hooks.",
+)
+def sync(
+    config_path: Path | None,
+    apply: bool,
+    no_cache: bool,
+    incremental: bool,
+    check_stale: bool,
+    quiet: bool,
+) -> None:
+    """Create a dry-run plan or apply symlink operations."""
+
+    console = Console()
+    resolved_path = config_path or default_config_path()
+
+    if incremental and check_stale:
+        console.print("[red]--incremental and --check-stale are mutually exclusive.[/red]")
+        raise SystemExit(EXIT_CONFIG_ERROR)
+
+    try:
+        config = load_config(resolved_path)
+    except ConfigError as exc:
+        console.print(f"[red]Configuration error:[/red] {exc}")
+        raise SystemExit(EXIT_CONFIG_ERROR) from exc
+
+    bifrost_cache = BifrostCache(config.cache) if config.cache.enabled else None
+
+    # ------------------------------------------------------------------
+    # --check-stale path: lightweight stale detection via identifiers API
+    # ------------------------------------------------------------------
+    if check_stale:
+        if bifrost_cache is None:
+            if not quiet:
+                console.print(
+                    "[yellow]Cache disabled — cannot determine deleted ROMs without full sync.[/yellow]"
+                )
+            raise SystemExit(EXIT_OK)
+
+        cached_id_set = bifrost_cache.get_rom_id_set()
+        if cached_id_set is None:
+            if not quiet:
+                console.print(
+                    "[yellow]No cached ROM ID set found. "
+                    "Run bifrost sync --apply first to establish a baseline.[/yellow]"
+                )
+            raise SystemExit(EXIT_OK)
+
+        try:
+            with RommApiClient(
+                config, timeout_seconds=config.romm.timeout_seconds, no_cache=True
+            ) as client:
+                server_ids = client.list_rom_identifiers()
+                server_id_set = set(server_ids)
+                deleted_ids = cached_id_set - server_id_set
+
+                if not deleted_ids:
+                    bifrost_cache.update_rom_id_set(server_ids)
+                    if not quiet:
+                        console.print(
+                            f"[green]Stale check: no deleted ROMs detected "
+                            f"({len(server_id_set)} IDs in RomM).[/green]"
+                        )
+                    raise SystemExit(EXIT_OK)
+
+                cached_roms_raw = bifrost_cache.get_stale("roms")
+                if not cached_roms_raw:
+                    if not quiet:
+                        console.print(
+                            "[yellow]Stale check: deleted ROMs detected but ROM cache is empty "
+                            "— cannot resolve symlink paths. Run bifrost sync --apply.[/yellow]"
+                        )
+                    raise SystemExit(EXIT_OK)
+
+                platforms = client.list_platforms()
+                platform_slug_by_id = {p.id: p.fs_slug for p in platforms if p.fs_slug}
+                remove_ops = plan_stale_removals_from_deleted_ids(
+                    config, deleted_ids, cached_roms_raw, platform_slug_by_id
+                )
+
+        except AuthenticationError as exc:
+            console.print(f"[red]Authentication error:[/red] {exc}")
+            raise SystemExit(EXIT_AUTH_ERROR) from exc
+        except (NetworkError, ApiError) as exc:
+            if not quiet:
+                console.print(f"[red]API error:[/red] {exc}")
+            raise SystemExit(EXIT_API_ERROR) from exc
+
+        removed = 0
+        for op in remove_ops:
+            result = apply_remove_operation(op)
+            if result.action == "remove":
+                removed += 1
+
+        bifrost_cache.update_rom_id_set(server_ids)
+
+        if not quiet:
+            console.print(
+                f"[green]Stale check complete:[/green] "
+                f"{removed} stale ROM symlink(s) removed "
+                f"({len(deleted_ids)} deleted ROM(s) detected)."
+            )
+        raise SystemExit(EXIT_OK)
+
+    # ------------------------------------------------------------------
+    # --incremental path: apply only delta ROMs since last sync
+    # ------------------------------------------------------------------
+    if incremental:
+        last_applied = bifrost_cache.get_last_applied() if bifrost_cache else None
+
+        if last_applied is None:
+            if not quiet:
+                console.print(
+                    "[yellow]No prior sync timestamp — falling back to full sync.[/yellow]"
+                )
+            # fall through to full sync below
+
+        else:
+            # NAS check: required before creating symlinks
+            if apply:
+                _abort_on_preflight(run_nas_check(config), console)
+                _abort_on_preflight(run_sync_preflight(config), console)
+
+            try:
+                with RommApiClient(
+                    config, timeout_seconds=config.romm.timeout_seconds, no_cache=no_cache
+                ) as client:
+                    delta_raw = client.list_roms_delta_raw(last_applied)
+
+                    if not delta_raw:
+                        if not quiet:
+                            console.print(
+                                f"[green]Incremental sync: no changes since "
+                                f"{last_applied.isoformat(timespec='seconds')}.[/green]"
+                            )
+                        if bifrost_cache and apply:
+                            bifrost_cache.set_last_applied()
+                        raise SystemExit(EXIT_OK)
+
+                    delta_roms = [RomSummary.model_validate(item) for item in delta_raw]
+                    ops = plan_incremental_symlink_ops(config, client, delta_roms)
+
+            except AuthenticationError as exc:
+                console.print(f"[red]Authentication error:[/red] {exc}")
+                raise SystemExit(EXIT_AUTH_ERROR) from exc
+            except (NetworkError, ApiError) as exc:
+                if not quiet:
+                    console.print(f"[red]API error:[/red] {exc}")
+                raise SystemExit(EXIT_API_ERROR) from exc
+
+            workers = config.sync.parallel_workers
+            if apply:
+                results = _sync_apply_ops(ops, workers, console, quiet)
+                if bifrost_cache:
+                    bifrost_cache.set_last_applied()
+                # incremental gamelist patch (best-effort, non-fatal)
+                try:
+                    with RommApiClient(
+                        config, timeout_seconds=config.romm.timeout_seconds, no_cache=no_cache
+                    ) as gl_client:
+                        apply_gamelist_delta(config, gl_client, delta_raw)
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                sym_results = evaluate_operations(ops, workers=workers)
+                results = sym_results
+
+            if not quiet:
+                counts = _print_sync_summary(results, "incremental", console)
+                if not apply:
+                    console.print(
+                        "[cyan]Dry-run mode — re-run with --apply to execute.[/cyan]"
+                    )
+                if apply and counts.get("error", 0):
+                    console.print("[yellow]Apply completed with errors.[/yellow]")
+                    raise SystemExit(EXIT_CONFIG_ERROR)
+            elif apply and any(r.action == "error" for r in results):
+                raise SystemExit(EXIT_CONFIG_ERROR)
+
+            raise SystemExit(EXIT_OK)
+
+    # ------------------------------------------------------------------
+    # Full sync path (default)
+    # ------------------------------------------------------------------
+
+    # NAS check runs in both dry-run and --apply: a down NAS makes the plan meaningless.
+    _abort_on_preflight(run_nas_check(config), console)
+
+    if apply:
+        _abort_on_preflight(run_sync_preflight(config), console)
+
+    try:
+        with RommApiClient(config, timeout_seconds=config.romm.timeout_seconds, no_cache=no_cache) as client:
+            ops = plan_symlink_operations(config, client)
+            m3u_ops = plan_m3u_operations(config, client)
+    except AuthenticationError as exc:
+        console.print(f"[red]Authentication error:[/red] {exc}")
+        raise SystemExit(EXIT_AUTH_ERROR) from exc
+    except (NetworkError, ApiError) as exc:
+        console.print(f"[red]API error:[/red] {exc}")
+        raise SystemExit(EXIT_API_ERROR) from exc
+
+    remove_ops = plan_stale_removals(config, ops)
+    all_ops: list[Any] = list(ops) + list(m3u_ops) + list(remove_ops)
+
+    workers = config.sync.parallel_workers
+    results: list[Any]
+    if apply:
+        results = _sync_apply_ops(all_ops, workers, console, quiet)
+        if bifrost_cache:
+            bifrost_cache.set_last_applied()
+        mode_label = "apply"
+    else:
+        sym_ops = [op for op in all_ops if not isinstance(op, (M3uOperation, RemoveSymlinkOperation))]
+        sym_results = iter(evaluate_operations(sym_ops, workers=workers))
+        results = []
+        for op in all_ops:
+            if isinstance(op, M3uOperation):
+                results.append(evaluate_m3u_operation(op))
+            elif isinstance(op, RemoveSymlinkOperation):
+                results.append(evaluate_remove_operation(op))
+            else:
+                results.append(next(sym_results))
+        mode_label = "dry-run"
+
+    if not quiet:
+        counts = _print_sync_summary(results, mode_label, console)
+        if not apply:
+            console.print(
+                "[cyan]Dry-run mode: no filesystem changes were made. "
+                "Re-run with --apply to execute.[/cyan]"
+            )
+        if apply and counts.get("error", 0):
+            console.print(
+                "[yellow]Apply completed with filesystem errors. "
+                "Check paths/permissions and re-run sync --apply.[/yellow]"
+            )
+            raise SystemExit(EXIT_CONFIG_ERROR)
+    elif apply and any(r.action == "error" for r in results):
         raise SystemExit(EXIT_CONFIG_ERROR)
 
     raise SystemExit(EXIT_OK)
@@ -2393,11 +2621,12 @@ def _esde_script_content(event: str, bifrost_bin: str) -> str:
     if event == "startup":
         return (
             "#!/bin/sh\n"
-            "# Bifrost startup — save sync + gamelist update.\n"
+            "# Bifrost startup — incremental ROM sync + stale check + save sync.\n"
             "# Managed by bifrost esde-hooks install — do not edit manually.\n"
+            f'setsid "{b}" sync --apply --incremental --quiet >/dev/null 2>&1 &\n'
+            f'setsid "{b}" sync --check-stale --quiet >/dev/null 2>&1 &\n'
             f'setsid "{b}" save-sync --apply \\\n'
             "    --on-event startup >/dev/null 2>&1 &\n"
-            f'setsid "{b}" gamelist --apply >/dev/null 2>&1 &\n'
             "exit 0\n"
         )
     if event == "game-start":
