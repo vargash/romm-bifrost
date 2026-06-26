@@ -2631,7 +2631,7 @@ def _esde_script_content(event: str, bifrost_bin: str) -> str:
             "#!/bin/sh\n"
             "# Bifrost startup — incremental ROM sync + stale check + save sync.\n"
             "# Managed by bifrost esde-hooks install — do not edit manually.\n"
-            f'setsid "{b}" sync --apply --incremental --quiet >/dev/null 2>&1 &\n'
+            f'timeout 15 "{b}" sync --apply --incremental --quiet >/dev/null 2>&1 || true\n'
             f'setsid "{b}" sync --check-stale --quiet >/dev/null 2>&1 &\n'
             f'setsid "{b}" save-sync --apply \\\n'
             "    --on-event startup >/dev/null 2>&1 &\n"
