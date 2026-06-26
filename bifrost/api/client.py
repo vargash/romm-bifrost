@@ -864,6 +864,17 @@ class RommApiClient:
         _log.debug("complete_sync_session response: session=%d data=%s", session_id, data)
         return CompleteOutcome.ACCEPTED
 
+    def list_rom_identifiers(self) -> list[int]:
+        """Fetch all ROM IDs from GET /api/roms/identifiers (lightweight, no pagination)."""
+        data = self._request_json("GET", "/api/roms/identifiers")
+        if not isinstance(data, list):
+            raise ApiError("Unexpected response type for /api/roms/identifiers")
+        return [item for item in data if isinstance(item, int)]
+
+    def list_roms_delta_raw(self, since: datetime) -> list[dict[str, Any]]:
+        """Fetch ROMs updated after `since` as raw dicts (public wrapper)."""
+        return self._fetch_roms_delta(since)
+
     def clear_cache(self) -> None:
         self._platforms_cache = None
         self._roms_cache = None

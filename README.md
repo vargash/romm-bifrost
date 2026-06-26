@@ -143,6 +143,15 @@ bifrost sync
 # Apply ROM, BIOS and asset symlink changes
 bifrost sync --apply
 
+# Incremental sync — only ROMs updated since last run (fast, for startup hooks)
+bifrost sync --apply --incremental
+
+# Stale check — fetch identifier set from RomM, remove deleted ROM symlinks only
+bifrost sync --check-stale
+
+# Suppress progress output (useful in background scripts)
+bifrost sync --apply --incremental --quiet
+
 # Preview gamelist.xml changes (default)
 bifrost gamelist
 
@@ -219,6 +228,29 @@ Uninstall:
 
 ```bash
 bifrost systemd uninstall
+```
+
+### ES-DE startup hooks
+
+For zero-perceptible-delay sync directly from ES-DE (no systemd required), install the ES-DE event hooks:
+
+```bash
+bifrost esde-hooks install
+```
+
+This writes `~/.emulationstation/scripts/game-start/bifrost.sh` and `~/.emulationstation/scripts/startup/bifrost.sh`. The startup hook launches two background jobs the moment ES-DE starts — before the UI is drawn:
+
+- `bifrost sync --apply --incremental --quiet` — fetches only ROMs updated since last run and applies any new/changed symlinks + gamelist entries
+- `bifrost sync --check-stale --quiet` — diffs the current ROM identifier set against the cached one and removes stale symlinks for deleted ROMs
+
+Both run via `setsid ... &` so they never block ES-DE startup. On a stable library (nothing changed), the incremental path completes in ~300 ms; with 5 ROM changes it takes ~600 ms — invisible to the user.
+
+```bash
+# Verify hooks are installed
+bifrost esde-hooks status
+
+# Remove hooks
+bifrost esde-hooks uninstall
 ```
 
 ### Save file watcher
@@ -325,8 +357,8 @@ Key sections relevant to sync:
 [sync]
 # Conflict resolution strategy: ask | local_wins | server_wins
 conflict_strategy = "ask"
-# Sync mode: push_pull | push
-sync_mode = "push_pull"
+# Sync direction: push_pull | push_only | pull_only
+direction = "push_pull"
 # Worker threads for parallel symlink evaluation/apply (reduce if NAS is overloaded)
 parallel_workers = 16
 
@@ -357,6 +389,9 @@ ttl_firmware_hours = 24
 | Systemd user services + timers | ✅ |
 | Save file watcher (inotify/polling) | ✅ |
 | `install-deck.sh` — one-shot Steam Deck installer | ✅ |
+| `bifrost sync --incremental` — delta sync via `updated_after` | ✅ |
+| `bifrost sync --check-stale` — identifier-set diff, stale symlink removal | ✅ |
+| ES-DE startup hooks (`bifrost esde-hooks install`) | ✅ |
 | Watch mode for assets / gamelist auto-rebuild | ❌ planned |
 | Structured metrics / JSON export | ❌ planned |
 | Parallel symlink evaluation/apply (ThreadPoolExecutor, configurable workers) | ✅ |

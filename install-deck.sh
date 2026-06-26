@@ -197,6 +197,15 @@ if command -v loginctl &>/dev/null; then
   fi
 fi
 
+# ── ES-DE event hooks ─────────────────────────────────────────────────────
+echo ""
+info "Installing ES-DE event hooks..."
+if bifrost esde-hooks install; then
+  success "ES-DE hooks installed"
+else
+  warn "ES-DE hooks install failed — run 'bifrost esde-hooks install' manually"
+fi
+
 # ── log directory ─────────────────────────────────────────────────────────
 mkdir -p "$LOG_DIR"
 
@@ -244,6 +253,8 @@ if [[ "$_save_sync_enabled" == "true" ]]; then
 else
   echo -e "    ${YELLOW}–${RESET} Save sync              — disabled (run 'bifrost device-enroll' to enable later)"
 fi
+echo -e "    ${GREEN}✓${RESET} ES-DE hooks           — incremental sync + save sync on startup/game events"
+echo -e "    ${YELLOW}!${RESET} Enable in ES-DE:       Main menu → Other settings → Enable custom event scripts"
 echo ""
 echo -e "  Useful commands:"
 echo -e "    ${CYAN}bifrost systemd status${RESET}   — check service health"

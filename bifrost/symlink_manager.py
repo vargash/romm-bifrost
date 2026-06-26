@@ -7,6 +7,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from bifrost.api.client import RommApiClient
 from bifrost.api.models import RomSummary, SsMetadata
@@ -123,6 +124,94 @@ def _bios_target_path(bios_root: Path, file_path: str, file_name: str) -> Path:
     if not str(candidate) or candidate.name != file_name:
         candidate = candidate / file_name
     return bios_root / candidate
+
+
+def plan_incremental_symlink_ops(
+    config: AppConfig,
+    client: RommApiClient,
+    delta_roms: list[RomSummary],
+) -> list[SymlinkOperation]:
+    """Plan symlink operations for a subset of ROMs (incremental sync).
+
+    Only covers ROM and asset symlinks for the provided delta ROMs.
+    BIOS and M3U operations are not included — those require the full list.
+    """
+    platforms = client.list_platforms()
+    platform_slug_by_id = {p.id: p.fs_slug for p in platforms if p.fs_slug}
+
+    roms_root = _normalize_path(config.nas.library_path) / config.nas.roms_subpath
+    resources_base = _normalize_path(config.nas.resources_path)
+    esde_roms_root = _normalize_path(config.esde.roms_path)
+    media_root = _normalize_path(config.emudeck.media_path)
+
+    ops: list[SymlinkOperation] = []
+    for rom in delta_roms:
+        path_hint = rom.full_path or rom.fs_path
+        if rom.platform_id is None or not rom.fs_name or not path_hint:
+            continue
+        slug = platform_slug_by_id.get(rom.platform_id)
+        if not slug:
+            continue
+
+        ops.append(SymlinkOperation(
+            category="rom",
+            destination=esde_roms_root / slug / rom.fs_name,
+            target=_rom_target_path(roms_root, path_hint, rom.fs_name),
+            is_dir=False,
+        ))
+
+        rom_stem = Path(rom.fs_name).stem
+        for romm_asset_type, esde_folder in config.assets.folder_map.items():
+            rel = _asset_relative_path(rom, romm_asset_type)
+            if not rel:
+                continue
+            target = resources_base / rel
+            ops.append(SymlinkOperation(
+                category="asset",
+                destination=media_root / slug / esde_folder / f"{rom_stem}{target.suffix}",
+                target=target,
+                is_dir=False,
+            ))
+
+    return ops
+
+
+def plan_stale_removals_from_deleted_ids(
+    config: AppConfig,
+    deleted_ids: set[int],
+    cached_roms: list[dict[str, Any]],
+    platform_slug_by_id: dict[int, str],
+) -> list[RemoveSymlinkOperation]:
+    """Plan removal of ROM symlinks for IDs no longer present in RomM.
+
+    Uses the disk-cache ROM data to resolve id → (fs_name, platform) without
+    a full API fetch. Only ROM symlinks are removed; asset symlinks are left
+    for the next full sync (stale assets are cosmetic, not launch-blocking).
+    """
+    esde_roms_root = _normalize_path(config.esde.roms_path)
+    cache_by_id: dict[int, dict[str, Any]] = {
+        item["id"]: item
+        for item in cached_roms
+        if isinstance(item.get("id"), int)
+    }
+
+    ops: list[RemoveSymlinkOperation] = []
+    for rom_id in deleted_ids:
+        rom = cache_by_id.get(rom_id)
+        if not rom:
+            continue
+        fs_name = rom.get("fs_name")
+        platform_id = rom.get("platform_id")
+        if not fs_name or not isinstance(platform_id, int):
+            continue
+        slug = platform_slug_by_id.get(platform_id)
+        if not slug:
+            continue
+        destination = esde_roms_root / slug / fs_name
+        if destination.is_symlink():
+            ops.append(RemoveSymlinkOperation(category="rom", destination=destination))
+
+    return ops
 
 
 def plan_symlink_operations(config: AppConfig, client: RommApiClient) -> list[SymlinkOperation]:

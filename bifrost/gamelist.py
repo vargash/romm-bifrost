@@ -499,6 +499,90 @@ def _roms_by_platform(roms: list[dict[str, Any]]) -> dict[int, list[dict[str, An
     return grouped
 
 
+def apply_gamelist_delta(
+    config: AppConfig,
+    client: RommApiClient,
+    delta_roms_raw: list[dict[str, Any]],
+) -> list[GamelistApplyResult]:
+    """Add or update gamelist.xml entries for a subset of ROMs (incremental sync).
+
+    Only touches entries for ROMs in delta_roms_raw. Never removes entries —
+    stale removal requires the full ROM list and is deferred to full sync.
+    Creates gamelist.xml from scratch if the platform file does not exist yet.
+    Folder multi-disc detection is skipped; full sync corrects M3U paths nightly.
+    """
+    platforms = client.list_platforms()
+    platform_slug_by_id = {p.id: p.fs_slug for p in platforms if p.fs_slug}
+    grouped = _roms_by_platform(delta_roms_raw)
+    gamelists_root = Path(config.esde.gamelists_path).expanduser()
+    results: list[GamelistApplyResult] = []
+
+    for platform_id, platform_roms in grouped.items():
+        slug = platform_slug_by_id.get(platform_id)
+        if not slug:
+            continue
+        output_path = gamelists_root / slug / "gamelist.xml"
+        root, top_level_siblings = _parse_existing_file(output_path)
+        existing_by_path: dict[str, ET.Element] = {}
+        for game in root.findall("game"):
+            key = _game_path_key(game)
+            if key:
+                existing_by_path[key] = game
+
+        disc_groups = group_multidisc_roms_raw(platform_roms)
+        disc_rom_ids: set[int] = {
+            rid
+            for group_roms in disc_groups.values()
+            for rom in group_roms
+            if isinstance(rid := rom.get("id"), int)
+        }
+
+        new_entries = updated_entries = unchanged_entries = 0
+
+        for rom in platform_roms:
+            rom_id = rom.get("id")
+            if isinstance(rom_id, int) and rom_id in disc_rom_ids:
+                continue
+            generated_game = _build_game_element(rom)
+            if generated_game is None:
+                continue
+            key = _game_path_key(generated_game)
+            if key is None:
+                continue
+            existing = existing_by_path.get(key)
+            if existing is None:
+                root.append(generated_game)
+                existing_by_path[key] = generated_game
+                new_entries += 1
+            else:
+                changed = _merge_game(existing, generated_game)
+                if changed:
+                    updated_entries += 1
+                else:
+                    unchanged_entries += 1
+
+        if new_entries + updated_entries == 0:
+            continue  # nothing changed — skip write
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(_render_xml(root, top_level_siblings), encoding="utf-8")
+
+        results.append(GamelistApplyResult(
+            plan=GamelistPlan(
+                platform_slug=slug,
+                output_path=output_path,
+                total_roms=new_entries + updated_entries + unchanged_entries,
+                new_entries=new_entries,
+                updated_entries=updated_entries,
+                unchanged_entries=unchanged_entries,
+                removed_entries=0,
+            ),
+            written=True,
+        ))
+
+    return results
+
+
 def build_gamelist_plan(config: AppConfig, client: RommApiClient) -> list[GamelistPlan]:
     platforms = client.list_platforms()
     roms = client.list_roms_raw()
