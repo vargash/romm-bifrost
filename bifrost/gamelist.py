@@ -508,7 +508,7 @@ def apply_gamelist_delta(
 
     Only touches entries for ROMs in delta_roms_raw. Never removes entries —
     stale removal requires the full ROM list and is deferred to full sync.
-    Skips platforms where no gamelist.xml exists yet (full sync creates them).
+    Creates gamelist.xml from scratch if the platform file does not exist yet.
     Folder multi-disc detection is skipped; full sync corrects M3U paths nightly.
     """
     platforms = client.list_platforms()
@@ -522,9 +522,6 @@ def apply_gamelist_delta(
         if not slug:
             continue
         output_path = gamelists_root / slug / "gamelist.xml"
-        if not output_path.exists():
-            continue  # full sync will create it
-
         root, top_level_siblings = _parse_existing_file(output_path)
         existing_by_path: dict[str, ET.Element] = {}
         for game in root.findall("game"):

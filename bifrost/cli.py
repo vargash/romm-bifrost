@@ -23,7 +23,7 @@ from rich.table import Table
 from bifrost import __version__ as _bifrost_version
 from bifrost.api.client import RommApiClient, exchange_pairing_code
 from bifrost.api.models import DeviceCreatePayload, DeviceUpdatePayload, RomSummary
-from bifrost.cache import BifrostCache
+from bifrost.cache import BifrostCache, merge_by_id
 from bifrost.config import (
     AppConfig,
     CacheConfig,
@@ -1008,6 +1008,14 @@ def sync(
             if apply:
                 results = _sync_apply_ops(ops, workers, console, quiet)
                 if bifrost_cache:
+                    existing = bifrost_cache.get_stale("roms")
+                    if existing is not None:
+                        try:
+                            bifrost_cache.set(
+                                "roms", merge_by_id(existing, delta_raw), full_fetch=False
+                            )
+                        except OSError:
+                            pass
                     bifrost_cache.set_last_applied()
                 # incremental gamelist patch (best-effort, non-fatal)
                 try:
