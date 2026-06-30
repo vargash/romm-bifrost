@@ -50,7 +50,7 @@ No files are ever copied or duplicated. RomM is the single source of truth.
 
 ### Steam Deck / EmuDeck (recommended)
 
-Download and run the installer — no `git clone` required. Open a terminal once and everything else runs automatically from then on:
+Download and run the installer. Open a terminal once and everything else runs automatically from then on:
 
 ```bash
 curl -L https://github.com/vargash/romm-bifrost/releases/latest/download/install-deck.sh -o install-deck.sh
@@ -78,7 +78,7 @@ To uninstall:
 ./install-deck.sh --uninstall
 ```
 
-### Pipx install (technical users)
+### Pipx install
 
 ```bash
 pipx install "romm-bifrost[watch] @ https://github.com/vargash/romm-bifrost/releases/latest/download/romm_bifrost-VERSION-py3-none-any.whl"
