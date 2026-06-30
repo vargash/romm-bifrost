@@ -75,10 +75,14 @@ class SaveSyncPreview:
     # Maps file_name (basename) → destination directory for profile-aware downloads.
     # Falls back to save_root when a file_name is not present.
     profile_destinations: dict[str, Path] = None  # type: ignore[assignment]
+    # Maps rom_id → RomSummary for canonical filename derivation on download.
+    rom_index: dict[int, RomSummary] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         if self.profile_destinations is None:
             object.__setattr__(self, "profile_destinations", {})
+        if self.rom_index is None:
+            object.__setattr__(self, "rom_index", {})
 
 
 @dataclass(frozen=True)
@@ -150,6 +154,28 @@ def _strip_romm_timestamp(file_name: str) -> str:
     """Strip RomM-appended [YYYY-MM-DD_HH-MM-SS] tag, preserving extension."""
     p = Path(file_name)
     return _ROMM_TIMESTAMP_TAG_RE.sub("", p.stem).strip() + p.suffix
+
+
+def _local_filename_for_operation(
+    operation: SyncOperationSchema,
+    rom_index: dict[int, RomSummary],
+) -> str:
+    """Canonical local filename for a sync operation.
+
+    Strips the RomM timestamp tag, then resolves slot-number stems (e.g. "1")
+    via the ROM index so the file lands with the game's proper name.
+    """
+    ts_stripped = _strip_romm_timestamp(operation.file_name)
+    p = Path(ts_stripped)
+    if p.stem.strip().isdigit():
+        rom = rom_index.get(operation.rom_id)
+        if rom:
+            stem = (
+                Path(rom.fs_name).stem if rom.fs_name
+                else rom.name or p.stem
+            )
+            return stem + p.suffix
+    return ts_stripped
 
 
 def _strip_trailing_tags(value: str) -> str:
@@ -354,12 +380,13 @@ def _resolve_conflict_action(
 def _lookup_local_file_for_operation(
     operation: SyncOperationSchema,
     local_index: dict[str, list[LocalSaveFile]],
+    rom_index: dict[int, RomSummary] | None = None,
 ) -> LocalSaveFile | None:
     candidates = local_index.get(operation.file_name.lower())
     if candidates:
         return candidates[0]
-    canonical = _strip_romm_timestamp(operation.file_name)
-    if canonical != operation.file_name:
+    canonical = _local_filename_for_operation(operation, rom_index or {})
+    if canonical.lower() != operation.file_name.lower():
         candidates = local_index.get(canonical.lower())
         if candidates:
             return candidates[0]
@@ -566,6 +593,7 @@ def build_save_sync_preview(
         skipped_paths=skipped_paths,
         session_id=session_id,
         profile_destinations=profile_destinations,
+        rom_index={rom.id: rom for rom in remote_roms},
     )
 
 
@@ -659,7 +687,7 @@ def execute_save_sync_preview(
 
         try:
             if operation.action == "upload":
-                local_file = _lookup_local_file_for_operation(operation, local_index)
+                local_file = _lookup_local_file_for_operation(operation, local_index, preview.rom_index)
                 if local_file is None:
                     skipped += 1
                     details.append(
@@ -731,8 +759,8 @@ def execute_save_sync_preview(
                 details.append(("download", operation.file_name, "failed (missing save_id)"))
                 continue
 
-            # Strip RomM timestamp to recover canonical local filename
-            canonical_name = _strip_romm_timestamp(operation.file_name)
+            # Derive canonical local filename (strips timestamp, resolves slot numbers via ROM index)
+            canonical_name = _local_filename_for_operation(operation, preview.rom_index)
             # Resolve dest: existing-file map → emulator subdir → bare root
             dest_dir = (
                 preview.profile_destinations.get(canonical_name)
