@@ -7,11 +7,11 @@
 #   ./install-deck.sh --uninstall
 #
 # The script is idempotent: safe to run multiple times.
-# Download the latest version from: https://github.com/yourusername/romm-bifrost/releases/latest
+# Download the latest version from: https://github.com/vargash/romm-bifrost/releases/latest
 
 set -euo pipefail
 
-GITHUB_REPO="yourusername/romm-bifrost"
+GITHUB_REPO="vargash/romm-bifrost"
 CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/bifrost/config.toml"
 LOG_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/bifrost/logs"
 

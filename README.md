@@ -53,7 +53,7 @@ No files are ever copied or duplicated. RomM is the single source of truth.
 Download and run the installer — no `git clone` required. Open a terminal once and everything else runs automatically from then on:
 
 ```bash
-curl -L https://github.com/yourusername/romm-bifrost/releases/latest/download/install-deck.sh -o install-deck.sh
+curl -L https://github.com/vargash/romm-bifrost/releases/latest/download/install-deck.sh -o install-deck.sh
 chmod +x install-deck.sh
 ./install-deck.sh
 ```
@@ -81,16 +81,16 @@ To uninstall:
 ### Pipx install (technical users)
 
 ```bash
-pipx install "romm-bifrost[watch] @ https://github.com/yourusername/romm-bifrost/releases/latest/download/romm_bifrost-VERSION-py3-none-any.whl"
+pipx install "romm-bifrost[watch] @ https://github.com/vargash/romm-bifrost/releases/latest/download/romm_bifrost-VERSION-py3-none-any.whl"
 bifrost setup
 ```
 
-Replace `VERSION` with the version from the [latest release](https://github.com/yourusername/romm-bifrost/releases/latest).
+Replace `VERSION` with the version from the [latest release](https://github.com/vargash/romm-bifrost/releases/latest).
 
 ### Development
 
 ```bash
-git clone https://github.com/yourusername/romm-bifrost.git
+git clone https://github.com/vargash/romm-bifrost.git
 cd romm-bifrost
 pip install -e .[dev]
 ```

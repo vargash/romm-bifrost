@@ -5,7 +5,7 @@ This guide covers the full path from cloning the repository to running lint, typ
 ## 1. Clone the repository
 
 ```bash
-git clone https://github.com/yourusername/romm-bifrost.git
+git clone https://github.com/vargash/romm-bifrost.git
 cd romm-bifrost
 ```
 
