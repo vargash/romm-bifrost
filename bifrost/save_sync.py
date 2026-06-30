@@ -705,8 +705,8 @@ def execute_save_sync_preview(
                         save_path=local_file.path,
                         device_id=preview.device_id,
                         session_id=preview.session_id,
-                        save_id=operation.save_id,
-                        overwrite=True,
+                        save_id=None,  # always POST → create new save version
+                        overwrite=False,
                         autocleanup=_do_autocleanup,
                         autocleanup_limit=_autocleanup_limit,
                         emulator=_emulator,
