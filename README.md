@@ -50,17 +50,17 @@ No files are ever copied or duplicated. RomM is the single source of truth.
 
 ### Steam Deck / EmuDeck (recommended)
 
-Use the one-shot installer. Open a terminal once — everything else runs automatically from then on:
+Download and run the installer — no `git clone` required. Open a terminal once and everything else runs automatically from then on:
 
 ```bash
-git clone https://github.com/yourusername/romm-bifrost.git
-cd romm-bifrost
+curl -L https://github.com/yourusername/romm-bifrost/releases/latest/download/install-deck.sh -o install-deck.sh
+chmod +x install-deck.sh
 ./install-deck.sh
 ```
 
 `install-deck.sh` handles everything in sequence:
 1. Verifies Python 3.11+ and installs `pipx` if missing
-2. Installs `bifrost` (with save-watcher support) via `pipx`
+2. Downloads and installs `bifrost` (with save-watcher support) via `pipx`
 3. Runs the setup wizard interactively
 4. Installs and enables the systemd user services (ROM sync, save sync, save watcher)
 5. Enables session linger so services survive game-mode logout
@@ -78,24 +78,20 @@ To uninstall:
 ./install-deck.sh --uninstall
 ```
 
-### Manual installation
+### Pipx install (technical users)
+
+```bash
+pipx install "romm-bifrost[watch] @ https://github.com/yourusername/romm-bifrost/releases/latest/download/romm_bifrost-VERSION-py3-none-any.whl"
+bifrost setup
+```
+
+Replace `VERSION` with the version from the [latest release](https://github.com/yourusername/romm-bifrost/releases/latest).
+
+### Development
 
 ```bash
 git clone https://github.com/yourusername/romm-bifrost.git
 cd romm-bifrost
-./install.sh        # installs via pipx
-bifrost setup       # interactive wizard
-```
-
-With save-watcher support (requires `watchdog`):
-
-```bash
-pipx install ".[watch]"
-```
-
-For development:
-
-```bash
 pip install -e .[dev]
 ```
 
@@ -388,7 +384,8 @@ ttl_firmware_hours = 24
 | `bifrost doctor` — diagnostics command | ✅ |
 | Systemd user services + timers | ✅ |
 | Save file watcher (inotify/polling) | ✅ |
-| `install-deck.sh` — one-shot Steam Deck installer | ✅ |
+| `install-deck.sh` — one-shot Steam Deck installer (installs from GitHub release) | ✅ |
+| GitHub Actions release workflow (wheel + sdist + installer asset on tag) | ✅ |
 | `bifrost sync --incremental` — delta sync via `updated_after` | ✅ |
 | `bifrost sync --check-stale` — identifier-set diff, stale symlink removal | ✅ |
 | ES-DE startup hooks (`bifrost esde-hooks install`) | ✅ |

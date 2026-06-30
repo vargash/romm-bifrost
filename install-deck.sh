@@ -7,11 +7,11 @@
 #   ./install-deck.sh --uninstall
 #
 # The script is idempotent: safe to run multiple times.
+# Download the latest version from: https://github.com/yourusername/romm-bifrost/releases/latest
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIFROST_BIN="$HOME/.local/bin/bifrost"
+GITHUB_REPO="yourusername/romm-bifrost"
 CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/bifrost/config.toml"
 LOG_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/bifrost/logs"
 
@@ -115,16 +115,38 @@ if ! command -v pipx &>/dev/null; then
 fi
 success "pipx — OK"
 
+# ── fetch release wheel ────────────────────────────────────────────────────
+info "Fetching latest Bifrost release from GitHub..."
+WHEEL_URL=$(python3 - <<PYEOF
+import urllib.request, json, sys
+try:
+    url = "https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
+    req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        data = json.load(r)
+    assets = [a["browser_download_url"] for a in data.get("assets", []) if a["name"].endswith(".whl")]
+    print(assets[0] if assets else "")
+except Exception as e:
+    print(f"error: {e}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+) || die "Failed to contact GitHub API. Check your internet connection and try again."
+
+if [[ -z "$WHEEL_URL" ]]; then
+  die "No wheel asset found in latest release. Check https://github.com/${GITHUB_REPO}/releases"
+fi
+info "Release wheel: $(basename "$WHEEL_URL")"
+
 # ── install / update bifrost ───────────────────────────────────────────────
 info "Installing bifrost[watch] via pipx..."
 if [[ "$MODE" == "update" ]]; then
-  pipx install "$SCRIPT_DIR[watch]" --force --quiet
+  pipx install "romm-bifrost[watch] @ ${WHEEL_URL}" --force --quiet
 else
   if pipx list 2>/dev/null | grep -q "package romm-bifrost"; then
-    warn "bifrost already installed — reinstalling..."
-    pipx install "$SCRIPT_DIR[watch]" --force --quiet
+    warn "bifrost already installed — reinstalling from latest release..."
+    pipx install "romm-bifrost[watch] @ ${WHEEL_URL}" --force --quiet
   else
-    pipx install "$SCRIPT_DIR[watch]" --quiet
+    pipx install "romm-bifrost[watch] @ ${WHEEL_URL}" --quiet
   fi
 fi
 
