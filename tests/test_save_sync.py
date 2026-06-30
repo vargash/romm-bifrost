@@ -779,3 +779,190 @@ def test_build_save_sync_preview_excludes_state_files_from_save_payload(tmp_path
     assert preview.mapped_files == 1
     assert preview.skipped_files == 0
     client.close()
+
+
+def test_download_strips_romm_timestamp(monkeypatch, tmp_path: Path) -> None:
+    """Server filename [YYYY-MM-DD_HH-MM-SS] tag is stripped; file lands as canonical name."""
+    config_path = tmp_path / "config.toml"
+    saves_root = tmp_path / "saves"
+    config_path.write_text(
+        f"""
+[romm]
+url = "http://romm.local"
+client_token = "rmm_token"
+device_id = "device-1"
+
+[emudeck]
+saves_path = "{saves_root}"
+""".strip(),
+        encoding="utf-8",
+    )
+    config_path.chmod(0o600)
+
+    server_file_name = "Castlevania - Harmony of Dissonance (USA) [2026-06-30_07-19-47].srm"
+    canonical_name = "Castlevania - Harmony of Dissonance (USA).srm"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/devices/device-1":
+            return httpx.Response(200, json={"device_id": "device-1"})
+        if request.url.path == "/api/roms":
+            return httpx.Response(200, json={"items": [], "total": 0})
+        if request.url.path == "/api/saves" and request.method == "GET":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/api/sync/negotiate":
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": 5,
+                    "operations": [
+                        {
+                            "action": "download",
+                            "rom_id": 1,
+                            "save_id": 42,
+                            "file_name": server_file_name,
+                            "emulator": "retroarch",
+                            "reason": "server newer",
+                        }
+                    ],
+                    "total_upload": 0,
+                    "total_download": 1,
+                    "total_conflict": 0,
+                    "total_no_op": 0,
+                },
+            )
+        if request.url.path == "/api/saves/42/content":
+            return httpx.Response(200, content=b"save-content")
+        if request.url.path == "/api/sync/sessions/5/complete":
+            return httpx.Response(
+                200,
+                json={
+                    "session": {
+                        "id": 5,
+                        "device_id": "device-1",
+                        "user_id": 1,
+                        "status": "completed",
+                        "initiated_at": "2026-06-30T00:00:00Z",
+                        "completed_at": "2026-06-30T00:00:01Z",
+                        "operations_planned": 1,
+                        "operations_completed": 1,
+                        "operations_failed": 0,
+                        "error_message": None,
+                        "created_at": "2026-06-30T00:00:00Z",
+                        "updated_at": "2026-06-30T00:00:01Z",
+                    }
+                },
+            )
+        return httpx.Response(404, json={})
+
+    original_init = httpx.Client.__init__
+
+    def patched_init(self: httpx.Client, *args: Any, **kwargs: Any) -> None:
+        kwargs["transport"] = httpx.MockTransport(handler)
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "__init__", patched_init)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["save-sync", "--config", str(config_path), "--apply"],
+    )
+
+    assert result.exit_code == 0, result.output
+    expected = saves_root / "retroarch/saves" / canonical_name
+    assert expected.exists(), f"Expected {expected}. Output:\n{result.output}"
+    assert expected.read_bytes() == b"save-content"
+    assert not (saves_root / "retroarch/saves" / server_file_name).exists()
+
+
+def test_download_resolves_emulator_subdir_when_no_local_file(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Download without pre-existing local file uses emulator field to pick the right subdir."""
+    config_path = tmp_path / "config.toml"
+    saves_root = tmp_path / "saves"
+    config_path.write_text(
+        f"""
+[romm]
+url = "http://romm.local"
+client_token = "rmm_token"
+device_id = "device-1"
+
+[emudeck]
+saves_path = "{saves_root}"
+""".strip(),
+        encoding="utf-8",
+    )
+    config_path.chmod(0o600)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/devices/device-1":
+            return httpx.Response(200, json={"device_id": "device-1"})
+        if request.url.path == "/api/roms":
+            return httpx.Response(200, json={"items": [], "total": 0})
+        if request.url.path == "/api/saves" and request.method == "GET":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/api/sync/negotiate":
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": 6,
+                    "operations": [
+                        {
+                            "action": "download",
+                            "rom_id": 2,
+                            "save_id": 55,
+                            "file_name": "Mario.sav",
+                            "emulator": "retroarch",
+                            "reason": "server newer",
+                        }
+                    ],
+                    "total_upload": 0,
+                    "total_download": 1,
+                    "total_conflict": 0,
+                    "total_no_op": 0,
+                },
+            )
+        if request.url.path == "/api/saves/55/content":
+            return httpx.Response(200, content=b"mario-save")
+        if request.url.path == "/api/sync/sessions/6/complete":
+            return httpx.Response(
+                200,
+                json={
+                    "session": {
+                        "id": 6,
+                        "device_id": "device-1",
+                        "user_id": 1,
+                        "status": "completed",
+                        "initiated_at": "2026-06-30T00:00:00Z",
+                        "completed_at": "2026-06-30T00:00:01Z",
+                        "operations_planned": 1,
+                        "operations_completed": 1,
+                        "operations_failed": 0,
+                        "error_message": None,
+                        "created_at": "2026-06-30T00:00:00Z",
+                        "updated_at": "2026-06-30T00:00:01Z",
+                    }
+                },
+            )
+        return httpx.Response(404, json={})
+
+    original_init = httpx.Client.__init__
+
+    def patched_init(self: httpx.Client, *args: Any, **kwargs: Any) -> None:
+        kwargs["transport"] = httpx.MockTransport(handler)
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "__init__", patched_init)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["save-sync", "--config", str(config_path), "--apply"],
+    )
+
+    assert result.exit_code == 0, result.output
+    expected = saves_root / "retroarch/saves/Mario.sav"
+    assert expected.exists(), f"Expected {expected}. Output:\n{result.output}"
+    assert expected.read_bytes() == b"mario-save"
+    assert not (saves_root / "Mario.sav").exists(), "Must not land in bare save_root"

@@ -25,11 +25,13 @@ from bifrost.config import AppConfig
 from bifrost.errors import ApiError, ConfigError
 from bifrost.play_sessions import consume_pending_sessions
 from bifrost.saves.layout import EmudeckEsdeLayout, ScannedFile
+from bifrost.saves.profiles import PROFILES
 
 _log = logging.getLogger("bifrost.save_sync")
 
 _MULTISPACE_RE = re.compile(r"\s+")
 _TRAILING_TAG_RE = re.compile(r"\s*\[[^\]]+\]$")
+_ROMM_TIMESTAMP_TAG_RE = re.compile(r"\s*\[\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\]")
 _STATE_FILE_RE = re.compile(r"\.state\d*(\.png)?$", re.IGNORECASE)
 _SLOT_SUFFIX_RE = re.compile(r"_\d+$")
 _SUPPORTED_SAVE_EXTENSIONS = {
@@ -142,6 +144,12 @@ def scan_local_save_files(root: Path) -> list[LocalSaveFile]:
                 pass
 
     return sorted(save_files, key=lambda f: f.path)
+
+
+def _strip_romm_timestamp(file_name: str) -> str:
+    """Strip RomM-appended [YYYY-MM-DD_HH-MM-SS] tag, preserving extension."""
+    p = Path(file_name)
+    return _ROMM_TIMESTAMP_TAG_RE.sub("", p.stem).strip() + p.suffix
 
 
 def _strip_trailing_tags(value: str) -> str:
@@ -348,9 +356,14 @@ def _lookup_local_file_for_operation(
     local_index: dict[str, list[LocalSaveFile]],
 ) -> LocalSaveFile | None:
     candidates = local_index.get(operation.file_name.lower())
-    if not candidates:
-        return None
-    return candidates[0]
+    if candidates:
+        return candidates[0]
+    canonical = _strip_romm_timestamp(operation.file_name)
+    if canonical != operation.file_name:
+        candidates = local_index.get(canonical.lower())
+        if candidates:
+            return candidates[0]
+    return None
 
 
 def _legacy_negotiate(
@@ -571,6 +584,11 @@ def execute_save_sync_preview(
     config is applied automatically (headless-safe).
     """
     save_root = _expand_path(config.emudeck.saves_path)
+    emulator_dest_dirs: dict[str, Path] = {
+        p.romm_emulator: save_root / p.save_subpath
+        for p in PROFILES
+        if p.romm_emulator and p.supported
+    }
     local_files = scan_local_save_files(save_root)
     local_index: dict[str, list[LocalSaveFile]] = {}
     for local_save in local_files:
@@ -713,9 +731,15 @@ def execute_save_sync_preview(
                 details.append(("download", operation.file_name, "failed (missing save_id)"))
                 continue
 
-            # Resolve destination directory: prefer profile-aware path, fall back to save_root
-            dest_dir = preview.profile_destinations.get(operation.file_name, save_root)
-            destination = dest_dir / operation.file_name
+            # Strip RomM timestamp to recover canonical local filename
+            canonical_name = _strip_romm_timestamp(operation.file_name)
+            # Resolve dest: existing-file map → emulator subdir → bare root
+            dest_dir = (
+                preview.profile_destinations.get(canonical_name)
+                or (emulator_dest_dirs.get(operation.emulator) if operation.emulator else None)
+                or save_root
+            )
+            destination = dest_dir / canonical_name
 
             # Skip download if local already matches server
             if _is_redundant_download(operation, destination):
