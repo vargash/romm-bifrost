@@ -77,6 +77,9 @@ class SaveSyncPreview:
     profile_destinations: dict[str, Path] = None  # type: ignore[assignment]
     # Maps rom_id → RomSummary for canonical filename derivation on download.
     rom_index: dict[int, RomSummary] = None  # type: ignore[assignment]
+    # Populated only when sync.debug_mode = true; raw negotiate request/response for inspection.
+    debug_negotiate_request: dict | None = None
+    debug_negotiate_response: dict | None = None
 
     def __post_init__(self) -> None:
         if self.profile_destinations is None:
@@ -247,16 +250,23 @@ def _build_local_save_state(
     remote_index: dict[str, RomSummary],
     emulator: str | None = None,
     strip_slot_suffix: bool = False,
+    preferred_slot: str = "",
 ) -> tuple[ClientSaveState | None, str | None]:
     file_name_no_ext = local_save.path.stem
     slot: str | None = None
+    has_explicit_slot = False
     if strip_slot_suffix:
         slot_match = _SLOT_SUFFIX_RE.search(file_name_no_ext)
         if slot_match:
             slot = slot_match.group().lstrip("_")
+            has_explicit_slot = True
         file_name_no_ext = _SLOT_SUFFIX_RE.sub("", file_name_no_ext)
     if slot is None:
         slot = "1"
+    # preferred_slot applies only to main saves (no explicit _N suffix).
+    # RetroArch secondary slots (game_2.srm → slot "2") keep their derived value.
+    if preferred_slot and not has_explicit_slot:
+        slot = preferred_slot
     stripped_name = _strip_trailing_tags(file_name_no_ext)
     candidates = [local_save.file_name, file_name_no_ext, stripped_name]
 
@@ -542,6 +552,7 @@ def build_save_sync_preview(
             remote_rom_index,
             emulator=sf.profile.romm_emulator,
             strip_slot_suffix=sf.profile.strip_slot_suffix,
+            preferred_slot=config.sync.preferred_slot,
         )
         if state is None:
             skipped_paths.append(sf.path)
@@ -552,19 +563,20 @@ def build_save_sync_preview(
     # Negotiate with RomM, falling back to local comparison on 404/405
     session_id: int | None
     raw_operations: list[SyncOperationSchema]
+    negotiate_payload: SyncNegotiatePayload | None = None
+    negotiate_result: SyncNegotiateResponse | None = None
     try:
-        negotiate_response = client.negotiate_sync(
-            SyncNegotiatePayload(device_id=resolved_device_id, saves=local_states)
-        )
-        session_id = negotiate_response.session_id
-        raw_operations = negotiate_response.operations
+        negotiate_payload = SyncNegotiatePayload(device_id=resolved_device_id, saves=local_states)
+        negotiate_result = client.negotiate_sync(negotiate_payload)
+        session_id = negotiate_result.session_id
+        raw_operations = negotiate_result.operations
         _log.info(
-            "negotiate complete: session=%d upload=%d download=%d conflict=%d no_op=%d",
+            "negotiate: session=%d upload=%d download=%d conflict=%d no_op=%d",
             session_id,
-            negotiate_response.total_upload,
-            negotiate_response.total_download,
-            negotiate_response.total_conflict,
-            negotiate_response.total_no_op,
+            negotiate_result.total_upload,
+            negotiate_result.total_download,
+            negotiate_result.total_conflict,
+            negotiate_result.total_no_op,
         )
     except ApiError as exc:
         if exc.http_status in {404, 405}:
@@ -583,6 +595,28 @@ def build_save_sync_preview(
         if operation.save_id not in untracked_save_ids
     ]
 
+    preferred_slot = config.sync.preferred_slot
+    if preferred_slot:
+        before = len(filtered_operations)
+        filtered_operations = [
+            op for op in filtered_operations
+            if op.action == "upload" or (op.slot or "") == preferred_slot
+        ]
+        dropped = before - len(filtered_operations)
+        if dropped:
+            _log.info(
+                "preferred_slot=%r: dropped %d non-upload operation(s) with mismatched slot",
+                preferred_slot,
+                dropped,
+            )
+
+    debug_req: dict | None = None
+    debug_resp: dict | None = None
+    if config.sync.debug_mode and negotiate_payload is not None:
+        debug_req = negotiate_payload.model_dump(mode="python")
+        if negotiate_result is not None:
+            debug_resp = negotiate_result.model_dump(mode="python")
+
     return SaveSyncPreview(
         device_id=resolved_device_id,
         scanned_files=len(scanned_files),
@@ -594,6 +628,8 @@ def build_save_sync_preview(
         session_id=session_id,
         profile_destinations=profile_destinations,
         rom_index={rom.id: rom for rom in remote_roms},
+        debug_negotiate_request=debug_req,
+        debug_negotiate_response=debug_resp,
     )
 
 

@@ -99,6 +99,8 @@ class SyncConfig(BaseModel):
     optimistic_downloads: bool = True
     autocleanup: bool = False
     autocleanup_limit: int = Field(default=3, ge=1)
+    debug_mode: bool = False
+    preferred_slot: str = "autosave"
 
 
 class OutputConfig(BaseModel):

@@ -1106,6 +1106,66 @@ def sync(
     raise SystemExit(EXIT_OK)
 
 
+def _print_save_sync_debug(console: Console, preview: Any) -> None:
+    """Print negotiate request/response tables when sync.debug_mode is enabled."""
+    req = getattr(preview, "debug_negotiate_request", None)
+    resp = getattr(preview, "debug_negotiate_response", None)
+
+    if req is not None:
+        saves = req.get("saves", [])
+        req_table = Table(title=f"[DEBUG] Negotiate Request ({len(saves)} local saves)")
+        req_table.add_column("rom_id")
+        req_table.add_column("file_name")
+        req_table.add_column("slot")
+        req_table.add_column("emulator")
+        req_table.add_column("content_hash")
+        req_table.add_column("updated_at")
+        req_table.add_column("size")
+        for save in saves[:50]:
+            req_table.add_row(
+                str(save.get("rom_id", "")),
+                str(save.get("file_name", "")),
+                str(save.get("slot") or "-"),
+                str(save.get("emulator") or "-"),
+                str(save.get("content_hash") or "-"),
+                str(save.get("updated_at", "")),
+                str(save.get("file_size_bytes", "")),
+            )
+        console.print(req_table)
+        if len(saves) > 50:
+            console.print(f"[yellow][DEBUG] Showing first 50 of {len(saves)} local saves.[/yellow]")
+
+    if resp is not None:
+        ops = resp.get("operations", [])
+        resp_table = Table(
+            title=f"[DEBUG] Negotiate Response (session={resp.get('session_id')}, {len(ops)} ops)"
+        )
+        resp_table.add_column("action")
+        resp_table.add_column("rom_id")
+        resp_table.add_column("save_id")
+        resp_table.add_column("file_name")
+        resp_table.add_column("slot")
+        resp_table.add_column("emulator")
+        resp_table.add_column("reason")
+        resp_table.add_column("server_hash")
+        for op in ops[:50]:
+            resp_table.add_row(
+                str(op.get("action", "")),
+                str(op.get("rom_id", "")),
+                str(op.get("save_id") or "-"),
+                str(op.get("file_name", "")),
+                str(op.get("slot") or "-"),
+                str(op.get("emulator") or "-"),
+                str(op.get("reason", "")),
+                str(op.get("server_content_hash") or "-"),
+            )
+        console.print(resp_table)
+        if len(ops) > 50:
+            console.print(f"[yellow][DEBUG] Showing first 50 of {len(ops)} operations.[/yellow]")
+    elif req is not None:
+        console.print("[yellow][DEBUG] No negotiate response (legacy fallback active).[/yellow]")
+
+
 @main.command(name="save-sync", help="Preview RomM save sync negotiation from local save files.")
 @click.option(
     "--config",
@@ -1170,7 +1230,6 @@ def save_sync(
 
     console = Console()
     resolved_path = config_path or default_config_path()
-    setup_file_logging()
     _cli_log = logging.getLogger("bifrost.cli.save_sync")
 
     try:
@@ -1179,13 +1238,16 @@ def save_sync(
         console.print(f"[red]Configuration error:[/red] {exc}")
         raise SystemExit(EXIT_CONFIG_ERROR) from exc
 
+    setup_file_logging(debug_mode=config.sync.debug_mode)
+
     if apply:
         _abort_on_preflight(run_save_preflight(config), console)
 
     is_interactive = sys.stdin.isatty() and sys.stdout.isatty()
     _cli_log.info(
-        "save-sync started: apply=%s interactive=%s filters=%s on_event=%s",
+        "save-sync started: apply=%s debug=%s interactive=%s filters=%s on_event=%s",
         apply,
+        config.sync.debug_mode,
         is_interactive,
         list(only_files),
         on_event,
@@ -1358,7 +1420,12 @@ def save_sync(
         summary.add_row("File filter", ", ".join(effective_filters))
     if on_event:
         summary.add_row("Event", on_event)
+    if config.sync.debug_mode:
+        summary.add_row("Debug mode", "ON")
     console.print(summary)
+
+    if config.sync.debug_mode and not apply:
+        _print_save_sync_debug(console, preview)
 
     operations_table = Table(title="Sync Operations")
     operations_table.add_column("Action")

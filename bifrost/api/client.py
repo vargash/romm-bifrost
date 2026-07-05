@@ -801,25 +801,19 @@ class RommApiClient:
 
     def negotiate_sync(self, payload: SyncNegotiatePayload) -> SyncNegotiateResponse:
         dumped = payload.model_dump(mode="python")
-        _log.debug(
-            "negotiate_sync request: device_id=%s saves=%d entries=%s",
-            payload.device_id,
-            len(payload.saves),
-            [
-                {"rom_id": s.rom_id, "file_name": s.file_name, "content_hash": s.content_hash,
-                 "updated_at": s.updated_at, "emulator": s.emulator, "slot": s.slot}
-                for s in payload.saves
-            ],
-        )
+        _log.debug("negotiate_sync: device_id=%s saves=%d", payload.device_id, len(payload.saves))
         data = self._request_json("POST", "/api/sync/negotiate", json=dumped)
         if not isinstance(data, dict):
             raise ApiError("Unexpected response type for /api/sync/negotiate")
         resp = SyncNegotiateResponse.model_validate(data)
         _log.debug(
-            "negotiate_sync response: session=%s ops=%d reasons=%s",
+            "negotiate_sync: session=%d ops=%d (upload=%d download=%d conflict=%d no_op=%d)",
             resp.session_id,
             len(resp.operations),
-            [{"action": op.action, "file_name": op.file_name, "reason": op.reason, "save_id": op.save_id, "server_content_hash": op.server_content_hash} for op in resp.operations],
+            resp.total_upload,
+            resp.total_download,
+            resp.total_conflict,
+            resp.total_no_op,
         )
         return resp
 
@@ -829,7 +823,12 @@ class RommApiClient:
         payload: SyncCompletePayload,
     ) -> CompleteOutcome:
         dumped = payload.model_dump(mode="python")
-        _log.debug("complete_sync_session request: session=%d payload=%s", session_id, dumped)
+        _log.debug(
+            "complete_sync_session: session=%d completed=%d failed=%d",
+            session_id,
+            payload.operations_completed,
+            payload.operations_failed,
+        )
         try:
             data = self._request_json(
                 "POST",
@@ -839,29 +838,20 @@ class RommApiClient:
         except ApiError as exc:
             status = exc.http_status
             if status in {404, 409, 410}:
-                _log.info(
-                    "sync session %d already finalized (HTTP %s): %s", session_id, status, exc
-                )
+                _log.debug("complete_sync_session: session=%d already finalized (HTTP %s)", session_id, status)
                 return CompleteOutcome.ALREADY_FINALIZED
             if status is not None and 400 <= status < 500:
-                _log.warning(
-                    "sync session %d complete returned %s: %s",
-                    session_id,
-                    status,
-                    exc,
-                )
+                _log.warning("complete_sync_session: session=%d HTTP %s: %s", session_id, status, exc)
                 return CompleteOutcome.CLIENT_ERROR
-            _log.warning(
-                "sync session %d complete failed (%s); will not retry", session_id, exc
-            )
+            _log.warning("complete_sync_session: session=%d failed: %s", session_id, exc)
             return CompleteOutcome.RETRY_LATER
         except Exception as exc:  # noqa: BLE001
-            _log.warning("sync session %d complete network error: %s", session_id, exc)
+            _log.warning("complete_sync_session: session=%d network error: %s", session_id, exc)
             return CompleteOutcome.RETRY_LATER
         if not isinstance(data, dict):
-            _log.warning("sync session %d complete: unexpected response type", session_id)
+            _log.warning("complete_sync_session: session=%d unexpected response type", session_id)
             return CompleteOutcome.RETRY_LATER
-        _log.debug("complete_sync_session response: session=%d data=%s", session_id, data)
+        _log.debug("complete_sync_session: session=%d accepted", session_id)
         return CompleteOutcome.ACCEPTED
 
     def list_rom_identifiers(self) -> list[int]:

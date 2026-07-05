@@ -357,6 +357,11 @@ conflict_strategy = "ask"
 direction = "push_pull"
 # Worker threads for parallel symlink evaluation/apply (reduce if NAS is overloaded)
 parallel_workers = 16
+# Slot name used for uploads and to filter downloads. Allows cross-client interop
+# (e.g. ES-DE + Argosy sharing the same slot). Set to "" to disable.
+preferred_slot = "autosave"
+# Print negotiate request/response tables in dry-run mode; sets log level to DEBUG.
+debug_mode = false
 
 [cache]
 enabled = true

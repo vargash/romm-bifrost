@@ -23,7 +23,7 @@ def _log_dir() -> Path:
     return base / "bifrost" / "logs"
 
 
-def setup_file_logging(verbose: bool = False) -> Path:
+def setup_file_logging(verbose: bool = False, debug_mode: bool = False) -> Path:
     """Configure rotating file logger. Returns the log file path.
 
     Idempotent: safe to call multiple times per process.
@@ -33,7 +33,7 @@ def setup_file_logging(verbose: bool = False) -> Path:
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "bifrost.log"
 
-    level = logging.DEBUG if (verbose or os.environ.get("BIFROST_DEBUG") == "1") else logging.INFO
+    level = logging.DEBUG if (verbose or debug_mode or os.environ.get("BIFROST_DEBUG") == "1") else logging.INFO
 
     logger = logging.getLogger("bifrost")
     if logger.handlers:

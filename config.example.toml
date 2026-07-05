@@ -40,6 +40,13 @@ videos = "videos"
 conflict_strategy = "ask"
 sync_mode = "push_pull"
 parallel_workers = 16   # threads for parallel symlink evaluation/apply (reduce if NAS is overloaded)
+# Slot name used when uploading saves and filtering downloads.
+# Shared with other clients (e.g. Argosy) that use the same slot name.
+# Set to "" to disable slot enforcement and preserve emulator-derived slot values.
+preferred_slot = "autosave"
+# Enable debug mode: dry-run (no --apply) prints negotiate request/response tables.
+# Also sets file log level to DEBUG for the duration of the run.
+debug_mode = false
 
 [output]
 format = "table"
