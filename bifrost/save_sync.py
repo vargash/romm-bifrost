@@ -464,6 +464,7 @@ def _legacy_negotiate(
                         rom_id=remote.rom_id,
                         save_id=remote.id,
                         file_name=remote.file_name,
+                        slot=remote.slot,
                         reason="Save exists on server but not on client",
                     )
                 )
@@ -593,6 +594,11 @@ def build_save_sync_preview(
         operation
         for operation in raw_operations
         if operation.save_id not in untracked_save_ids
+        and not _is_redundant_upload_operation(
+            operation,
+            local_state_index.get(_save_lookup_key(operation.rom_id, operation.file_name)),
+            remote_save_index.get(_save_lookup_key(operation.rom_id, operation.file_name)),
+        )
     ]
 
     preferred_slot = config.sync.preferred_slot
@@ -600,12 +606,12 @@ def build_save_sync_preview(
         before = len(filtered_operations)
         filtered_operations = [
             op for op in filtered_operations
-            if op.action == "upload" or (op.slot or "") == preferred_slot
+            if op.action != "download" or not op.slot or op.slot == preferred_slot
         ]
         dropped = before - len(filtered_operations)
         if dropped:
             _log.info(
-                "preferred_slot=%r: dropped %d non-upload operation(s) with mismatched slot",
+                "preferred_slot=%r: dropped %d download operation(s) with mismatched slot",
                 preferred_slot,
                 dropped,
             )

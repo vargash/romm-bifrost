@@ -179,6 +179,8 @@ saves_path = "{saves_root}"
     calls: dict[str, int] = {"upload": 0, "track": 0, "complete": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/devices/device-1":
+            return httpx.Response(200, json={"device_id": "device-1"})
         if request.url.path == "/api/roms":
             return httpx.Response(
                 200,
@@ -322,6 +324,8 @@ saves_path = "{saves_root}"
     calls: dict[str, int] = {"post_upload": 0, "put_upload": 0, "track": 0, "complete": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/devices/device-1":
+            return httpx.Response(200, json={"device_id": "device-1"})
         if request.url.path == "/api/roms":
             return httpx.Response(
                 200,
@@ -484,6 +488,8 @@ saves_path = "{saves_root}"
     calls: dict[str, int] = {"post_upload": 0, "put_upload": 0, "track": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/devices/device-1":
+            return httpx.Response(200, json={"device_id": "device-1"})
         if request.url.path == "/api/roms":
             return httpx.Response(
                 200,

@@ -375,7 +375,8 @@ def test_setup_wizard_reuses_existing_defaults(
 
     monkeypatch.setattr(httpx.Client, "__init__", patched_init)
 
-    confirm_answers = iter([False, True, False])
+    # Answers: use_pairing, keep_existing_token, should_prompt_paths, save_sync_enabled
+    confirm_answers = iter([False, True, False, True])
 
     def fake_confirm(*_: Any, **__: Any) -> bool:
         return next(confirm_answers)
@@ -426,7 +427,8 @@ def test_setup_wizard_can_change_selected_values(
 
     monkeypatch.setattr(httpx.Client, "__init__", patched_init)
 
-    confirm_answers = iter([False, True, True])
+    # Answers: use_pairing, keep_existing_token, should_prompt_paths, save_sync_enabled
+    confirm_answers = iter([False, True, True, True])
 
     def fake_confirm(*_: Any, **__: Any) -> bool:
         return next(confirm_answers)
