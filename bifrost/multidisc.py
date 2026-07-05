@@ -62,11 +62,13 @@ def group_multidisc_roms_raw(
 def _disc_filenames_for_folder_rom(client: Any, rom_id: int) -> list[str]:
     """Fetch per-ROM detail and return disc file names sorted by disc number.
 
-    Calls GET /api/roms/<id> which returns the ``files`` list by default.
-    Returns [] on any API error or when fewer than 2 disc files are found.
+    Calls GET /api/roms/<id>/simple, which includes ``files`` without the
+    heavier user_saves/user_states/user_screenshots/notes joins of the full
+    detail endpoint. Returns [] on any API error or when fewer than 2 disc
+    files are found.
     """
     try:
-        detail = client.get_rom(rom_id)
+        detail = client.get_rom_simple(rom_id)
     except Exception:
         return []
 

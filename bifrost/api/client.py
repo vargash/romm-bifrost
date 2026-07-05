@@ -767,6 +767,13 @@ class RommApiClient:
             raise ApiError(f"Unexpected response type for /api/roms/{rom_id}")
         return data
 
+    def get_rom_simple(self, rom_id: int) -> dict[str, Any]:
+        """GET /api/roms/{id}/simple — lightweight fetch (no user_saves/states/screenshots/notes joins)."""
+        data = self._request_json("GET", f"/api/roms/{rom_id}/simple")
+        if not isinstance(data, dict):
+            raise ApiError(f"Unexpected response type for /api/roms/{rom_id}/simple")
+        return data
+
     def get_device(self, device_id: str) -> dict[str, Any]:
         data = self._request_json("GET", f"/api/devices/{device_id}")
         if not isinstance(data, dict):

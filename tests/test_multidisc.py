@@ -266,8 +266,8 @@ class _StubClient:
             {"id": 4, "platform_id": 10, "fs_name": "Crash.bin", "has_multiple_files": False},
         ]
 
-    def get_rom(self, rom_id: int) -> dict:
-        raise AssertionError(f"get_rom should not be called for flat-file ROMs (id={rom_id})")
+    def get_rom_simple(self, rom_id: int) -> dict:
+        raise AssertionError(f"get_rom_simple should not be called for flat-file ROMs (id={rom_id})")
 
 
 class _StubClientFolderBased:
@@ -282,7 +282,7 @@ class _StubClientFolderBased:
             {"id": 4, "platform_id": 10, "fs_name": "Crash.chd", "has_multiple_files": False},
         ]
 
-    def get_rom(self, rom_id: int) -> dict:
+    def get_rom_simple(self, rom_id: int) -> dict:
         if rom_id == 99:
             return {
                 "id": 99,
@@ -355,7 +355,7 @@ def test_plan_m3u_operations_folder_based_skips_non_disc_multi_file(tmp_path: Pa
         def list_roms_raw(self) -> list[dict]:
             return [{"id": 5, "platform_id": 10, "fs_name": "Game", "has_multiple_files": True}]
 
-        def get_rom(self, rom_id: int) -> dict:
+        def get_rom_simple(self, rom_id: int) -> dict:
             return {"id": rom_id, "files": [
                 {"file_name": "Game.bin"},
                 {"file_name": "Game.cue"},
@@ -378,7 +378,7 @@ def test_detect_folder_multidisc_from_api_excludes_single_disc(tmp_path: Path):
     from bifrost.multidisc import detect_folder_multidisc_from_api
 
     class _SingleFileClient:
-        def get_rom(self, rom_id: int) -> dict:
+        def get_rom_simple(self, rom_id: int) -> dict:
             return {"id": rom_id, "files": [{"file_name": "Game (Disc 1).bin"}]}
 
     roms_raw = [{"id": 1, "has_multiple_files": True}]
