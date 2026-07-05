@@ -217,6 +217,9 @@ def test_is_redundant_download_false_when_file_missing(tmp_path: Path) -> None:
 
 def test_execute_conflict_server_wins_triggers_download(tmp_path: Path) -> None:
     config = make_config(tmp_path, conflict_strategy="server_wins")
+    # optimistic_downloads=True (default) skips the /downloaded confirm call by
+    # design; disable it here to exercise the non-optimistic confirm path.
+    config.sync.optimistic_downloads = False
     saves_root = Path(config.emudeck.saves_path)
     profile_dir = saves_root / "retroarch/saves"
     profile_dir.mkdir(parents=True, exist_ok=True)
@@ -383,7 +386,7 @@ def test_execute_conflict_local_wins_triggers_upload(tmp_path: Path) -> None:
     client.close()
 
     assert calls["upload"] == 1
-    assert calls["track"] == 0  # track_save removed post-upload (redundant)
+    assert calls["track"] == 1  # upload establishes DeviceSaveSync via /track (56c03d9)
     assert calls["complete"] == 1
     assert result.executed == 1
     assert result.failed == 0
@@ -918,12 +921,14 @@ def test_complete_sync_session_200_returns_accepted(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# F2: execute does NOT call track after upload
+# F2: execute calls track after upload (56c03d9: POST /api/saves does not
+# reliably create DeviceSaveSync on its own — omitting /track caused negotiate
+# to return upload=∞ against a real RomM server)
 # ---------------------------------------------------------------------------
 
 
-def test_execute_upload_does_not_call_track(tmp_path: Path) -> None:
-    """track_save not called after upload — upload already sets DeviceSaveSync."""
+def test_execute_upload_calls_track(tmp_path: Path) -> None:
+    """track_save is called after upload to establish DeviceSaveSync."""
     config = make_config(tmp_path)
     saves_root = Path(config.emudeck.saves_path)
     (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
@@ -995,7 +1000,7 @@ def test_execute_upload_does_not_call_track(tmp_path: Path) -> None:
     client.close()
 
     assert result.executed == 1
-    assert track_calls == [], f"track was called unexpectedly: {track_calls}"
+    assert track_calls == ["/api/saves/55/track"], f"expected one track call, got: {track_calls}"
 
 
 # ---------------------------------------------------------------------------

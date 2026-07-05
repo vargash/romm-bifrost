@@ -99,6 +99,7 @@ def test_save_sync_command_prints_preview(monkeypatch, tmp_path: Path) -> None:
 url = "http://romm.local"
 client_token = "rmm_token"
 device_id = "device-1"
+legacy_upload_fallback = true
 
 [emudeck]
 saves_path = "{saves_root}"
@@ -168,6 +169,7 @@ def test_save_sync_apply_only_file_executes_single_upload(
 url = "http://romm.local"
 client_token = "rmm_token"
 device_id = "device-1"
+legacy_upload_fallback = true
 
 [emudeck]
 saves_path = "{saves_root}"
@@ -295,7 +297,7 @@ saves_path = "{saves_root}"
 
     assert result.exit_code == 0
     assert calls["upload"] == 1
-    assert calls["track"] == 0  # track_save removed post-upload (redundant)
+    assert calls["track"] == 1  # upload establishes DeviceSaveSync via /track (56c03d9)
     assert calls["complete"] == 1
     assert "Save Sync Execution" in result.output
 
@@ -313,6 +315,7 @@ def test_save_sync_apply_upload_fallback_to_existing_save_on_post_failure(
 url = "http://romm.local"
 client_token = "rmm_token"
 device_id = "device-1"
+legacy_upload_fallback = true
 
 [emudeck]
 saves_path = "{saves_root}"
@@ -458,7 +461,7 @@ saves_path = "{saves_root}"
     assert result.exit_code == 0
     assert calls["post_upload"] == 3
     assert calls["put_upload"] == 1
-    assert calls["track"] == 0  # track_save removed post-upload (redundant)
+    assert calls["track"] == 1  # upload establishes DeviceSaveSync via /track (56c03d9)
     assert calls["complete"] == 1
     assert "Operations" in result.output
     assert "download" not in result.output
@@ -477,6 +480,7 @@ def test_save_sync_apply_upload_fallback_uses_global_save_lookup(
 url = "http://romm.local"
 client_token = "rmm_token"
 device_id = "device-1"
+legacy_upload_fallback = true
 
 [emudeck]
 saves_path = "{saves_root}"
@@ -613,7 +617,7 @@ saves_path = "{saves_root}"
     assert result.exit_code == 0
     assert calls["post_upload"] == 3
     assert calls["put_upload"] == 1
-    assert calls["track"] == 0  # track_save removed post-upload (redundant)
+    assert calls["track"] == 1  # upload establishes DeviceSaveSync via /track (56c03d9)
 
 
 def test_build_save_sync_preview_matches_tagged_save_name(tmp_path: Path) -> None:
@@ -797,6 +801,7 @@ def test_download_strips_romm_timestamp(monkeypatch, tmp_path: Path) -> None:
 url = "http://romm.local"
 client_token = "rmm_token"
 device_id = "device-1"
+legacy_upload_fallback = true
 
 [emudeck]
 saves_path = "{saves_root}"
@@ -893,6 +898,7 @@ def test_download_resolves_emulator_subdir_when_no_local_file(
 url = "http://romm.local"
 client_token = "rmm_token"
 device_id = "device-1"
+legacy_upload_fallback = true
 
 [emudeck]
 saves_path = "{saves_root}"

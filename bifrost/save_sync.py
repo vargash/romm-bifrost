@@ -741,51 +741,66 @@ def execute_save_sync_preview(
                 _emulator, _slot = local_state_meta.get(
                     (operation.rom_id, operation.file_name.lower()), (None, None)
                 )
-                try:
+                if operation.save_id is not None:
+                    # Known existing save (e.g. conflict resolved as local_wins, or a
+                    # legacy-negotiate "content differs" match): overwrite it in place
+                    # instead of accumulating a new version.
                     upload_result = client.upload_save_file(
                         rom_id=operation.rom_id,
                         save_path=local_file.path,
                         device_id=preview.device_id,
                         session_id=preview.session_id,
-                        save_id=None,  # always POST → create new save version
-                        overwrite=False,
-                        autocleanup=_do_autocleanup,
-                        autocleanup_limit=_autocleanup_limit,
+                        save_id=operation.save_id,
+                        overwrite=True,
                         emulator=_emulator,
                         slot=_slot,
                     )
-                except ApiError as exc:
-                    # Legacy workaround: some RomM builds return 500 on POST when a save
-                    # already exists. Re-list saves to find the existing id and retry with PUT.
-                    # Only active when romm.legacy_upload_fallback = true in config.
-                    if operation.save_id is None and config.romm.legacy_upload_fallback:
-                        if remote_save_index is None:
-                            device_scoped = client.list_saves(device_id=preview.device_id)
-                            global_scoped = client.list_saves()
-                            remote_save_index = {}
-                            for save in [*device_scoped, *global_scoped]:
-                                remote_save_index.setdefault(
-                                    _save_lookup_key(save.rom_id, save.file_name),
-                                    save,
-                                )
-                        existing = remote_save_index.get(
-                            _save_lookup_key(operation.rom_id, operation.file_name)
+                else:
+                    try:
+                        upload_result = client.upload_save_file(
+                            rom_id=operation.rom_id,
+                            save_path=local_file.path,
+                            device_id=preview.device_id,
+                            session_id=preview.session_id,
+                            save_id=None,  # always POST → create new save version
+                            overwrite=False,
+                            autocleanup=_do_autocleanup,
+                            autocleanup_limit=_autocleanup_limit,
+                            emulator=_emulator,
+                            slot=_slot,
                         )
-                        if existing is not None:
-                            upload_result = client.upload_save_file(
-                                rom_id=operation.rom_id,
-                                save_path=local_file.path,
-                                device_id=preview.device_id,
-                                session_id=preview.session_id,
-                                save_id=existing.id,
-                                overwrite=True,
-                                emulator=_emulator,
-                                slot=_slot,
+                    except ApiError as exc:
+                        # Legacy workaround: some RomM builds return 500 on POST when a save
+                        # already exists. Re-list saves to find the existing id and retry with PUT.
+                        # Only active when romm.legacy_upload_fallback = true in config.
+                        if config.romm.legacy_upload_fallback:
+                            if remote_save_index is None:
+                                device_scoped = client.list_saves(device_id=preview.device_id)
+                                global_scoped = client.list_saves()
+                                remote_save_index = {}
+                                for save in [*device_scoped, *global_scoped]:
+                                    remote_save_index.setdefault(
+                                        _save_lookup_key(save.rom_id, save.file_name),
+                                        save,
+                                    )
+                            existing = remote_save_index.get(
+                                _save_lookup_key(operation.rom_id, operation.file_name)
                             )
+                            if existing is not None:
+                                upload_result = client.upload_save_file(
+                                    rom_id=operation.rom_id,
+                                    save_path=local_file.path,
+                                    device_id=preview.device_id,
+                                    session_id=preview.session_id,
+                                    save_id=existing.id,
+                                    overwrite=True,
+                                    emulator=_emulator,
+                                    slot=_slot,
+                                )
+                            else:
+                                raise exc
                         else:
                             raise exc
-                    else:
-                        raise exc
                 # Establish device-save sync link so negotiate sees this device as current.
                 # POST /api/saves does not create DeviceSyncSchema automatically.
                 uploaded_save_id = upload_result.get("id") if isinstance(upload_result, dict) else None
