@@ -41,6 +41,7 @@ BIFROST_OWNED_TAGS = {
     "region",
     "releasedate",
     "rating",
+    "sortname",
 }
 
 
@@ -311,9 +312,12 @@ def _build_game_element(rom: dict[str, Any]) -> ET.Element | None:
             "moby_score",
         )
 
+    sort_name = _pick_text_from_sources(rom, source_priority, "sort_name")
+
     fields: dict[str, str | None] = {
         "path": path_value,
         "name": _pick_text(rom, "name", "fs_name"),
+        "sortname": sort_name,
         "desc": _pick_text(rom, "summary", "description"),
         "developer": developer,
         "publisher": publisher,

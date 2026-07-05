@@ -62,6 +62,20 @@ class StubClientNestedMetadata(StubClient):
         ]
 
 
+class StubClientWithSortName(StubClient):
+    def list_roms_raw(self, use_cache: bool = True):
+        return [
+            {
+                "id": 10,
+                "platform_id": 1,
+                "fs_name": "Mario.nes",
+                "name": "Super Mario Bros",
+                "developer": "Nintendo",
+                "gamelist_metadata": {"sort_name": "Mario Bros, Super"},
+            }
+        ]
+
+
 class StubClientMetadataPrecedence(StubClient):
     def list_roms_raw(self, use_cache: bool = True):
         return [
@@ -239,6 +253,16 @@ def test_apply_gamelist_plan_prefers_top_level_metadata(tmp_path: Path):
     assert "<players>3</players>" in xml
     assert "<releasedate>19901201T000000</releasedate>" in xml
     assert "<rating>0.45</rating>" in xml
+
+
+def test_apply_gamelist_plan_writes_sortname_from_gamelist_metadata(tmp_path: Path):
+    config = make_config(tmp_path)
+
+    apply_gamelist_plan(config, StubClientWithSortName())
+
+    gamelist_path = tmp_path / "gamelists" / "nes" / "gamelist.xml"
+    xml = gamelist_path.read_text(encoding="utf-8")
+    assert "<sortname>Mario Bros, Super</sortname>" in xml
 
 
 def test_build_gamelist_plan_detects_removed_entries(tmp_path: Path):
