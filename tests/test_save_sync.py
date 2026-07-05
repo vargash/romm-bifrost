@@ -978,3 +978,159 @@ saves_path = "{saves_root}"
     assert expected.exists(), f"Expected {expected}. Output:\n{result.output}"
     assert expected.read_bytes() == b"mario-save"
     assert not (saves_root / "Mario.sav").exists(), "Must not land in bare save_root"
+
+def test_save_sync_on_event_game_start_sends_activity_heartbeat(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "config.toml"
+    saves_root = tmp_path / "saves"
+    saves_root.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        f"""
+[romm]
+url = "http://romm.local"
+client_token = "rmm_token"
+device_id = "device-1"
+
+[emudeck]
+saves_path = "{saves_root}"
+""".strip(),
+        encoding="utf-8",
+    )
+    config_path.chmod(0o600)
+
+    calls: dict[str, Any] = {"heartbeat": None}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/roms":
+            return httpx.Response(
+                200,
+                json={"items": [{"id": 10, "name": "Mario", "fs_name": "Mario.zip"}], "total": 1},
+            )
+        if request.url.path == "/api/saves" and request.method == "GET":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/api/sync/negotiate":
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": 9,
+                    "operations": [],
+                    "total_upload": 0,
+                    "total_download": 0,
+                    "total_conflict": 0,
+                    "total_no_op": 0,
+                },
+            )
+        if request.url.path == "/api/activity/heartbeat" and request.method == "POST":
+            calls["heartbeat"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(
+                200,
+                json={
+                    "user_id": 1,
+                    "username": "u",
+                    "avatar_path": "",
+                    "rom_id": 10,
+                    "rom_name": "Mario",
+                    "platform_slug": "nes",
+                    "platform_name": "NES",
+                    "device_id": "device-1",
+                    "device_type": "bifrost",
+                    "started_at": "2026-06-19T00:00:00Z",
+                },
+            )
+        return httpx.Response(404, json={})
+
+    original_init = httpx.Client.__init__
+
+    def patched_init(self: httpx.Client, *args: Any, **kwargs: Any) -> None:
+        kwargs["transport"] = httpx.MockTransport(handler)
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "__init__", patched_init)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "save-sync",
+            "--config",
+            str(config_path),
+            "--on-event",
+            "game-start",
+            "--rom-path",
+            "/roms/nes/Mario.nes",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls["heartbeat"] == {"rom_id": 10, "device_id": "device-1"}
+
+
+def test_save_sync_on_event_game_end_clears_activity_heartbeat(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "config.toml"
+    saves_root = tmp_path / "saves"
+    saves_root.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        f"""
+[romm]
+url = "http://romm.local"
+client_token = "rmm_token"
+device_id = "device-1"
+
+[emudeck]
+saves_path = "{saves_root}"
+""".strip(),
+        encoding="utf-8",
+    )
+    config_path.chmod(0o600)
+
+    calls: dict[str, Any] = {"cleared": None}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/roms":
+            return httpx.Response(200, json={"items": [], "total": 0})
+        if request.url.path == "/api/saves" and request.method == "GET":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/api/sync/negotiate":
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": 9,
+                    "operations": [],
+                    "total_upload": 0,
+                    "total_download": 0,
+                    "total_conflict": 0,
+                    "total_no_op": 0,
+                },
+            )
+        if request.url.path == "/api/activity/heartbeat" and request.method == "DELETE":
+            calls["cleared"] = request.url.params.get("device_id")
+            return httpx.Response(204)
+        return httpx.Response(404, json={})
+
+    original_init = httpx.Client.__init__
+
+    def patched_init(self: httpx.Client, *args: Any, **kwargs: Any) -> None:
+        kwargs["transport"] = httpx.MockTransport(handler)
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "__init__", patched_init)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "save-sync",
+            "--config",
+            str(config_path),
+            "--on-event",
+            "game-end",
+            "--rom-path",
+            "/roms/nes/Mario.nes",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls["cleared"] == "device-1"

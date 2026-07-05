@@ -52,7 +52,11 @@ from bifrost.preflight import (
     run_save_preflight,
     run_sync_preflight,
 )
-from bifrost.save_sync import build_save_sync_preview, execute_save_sync_preview
+from bifrost.save_sync import (
+    build_save_sync_preview,
+    execute_save_sync_preview,
+    resolve_rom_id_by_path,
+)
 from bifrost.state_sync import build_state_sync_preview, execute_state_sync_preview
 from bifrost.symlink_manager import (
     RemoveSymlinkOperation,
@@ -1285,6 +1289,24 @@ def save_sync(
             with RommApiClient(
                 config, timeout_seconds=config.romm.timeout_seconds, no_cache=no_cache
             ) as client:
+                # Activity heartbeat: mark/clear this device's "currently playing" state.
+                # Fail-open — a heartbeat hiccup must never block save-sync or the game launch.
+                if config.romm.device_id:
+                    if on_event == "game-start" and rom_path:
+                        try:
+                            heartbeat_rom_id = resolve_rom_id_by_path(client, rom_path)
+                            if heartbeat_rom_id is not None:
+                                client.device_activity_heartbeat(
+                                    rom_id=heartbeat_rom_id, device_id=config.romm.device_id
+                                )
+                        except Exception as _hb_exc:  # noqa: BLE001
+                            _cli_log.debug("activity heartbeat failed (ignored): %s", _hb_exc)
+                    elif on_event in {"game-end", "quit", "poweroff", "suspend"}:
+                        try:
+                            client.clear_device_activity(device_id=config.romm.device_id)
+                        except Exception as _hb_exc:  # noqa: BLE001
+                            _cli_log.debug("activity heartbeat clear failed (ignored): %s", _hb_exc)
+
                 # API-level preflight: device enrolled + negotiate capability
                 # Skipped in hook mode (adds latency; timeout + fail-open cover it)
                 if apply and on_event is None:

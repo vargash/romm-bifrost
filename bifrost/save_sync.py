@@ -245,6 +245,14 @@ def _build_remote_rom_index(remote_roms: list[RomSummary]) -> dict[str, RomSumma
     return index
 
 
+def resolve_rom_id_by_path(client: RommApiClient, rom_path: str) -> int | None:
+    """Best-effort rom_id lookup from an ES-DE $1 rom path, for activity heartbeats."""
+    rom_index = _build_remote_rom_index(client.list_roms())
+    normalized = _normalize_name(Path(rom_path).stem)
+    rom = rom_index.get(normalized)
+    return rom.id if rom is not None else None
+
+
 def _build_local_save_state(
     local_save: LocalSaveFile,
     remote_index: dict[str, RomSummary],

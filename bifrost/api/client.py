@@ -411,6 +411,21 @@ class RommApiClient:
             raise ApiError("Unexpected response type for /api/saves/{id}/track")
         return data
 
+    def device_activity_heartbeat(self, rom_id: int, device_id: str) -> dict[str, Any]:
+        """POST /api/activity/heartbeat — mark this device as actively playing rom_id."""
+        data = self._request_json(
+            "POST",
+            "/api/activity/heartbeat",
+            json={"rom_id": rom_id, "device_id": device_id},
+        )
+        if not isinstance(data, dict):
+            raise ApiError("Unexpected response type for /api/activity/heartbeat")
+        return data
+
+    def clear_device_activity(self, device_id: str) -> None:
+        """DELETE /api/activity/heartbeat — clear this device's active session."""
+        self._request("DELETE", "/api/activity/heartbeat", params={"device_id": device_id})
+
     def list_states(self, rom_id: int | None = None) -> list[StateSummary]:
         params: dict[str, Any] = {}
         if rom_id is not None:
