@@ -449,3 +449,85 @@ def test_setup_wizard_can_change_selected_values(
     assert cfg.nas.library_path == "/new/library"
     assert cfg.nas.resources_path == "/data/resources"
     assert cfg.romm.client_token == "rmm_old"
+
+
+def test_setup_device_auth_success_writes_token_and_device_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config_file = tmp_path / "config.toml"
+
+    def fake_device_auth_flow(console, url_value, **kwargs):
+        assert url_value == "http://romm.local"
+        return "rmm_from_device_auth", "device-99"
+
+    monkeypatch.setattr("bifrost.cli._run_device_auth_flow", fake_device_auth_flow)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "setup",
+            "--device-auth",
+            "--url",
+            "http://romm.local",
+            "--skip-verify",
+            "--config",
+            str(config_file),
+        ],
+    )
+
+    assert result.exit_code == EXIT_OK, result.output
+    cfg = load_config(config_file)
+    assert cfg.romm.client_token == "rmm_from_device_auth"
+    assert cfg.romm.device_id == "device-99"
+
+
+def test_setup_device_auth_with_token_returns_config_error(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.toml"
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "setup",
+            "--device-auth",
+            "--token",
+            "rmm_token",
+            "--url",
+            "http://romm.local",
+            "--config",
+            str(config_file),
+        ],
+    )
+
+    assert result.exit_code == EXIT_CONFIG_ERROR
+    assert not config_file.exists()
+
+
+def test_setup_device_auth_denied_returns_api_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from bifrost.errors import DeviceAuthDenied
+
+    config_file = tmp_path / "config.toml"
+
+    def fake_device_auth_flow(console, url_value, **kwargs):
+        raise DeviceAuthDenied("Device authorization access_denied: denied")
+
+    monkeypatch.setattr("bifrost.cli._run_device_auth_flow", fake_device_auth_flow)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "setup",
+            "--device-auth",
+            "--url",
+            "http://romm.local",
+            "--config",
+            str(config_file),
+        ],
+    )
+
+    assert result.exit_code == EXIT_API_ERROR
+    assert not config_file.exists()

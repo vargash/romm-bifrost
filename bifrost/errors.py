@@ -27,5 +27,9 @@ class AuthenticationError(BifrostError):
     """Raised when RomM API authentication fails."""
 
 
+class DeviceAuthDenied(ApiError):
+    """Raised when a device-authorization request is denied or expires before approval."""
+
+
 class NetworkError(BifrostError):
     """Raised when the API cannot be reached."""

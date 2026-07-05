@@ -254,3 +254,34 @@ class DeviceCreateResponse(BaseModel):
     device_id: str
     name: str | None = None
     created_at: str
+
+
+class DeviceAuthInitPayload(BaseModel):
+    """Request body for POST /api/auth/device/init."""
+
+    client_device_identifier: str
+    name: str
+    client: str
+    client_version: str | None = None
+    platform: str | None = None
+    requested_scopes: list[str]
+
+
+class DeviceAuthInitResponse(BaseModel):
+    """Response body for POST /api/auth/device/init."""
+
+    device_code: str
+    user_code: str
+    verification_path: str
+    verification_path_complete: str
+    expires_in: int
+    interval: int
+
+
+class DeviceAuthTokenResponse(BaseModel):
+    """Response body for POST /api/auth/device/token on approval."""
+
+    access_token: str
+    device_id: str
+    scopes: list[str]
+    expires_at: str | None = None

@@ -3,9 +3,15 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from bifrost.api.client import RetryConfig, RommApiClient
+from bifrost.api.client import (
+    RetryConfig,
+    RommApiClient,
+    device_auth_init,
+    device_auth_poll_token,
+)
+from bifrost.api.models import DeviceAuthInitPayload
 from bifrost.config import AppConfig, CacheConfig, RommConfig
-from bifrost.errors import ApiError, AuthenticationError
+from bifrost.errors import ApiError, AuthenticationError, DeviceAuthDenied
 
 
 def make_config() -> AppConfig:
@@ -79,3 +85,74 @@ def test_list_roms_accepts_paged_payload() -> None:
     assert len(roms) == 1
     assert roms[0].fs_name == "game.chd"
     client.close()
+
+
+def test_device_auth_init_returns_parsed_response() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/auth/device/init"
+        return httpx.Response(
+            201,
+            json={
+                "device_code": "devcode123",
+                "user_code": "ABCD-EFGH",
+                "verification_path": "/pair/device",
+                "verification_path_complete": "/pair/device?user_code=ABCD-EFGH",
+                "expires_in": 600,
+                "interval": 5,
+            },
+        )
+
+    response = device_auth_init(
+        "http://romm.local",
+        DeviceAuthInitPayload(
+            client_device_identifier="aa:bb:cc:dd:ee:ff",
+            name="Bifrost on host",
+            client="bifrost",
+            requested_scopes=["roms.read"],
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert response.device_code == "devcode123"
+    assert response.user_code == "ABCD-EFGH"
+    assert response.interval == 5
+
+
+def test_device_auth_poll_token_pending_returns_none() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": "authorization_pending"})
+
+    result = device_auth_poll_token(
+        "http://romm.local", "devcode123", transport=httpx.MockTransport(handler)
+    )
+    assert result is None
+
+
+def test_device_auth_poll_token_denied_raises() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": "access_denied"})
+
+    with pytest.raises(DeviceAuthDenied):
+        device_auth_poll_token(
+            "http://romm.local", "devcode123", transport=httpx.MockTransport(handler)
+        )
+
+
+def test_device_auth_poll_token_success_returns_token() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "access_token": "rmm_scoped_token",
+                "device_id": "device-42",
+                "scopes": ["roms.read"],
+                "expires_at": None,
+            },
+        )
+
+    result = device_auth_poll_token(
+        "http://romm.local", "devcode123", transport=httpx.MockTransport(handler)
+    )
+    assert result is not None
+    assert result.access_token == "rmm_scoped_token"
+    assert result.device_id == "device-42"

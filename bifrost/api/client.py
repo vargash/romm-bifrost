@@ -13,6 +13,9 @@ import httpx
 
 from bifrost.api.models import (
     CompleteOutcome,
+    DeviceAuthInitPayload,
+    DeviceAuthInitResponse,
+    DeviceAuthTokenResponse,
     DeviceCreatePayload,
     DeviceCreateResponse,
     DeviceUpdatePayload,
@@ -29,7 +32,7 @@ from bifrost.api.models import (
 )
 from bifrost.cache import BifrostCache, merge_by_id
 from bifrost.config import AppConfig
-from bifrost.errors import ApiError, AuthenticationError, NetworkError
+from bifrost.errors import ApiError, AuthenticationError, DeviceAuthDenied, NetworkError
 
 RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
 DEFAULT_COLLECTION_PAGE_SIZE = 1000
@@ -161,6 +164,108 @@ def exchange_pairing_code(
         return token
 
     raise ApiError("Pairing exchange response did not include a valid client token.")
+
+
+_DEVICE_AUTH_PENDING_ERRORS = {"authorization_pending", "slow_down"}
+_DEVICE_AUTH_TERMINAL_ERRORS = {"access_denied", "expired_token"}
+
+
+def device_auth_init(
+    base_url: str,
+    payload: DeviceAuthInitPayload,
+    timeout_seconds: float = 10.0,
+    transport: httpx.BaseTransport | None = None,
+) -> DeviceAuthInitResponse:
+    """Start a device-authorization request (RomM v5.0+). Open endpoint, no token required."""
+
+    normalized_url = base_url.rstrip("/")
+
+    try:
+        with httpx.Client(
+            base_url=normalized_url,
+            timeout=timeout_seconds,
+            headers={"Accept": "application/json"},
+            transport=transport,
+        ) as client:
+            response = client.post(
+                "/api/auth/device/init",
+                json=payload.model_dump(exclude_none=True),
+            )
+    except httpx.RequestError as exc:
+        raise NetworkError(f"Unable to reach RomM API at {normalized_url}") from exc
+
+    if response.is_error:
+        raise ApiError(
+            f"Device-authorization init failed: {response.status_code} {response.text.strip()}"
+        )
+
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise ApiError("Invalid JSON response from /api/auth/device/init") from exc
+
+    if not isinstance(data, dict):
+        raise ApiError("Unexpected response type from /api/auth/device/init")
+
+    return DeviceAuthInitResponse.model_validate(data)
+
+
+def device_auth_poll_token(
+    base_url: str,
+    device_code: str,
+    timeout_seconds: float = 10.0,
+    transport: httpx.BaseTransport | None = None,
+) -> DeviceAuthTokenResponse | None:
+    """Poll for the device-authorization outcome once.
+
+    Returns None while the user has not yet approved/denied the request (keep polling).
+    Raises DeviceAuthDenied once the request is denied or expires. Raises ApiError/NetworkError
+    for any other failure.
+    """
+
+    normalized_url = base_url.rstrip("/")
+
+    try:
+        with httpx.Client(
+            base_url=normalized_url,
+            timeout=timeout_seconds,
+            headers={"Accept": "application/json"},
+            transport=transport,
+        ) as client:
+            response = client.post(
+                "/api/auth/device/token",
+                json={"device_code": device_code},
+            )
+    except httpx.RequestError as exc:
+        raise NetworkError(f"Unable to reach RomM API at {normalized_url}") from exc
+
+    if response.is_error:
+        error_code: str | None = None
+        try:
+            body = response.json()
+            if isinstance(body, dict):
+                error_code = body.get("error") or body.get("detail")
+        except ValueError:
+            pass
+
+        if isinstance(error_code, str) and error_code in _DEVICE_AUTH_PENDING_ERRORS:
+            return None
+        if isinstance(error_code, str) and error_code in _DEVICE_AUTH_TERMINAL_ERRORS:
+            raise DeviceAuthDenied(f"Device authorization {error_code}: {response.text.strip()}")
+
+        raise ApiError(
+            f"Device-authorization poll failed: {response.status_code} {response.text.strip()}"
+        )
+
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise ApiError("Invalid JSON response from /api/auth/device/token") from exc
+
+    if not isinstance(data, dict):
+        raise ApiError("Unexpected response type from /api/auth/device/token")
+
+    return DeviceAuthTokenResponse.model_validate(data)
 
 
 @dataclass(frozen=True)

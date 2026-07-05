@@ -10,6 +10,7 @@ import re
 import shutil
 import signal
 import sys
+import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -21,8 +22,18 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from bifrost import __version__ as _bifrost_version
-from bifrost.api.client import RommApiClient, exchange_pairing_code
-from bifrost.api.models import DeviceCreatePayload, DeviceUpdatePayload, RomSummary
+from bifrost.api.client import (
+    RommApiClient,
+    device_auth_init,
+    device_auth_poll_token,
+    exchange_pairing_code,
+)
+from bifrost.api.models import (
+    DeviceAuthInitPayload,
+    DeviceCreatePayload,
+    DeviceUpdatePayload,
+    RomSummary,
+)
 from bifrost.cache import BifrostCache, merge_by_id
 from bifrost.config import (
     AppConfig,
@@ -35,9 +46,15 @@ from bifrost.config import (
     load_config,
     save_config,
 )
-from bifrost.errors import ApiError, AuthenticationError, ConfigError, NetworkError
-from bifrost.locking import SaveSyncLockError, save_sync_lock
+from bifrost.errors import (
+    ApiError,
+    AuthenticationError,
+    ConfigError,
+    DeviceAuthDenied,
+    NetworkError,
+)
 from bifrost.gamelist import apply_gamelist_delta, apply_gamelist_plan, build_gamelist_plan
+from bifrost.locking import SaveSyncLockError, save_sync_lock
 from bifrost.logging_setup import setup_file_logging
 from bifrost.multidisc import (
     M3uOperation,
@@ -77,6 +94,23 @@ EXIT_API_ERROR = 4
 
 PAIRING_CODE_PATTERN = re.compile(r"^[A-Z0-9]{4}-?[A-Z0-9]{4}$", re.IGNORECASE)
 
+# Scopes Bifrost actually uses: catalog reads, save/state assets, device management,
+# BIOS/firmware, scan trigger, collections, and the activity heartbeat added for
+# "currently playing" (roms.user.*). Kept narrower than a full admin client token.
+_DEFAULT_DEVICE_AUTH_SCOPES: tuple[str, ...] = (
+    "platforms.read",
+    "roms.read",
+    "roms.user.read",
+    "roms.user.write",
+    "assets.read",
+    "assets.write",
+    "devices.read",
+    "devices.write",
+    "firmware.read",
+    "tasks.run",
+    "collections.read",
+)
+
 # ES-DE hook events: (event-name, installed-script-filename)
 _ESDE_HOOK_EVENTS: list[tuple[str, str]] = [
     ("startup", "10-bifrost-sync.sh"),
@@ -101,6 +135,55 @@ def _get_mac_address() -> str | None:
     if node >> 40 & 1:  # multicast bit set → random/fallback value, not a real MAC
         return None
     return ":".join(f"{(node >> (8 * i)) & 0xFF:02x}" for i in range(5, -1, -1))
+
+
+def _run_device_auth_flow(
+    console: Console,
+    url_value: str,
+    name: str,
+    platform: str,
+    client_name: str,
+    client_version: str,
+    scopes: list[str],
+) -> tuple[str, str]:
+    """Run RomM's device-authorization flow (v5.0+): init, prompt approval, poll for token.
+
+    Scope-limited alternative to `--pair` (which exchanges a code for a full-access admin
+    token). Returns (access_token, device_id) on success.
+    """
+    identifier = _get_mac_address() or (sys_platform.node() or "bifrost")
+    init_response = device_auth_init(
+        url_value,
+        DeviceAuthInitPayload(
+            client_device_identifier=identifier,
+            name=name,
+            client=client_name,
+            client_version=client_version,
+            platform=platform,
+            requested_scopes=scopes,
+        ),
+    )
+
+    base = url_value.rstrip("/")
+    console.print(
+        f"[cyan]Open this URL and approve the request:[/cyan] {base}"
+        f"{init_response.verification_path_complete}"
+    )
+    console.print(
+        f"[cyan]Or go to[/cyan] {base}{init_response.verification_path} "
+        f"[cyan]and enter code[/cyan] [bold]{init_response.user_code}[/bold]"
+    )
+    console.print("[cyan]Waiting for approval...[/cyan]")
+
+    interval = max(init_response.interval, 1)
+    deadline = time.monotonic() + init_response.expires_in
+    while time.monotonic() < deadline:
+        time.sleep(interval)
+        result = device_auth_poll_token(url_value, init_response.device_code)
+        if result is not None:
+            return result.access_token, result.device_id
+
+    raise DeviceAuthDenied("Device authorization expired before approval.")
 
 
 def _abort_on_preflight(result: PreflightResult, console: Console) -> None:
@@ -1868,6 +1951,15 @@ def device_enroll(
     help="8-digit Device Pairing code from RomM UI.",
 )
 @click.option(
+    "--device-auth",
+    "device_auth_flow",
+    is_flag=True,
+    help=(
+        "Use RomM's device-authorization flow (v5.0+): request a scope-limited token instead"
+        " of a full-access one, approved from the RomM web UI. Also registers the device."
+    ),
+)
+@click.option(
     "--config",
     "config_path",
     type=click.Path(path_type=Path, dir_okay=False),
@@ -1904,6 +1996,7 @@ def setup(
     client_token: str | None,
     pair: bool,
     pair_code: str | None,
+    device_auth_flow: bool,
     config_path: Path | None,
     skip_verify: bool,
     configure_paths: bool,
@@ -1937,6 +2030,7 @@ def setup(
             client_token,
             pair,
             pair_code,
+            device_auth_flow,
             configure_paths,
             nas_library_path,
             nas_resources_path,
@@ -1952,6 +2046,7 @@ def setup(
 
     base_config = _resolve_interactive_base_config(existing_config)
     default_url = base_config.romm.url or "http://localhost:8080"
+    device_id_value = base_config.romm.device_id
 
     if use_interactive_wizard:
         console.print("[bold cyan]Bifrost Setup[/bold cyan]")
@@ -2048,7 +2143,29 @@ def setup(
             console.print("[red]Configuration error:[/red] --pair-code requires --pair.")
             raise SystemExit(EXIT_CONFIG_ERROR)
 
-        if pair:
+        if device_auth_flow and (pair or client_token):
+            console.print(
+                "[red]Configuration error:[/red] --device-auth cannot be combined with"
+                " --pair or --token."
+            )
+            raise SystemExit(EXIT_CONFIG_ERROR)
+
+        if device_auth_flow:
+            try:
+                token_value, device_id_value = _run_device_auth_flow(
+                    console,
+                    url_value,
+                    name=f"Bifrost on {sys_platform.node()}",
+                    platform=sys_platform.system().lower(),
+                    client_name="bifrost",
+                    client_version=_bifrost_version,
+                    scopes=list(_DEFAULT_DEVICE_AUTH_SCOPES),
+                )
+            except (NetworkError, ApiError) as exc:
+                console.print(f"[red]API error:[/red] {exc}")
+                raise SystemExit(EXIT_API_ERROR) from exc
+            console.print("[green]Device authorization completed.[/green]")
+        elif pair:
             code_value = (pair_code or Prompt.ask("RomM Pairing Code (8 digits)")).strip()
             if not PAIRING_CODE_PATTERN.fullmatch(code_value):
                 console.print(
@@ -2141,7 +2258,7 @@ def setup(
         romm=RommConfig(
             url=url_value,
             client_token=token_value,
-            device_id=base_config.romm.device_id,
+            device_id=device_id_value,
         ),
         nas=NasConfig(
             library_path=nas_library_value,
@@ -2180,6 +2297,11 @@ def setup(
 
     save_path = save_config(config, resolved_path)
     console.print(f"[green]Configuration saved:[/green] {save_path}")
+    if device_id_value and device_id_value != base_config.romm.device_id:
+        console.print(
+            f"[green]Device registered via device-authorization flow:[/green] {device_id_value}"
+            " (device-enroll not needed)"
+        )
     raise SystemExit(EXIT_OK)
 
 
