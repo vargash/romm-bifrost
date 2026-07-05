@@ -31,7 +31,6 @@ from bifrost.config import (
     EsdeConfig,
     NasConfig,
     RommConfig,
-    SyncConfig,
     default_config_path,
     load_config,
     save_config,
@@ -2139,12 +2138,7 @@ def setup(
             saves_path=emudeck_saves_value,
         ),
         assets=base_config.assets,
-        sync=SyncConfig(
-            save_sync_enabled=save_sync_enabled_value,
-            conflict_strategy=base_config.sync.conflict_strategy,
-            sync_mode=base_config.sync.sync_mode,
-            parallel_workers=base_config.sync.parallel_workers,
-        ),
+        sync=base_config.sync.model_copy(update={"save_sync_enabled": save_sync_enabled_value}),
         output=base_config.output,
     )
 
