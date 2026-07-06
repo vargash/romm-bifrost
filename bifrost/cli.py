@@ -201,6 +201,7 @@ def _abort_on_preflight(result: PreflightResult, console: Console) -> None:
         raise SystemExit(EXIT_CONFIG_ERROR)
 
 
+@click.version_option(version=_bifrost_version, prog_name="bifrost")
 @click.group(help="Bifrost: RomM <-> ES-DE bridge CLI")
 def main() -> None:
     """Main CLI group."""

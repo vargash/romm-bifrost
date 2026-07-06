@@ -27,12 +27,14 @@ die()     { error "$*"; exit 1; }
 
 # ── parse args ─────────────────────────────────────────────────────────────
 MODE=install
+CHANNEL=stable
 for arg in "$@"; do
   case "$arg" in
     --update)    MODE=update ;;
     --uninstall) MODE=uninstall ;;
+    --beta)      CHANNEL=beta ;;
     --help|-h)
-      echo "Usage: $0 [--update|--uninstall]"
+      echo "Usage: $0 [--update] [--uninstall] [--beta]"
       exit 0
       ;;
   esac
@@ -57,6 +59,7 @@ echo -e "${BOLD}║   Bifrost — RomM ↔ ES-DE installer  ║${RESET}"
 echo -e "${BOLD}╚══════════════════════════════════════╝${RESET}"
 echo ""
 [[ "$MODE" == "update" ]] && info "Mode: update (existing config preserved)"
+[[ "$CHANNEL" == "beta" ]] && warn "Channel: beta (prerelease build — may be unstable)"
 
 # ── python check ───────────────────────────────────────────────────────────
 info "Checking Python version..."
@@ -116,16 +119,41 @@ fi
 success "pipx — OK"
 
 # ── fetch release wheel ────────────────────────────────────────────────────
-info "Fetching latest Bifrost release from GitHub..."
-WHEEL_URL=$(python3 - <<PYEOF
-import urllib.request, json, sys
+if [[ "$CHANNEL" == "beta" ]]; then
+  info "Fetching latest Bifrost beta (prerelease) from GitHub..."
+else
+  info "Fetching latest Bifrost release from GitHub..."
+fi
+WHEEL_URL=$(CHANNEL="$CHANNEL" python3 - <<PYEOF
+import json, os, sys, urllib.request
+
+channel = os.environ["CHANNEL"]
+headers = {"Accept": "application/vnd.github+json"}
+
+
+def wheel_from(release):
+    assets = [
+        a["browser_download_url"]
+        for a in release.get("assets", [])
+        if a["name"].endswith(".whl")
+    ]
+    return assets[0] if assets else ""
+
+
 try:
-    url = "https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
-    req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})
-    with urllib.request.urlopen(req, timeout=15) as r:
-        data = json.load(r)
-    assets = [a["browser_download_url"] for a in data.get("assets", []) if a["name"].endswith(".whl")]
-    print(assets[0] if assets else "")
+    if channel == "beta":
+        url = "https://api.github.com/repos/${GITHUB_REPO}/releases"
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as r:
+            releases = json.load(r)
+        release = next((rel for rel in releases if rel.get("prerelease")), None)
+        print(wheel_from(release) if release else "")
+    else:
+        url = "https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as r:
+            release = json.load(r)
+        print(wheel_from(release))
 except Exception as e:
     print(f"error: {e}", file=sys.stderr)
     sys.exit(1)
@@ -133,7 +161,11 @@ PYEOF
 ) || die "Failed to contact GitHub API. Check your internet connection and try again."
 
 if [[ -z "$WHEEL_URL" ]]; then
-  die "No wheel asset found in latest release. Check https://github.com/${GITHUB_REPO}/releases"
+  if [[ "$CHANNEL" == "beta" ]]; then
+    die "No beta (prerelease) release found. Check https://github.com/${GITHUB_REPO}/releases"
+  else
+    die "No wheel asset found in latest release. Check https://github.com/${GITHUB_REPO}/releases"
+  fi
 fi
 info "Release wheel: $(basename "$WHEEL_URL")"
 

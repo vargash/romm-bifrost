@@ -78,6 +78,31 @@ To uninstall:
 ./install-deck.sh --uninstall
 ```
 
+<details>
+<summary>Beta channel (testing pre-release builds)</summary>
+
+Beta builds are tagged `vX.Y.ZbN` and published as GitHub prereleases — they're excluded from "latest" and won't be picked up by the default installer flow above.
+
+If you already have Bifrost installed via the installer above, switch it to the latest beta with:
+
+```bash
+./install-deck.sh --update --beta
+```
+
+For a fresh install, the `releases/latest/download/install-deck.sh` alias always resolves to the latest **stable** copy of the script, so you need to download the installer from a specific beta tag instead:
+
+```bash
+curl -L https://github.com/vargash/romm-bifrost/releases/download/v0.3.0b1/install-deck.sh -o install-deck.sh
+chmod +x install-deck.sh
+./install-deck.sh --beta
+```
+
+(Substitute the actual beta tag you want.) Running the installer again later without `--beta` moves you back to the latest stable release.
+
+Beta releases are prerelease/testing quality — expect rough edges.
+
+</details>
+
 ### Pipx install
 
 ```bash
