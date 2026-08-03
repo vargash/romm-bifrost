@@ -2521,11 +2521,19 @@ def systemd_group() -> None:
     is_flag=True,
     help="Skip installing save-sync and save-watch units (use when save sync is disabled).",
 )
+@click.option(
+    "--bifrost-bin",
+    "bifrost_bin",
+    type=str,
+    default=None,
+    help="Override path to the bifrost binary baked into ExecStart (default: auto-detected).",
+)
 def systemd_install(
     dry_run: bool,
     config_path: Path | None,
     nas_mount_unit: str | None,
     no_save_sync: bool,
+    bifrost_bin: str | None,
 ) -> None:
     import subprocess
 
@@ -2536,6 +2544,22 @@ def systemd_install(
     if not src_dir.exists():
         console.print(f"[red]Unit templates not found:[/red] {src_dir}")
         raise SystemExit(EXIT_CONFIG_ERROR)
+
+    # ── resolve the bifrost binary to bake into ExecStart ─────────────────
+    # The bundled templates hardcode %h/.local/bin/bifrost, which only exists
+    # if bifrost was installed via pipx/pip --user. Resolve the actual
+    # binary on this machine (same pattern as `esde-hooks install`) so the
+    # units work for editable/dev installs and non-standard prefixes too.
+    resolved_bin = bifrost_bin or shutil.which("bifrost") or (sys.executable + " -m bifrost.cli")
+    default_bin = str(Path.home() / ".local" / "bin" / "bifrost")
+    if resolved_bin != default_bin:
+        console.print(f"[cyan]Using bifrost binary:[/cyan] {resolved_bin}")
+        if not shutil.which("bifrost") and not bifrost_bin:
+            console.print(
+                "[yellow]Warning:[/yellow] 'bifrost' not found on PATH — units will invoke it via "
+                f"[dim]{sys.executable} -m bifrost.cli[/dim]. If this interpreter is a venv or "
+                "dev checkout, reinstalling it elsewhere will break these units."
+            )
 
     # ── NAS mount unit detection ──────────────────────────────────────────
     if nas_mount_unit is None:
@@ -2591,6 +2615,7 @@ def systemd_install(
             continue
 
         content = src.read_text(encoding="utf-8")
+        content = content.replace("%h/.local/bin/bifrost", resolved_bin)
         if nas_mount_unit and unit.endswith(".service"):
             content = _patch_unit_with_mount(content, nas_mount_unit)
 
