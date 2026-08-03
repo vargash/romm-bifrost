@@ -131,6 +131,23 @@ sync_mode = "api"
     assert config.sync.direction == "push_pull"
 
 
+def test_sync_config_slot_defaults_to_autosave() -> None:
+    """SyncConfig.slot defaults to "autosave" to align with other RomM clients."""
+    config = AppConfig(romm=RommConfig(url="http://romm.local", client_token="rmm_token"))
+    assert config.sync.slot == "autosave"
+
+
+def test_sync_slot_round_trips_through_toml(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.toml"
+    app_config = AppConfig(romm=RommConfig(url="http://romm.local", client_token="rmm_token"))
+    app_config.sync.slot = "main"
+
+    save_config(app_config, config_file)
+    loaded = load_config(config_file)
+
+    assert loaded.sync.slot == "main"
+
+
 def test_save_config_sets_secure_mode(tmp_path: Path) -> None:
     app_config = AppConfig(romm=RommConfig(url="http://romm.local", client_token="rmm_token"))
     config_file = tmp_path / "config.toml"

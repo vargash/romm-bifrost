@@ -38,8 +38,10 @@ videos = "videos"
 
 [sync]
 conflict_strategy = "ask"
-sync_mode = "push_pull"
+direction = "push_pull"
 parallel_workers = 16   # threads for parallel symlink evaluation/apply (reduce if NAS is overloaded)
+slot = "autosave"       # stable slot name for saves with no explicit numbered slot; must match
+                        # the slot naming used by other RomM clients
 
 [output]
 format = "table"

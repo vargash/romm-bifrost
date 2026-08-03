@@ -2075,8 +2075,9 @@ def setup(
         sync=SyncConfig(
             save_sync_enabled=save_sync_enabled_value,
             conflict_strategy=base_config.sync.conflict_strategy,
-            sync_mode=base_config.sync.sync_mode,
+            direction=base_config.sync.direction,
             parallel_workers=base_config.sync.parallel_workers,
+            slot=base_config.sync.slot,
         ),
         output=base_config.output,
     )

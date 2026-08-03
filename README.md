@@ -357,6 +357,10 @@ conflict_strategy = "ask"
 direction = "push_pull"
 # Worker threads for parallel symlink evaluation/apply (reduce if NAS is overloaded)
 parallel_workers = 16
+# Stable slot name for saves with no explicit numbered slot. Must match the slot
+# naming used by other RomM clients to keep saves paired on (rom_id, slot)
+# across devices.
+slot = "autosave"
 
 [cache]
 enabled = true
