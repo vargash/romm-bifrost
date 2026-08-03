@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import errno
 import os
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from bifrost.api.client import RommApiClient
-from bifrost.api.models import RomSummary, SsMetadata
+from bifrost.api.models import PlatformSummary, RomSummary, SsMetadata
 from bifrost.config import AppConfig
 
 # Maps folder_map keys to the corresponding field name in SsMetadata.
@@ -95,7 +96,7 @@ class RemoveSymlinkOperation:
 
 @dataclass(frozen=True)
 class OperationResult:
-    operation: SymlinkOperation | RemoveSymlinkOperation
+    operation: SymlinkOperation | RemoveSymlinkOperation | OrphanRemovalOperation
     action: str
     detail: str = ""
 
@@ -383,6 +384,142 @@ def plan_stale_removals(
                     remove_ops.append(RemoveSymlinkOperation(category="asset-dir", destination=item))
 
     return remove_ops
+
+
+@dataclass(frozen=True)
+class OrphanPlatformFolder:
+    """A top-level esde.roms_path folder with no matching RomM platform."""
+
+    path: Path
+    safe: bool
+    reason: str = ""
+
+
+# Known EmuDeck scaffolding files that every platform folder gets stamped with,
+# regardless of whether the platform is actually in use. Ignored during the safety
+# scan so genuinely-empty-of-user-data folders (e.g. platforms EmuDeck supports but
+# RomM doesn't have) still qualify for automatic removal.
+_ORPHAN_SAFE_MARKER_FILES = frozenset({"systeminfo.txt", "metadata.txt"})
+
+
+@dataclass(frozen=True)
+class OrphanRemovalOperation:
+    """Remove an orphan platform folder."""
+
+    destination: Path
+    category: str = "orphan-platform"
+    # True when a human explicitly reviewed the folder's real contents and confirmed
+    # removal despite it being unsafe (contains files beyond the known-safe markers).
+    force: bool = False
+
+    @property
+    def target(self) -> Path:
+        # No distinct target for a directory removal; kept for OperationResult table compat.
+        return self.destination
+
+
+def _scan_orphan_candidate(root: Path, nas_root: Path) -> tuple[bool, str]:
+    """Walk root (never following symlinked subdirectories).
+
+    Returns (safe, reason). Safe means every entry anywhere in the tree is either
+    a subdirectory, a symlink whose target resolves under nas_root (bifrost-owned),
+    or a known EmuDeck scaffolding file (_ORPHAN_SAFE_MARKER_FILES). Any other real
+    file, or any symlink pointing elsewhere, makes the folder unsafe.
+    """
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        current = Path(dirpath)
+        for name in dirnames:
+            item = current / name
+            if item.is_symlink():
+                return False, f"contains foreign directory symlink: {item.relative_to(root)}"
+        for name in filenames:
+            if name in _ORPHAN_SAFE_MARKER_FILES:
+                continue
+            item = current / name
+            if not item.is_symlink():
+                return False, f"contains file: {item.relative_to(root)}"
+            if not _is_bifrost_symlink(item, nas_root):
+                return False, f"contains foreign symlink: {item.relative_to(root)}"
+    return True, ""
+
+
+def list_orphan_folder_contents(root: Path, nas_root: Path) -> list[str]:
+    """List every real file / foreign symlink under root, as paths relative to root.
+
+    Unlike _scan_orphan_candidate, this ignores the safe-marker whitelist entirely —
+    it's meant for showing a human the full picture before an explicit override removal
+    of a folder that _scan_orphan_candidate flagged as unsafe.
+    """
+    offenders: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        current = Path(dirpath)
+        for name in dirnames:
+            item = current / name
+            if item.is_symlink():
+                offenders.append(str(item.relative_to(root)))
+        for name in filenames:
+            item = current / name
+            if not item.is_symlink() or not _is_bifrost_symlink(item, nas_root):
+                offenders.append(str(item.relative_to(root)))
+    return offenders
+
+
+def find_orphan_platform_folders(
+    config: AppConfig,
+    platforms: list[PlatformSummary],
+) -> list[OrphanPlatformFolder]:
+    """Find top-level esde.roms_path folders with no matching RomM platform.
+
+    Only directories are candidates; regular files at the top level are ignored.
+    A candidate is 'safe' for removal only if its entire tree contains nothing but
+    subdirectories and symlinks bifrost itself created (target under nas.library_path).
+    """
+    esde_roms_root = _normalize_path(config.esde.roms_path)
+    nas_root = _normalize_path(config.nas.library_path)
+    known_slugs = {p.fs_slug for p in platforms if p.fs_slug}
+
+    if not esde_roms_root.is_dir():
+        return []
+
+    results: list[OrphanPlatformFolder] = []
+    for entry in sorted(esde_roms_root.iterdir()):
+        if entry.is_symlink() or not entry.is_dir():
+            continue
+        if entry.name in known_slugs:
+            continue
+        safe, reason = _scan_orphan_candidate(entry, nas_root)
+        results.append(OrphanPlatformFolder(path=entry, safe=safe, reason=reason))
+    return results
+
+
+def evaluate_orphan_removal(op: OrphanRemovalOperation) -> OperationResult:
+    if not op.destination.is_dir() or op.destination.is_symlink():
+        return OperationResult(op, "skip", "Not a directory")
+    return OperationResult(op, "would-remove")
+
+
+def apply_orphan_removal(op: OrphanRemovalOperation, nas_root: Path) -> OperationResult:
+    """Re-verify safety (TOCTOU guard) immediately before deleting, then shutil.rmtree.
+
+    shutil.rmtree unlinks symlink entries it encounters rather than following them,
+    so nothing under nas_root is ever touched given the safety scan already guarantees
+    the tree contains nothing but directories and bifrost-owned symlinks.
+
+    When op.force is True, the safety re-check is skipped: a human already reviewed
+    the folder's real contents (via list_orphan_folder_contents) and explicitly
+    confirmed removal despite it containing files beyond the known-safe markers.
+    """
+    if not op.destination.is_dir() or op.destination.is_symlink():
+        return OperationResult(op, "skip", "Not a directory")
+    if not op.force:
+        safe_now, reason_now = _scan_orphan_candidate(op.destination, nas_root)
+        if not safe_now:
+            return OperationResult(op, "skip", f"unsafe at apply time: {reason_now}")
+    try:
+        shutil.rmtree(op.destination)
+        return OperationResult(op, "remove")
+    except OSError as exc:
+        return OperationResult(op, "error", str(exc))
 
 
 def evaluate_operation(op: SymlinkOperation) -> OperationResult:

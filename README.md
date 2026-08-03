@@ -145,6 +145,9 @@ bifrost sync --apply --incremental
 # Stale check — fetch identifier set from RomM, remove deleted ROM symlinks only
 bifrost sync --check-stale
 
+# Review/remove orphan platform folders (e.g. leftover EmuDeck folders with no matching RomM platform)
+bifrost sync --apply --prune-orphans
+
 # Suppress progress output (useful in background scripts)
 bifrost sync --apply --incremental --quiet
 
@@ -309,6 +312,38 @@ If a check fails, Bifrost prints an explicit error message and aborts — no par
 
 ---
 
+## Orphan platform folders
+
+EmuDeck pre-creates a folder under `roms/` for every emulator it supports, before RomM/Bifrost ever runs. Since RomM is the single source of truth, `bifrost sync` detects top-level folders under `[esde].roms_path` that don't match any platform currently in your RomM library, and reports them in the sync summary.
+
+Only *directories* are ever candidates for removal, and only when their entire contents are subdirectories or symlinks Bifrost itself created — any real file (or a symlink Bifrost didn't create) makes a folder "unsafe"; it's reported but never touched automatically, no matter the strategy below. Two exceptions: `systeminfo.txt` and `metadata.txt`, scaffolding files EmuDeck stamps into every platform folder it creates, are ignored by the safety check — their presence alone doesn't block automatic removal.
+
+Detection and reporting always run as part of `bifrost sync`. Removal is opt-in and requires both:
+- `[sync].prune_orphan_platforms = true` in config, or the `--prune-orphans` flag for a one-off run
+- `--apply` (dry-run only ever previews what would be removed)
+
+If orphan folders are found and `bifrost sync` is run without `--apply`, the dry-run summary
+suggests the exact command to prune them (`bifrost sync --apply --prune-orphans`) — separately
+for folders that are safe to auto-prune and folders that contain real files and need review.
+
+The `[sync].orphan_platform_strategy` config then controls how *safe* folders are confirmed for removal:
+
+| Strategy | Headless behavior | Interactive (`--apply` from TTY) |
+|---|---|---|
+| `remove` | Removes all safe orphan folders | Removes all safe orphan folders |
+| `skip` | Leaves all orphan folders in place | Leaves all orphan folders in place |
+| `ask` | Leaves folders in place + logs a warning | Prompts `[y/n]` per folder |
+
+Folders that aren't safe (contain real files beyond `systeminfo.txt`/`metadata.txt`) are never covered by
+`orphan_platform_strategy` — they require a human. With pruning enabled and `--apply` run from a
+TTY, Bifrost lists each unsafe folder's actual contents and asks for an explicit per-folder
+override before removing anything. Headlessly, unsafe folders are always left in place and logged
+for manual review.
+
+The default is `ask`, gated behind `prune_orphan_platforms = false` — nothing is ever removed until you explicitly opt in.
+
+---
+
 ## Save/State Sync
 
 ### How it works
@@ -361,6 +396,10 @@ parallel_workers = 16
 # naming used by other RomM clients to keep saves paired on (rom_id, slot)
 # across devices.
 slot = "autosave"
+# Opt in to reviewing/removing orphan platform folders (see "Orphan platform folders" above)
+prune_orphan_platforms = false
+# Orphan removal strategy: ask | remove | skip
+orphan_platform_strategy = "ask"
 
 [cache]
 enabled = true
@@ -392,6 +431,7 @@ ttl_firmware_hours = 24
 | GitHub Actions release workflow (wheel + sdist + installer asset on tag) | ✅ |
 | `bifrost sync --incremental` — delta sync via `updated_after` | ✅ |
 | `bifrost sync --check-stale` — identifier-set diff, stale symlink removal | ✅ |
+| `bifrost sync --prune-orphans` — orphan platform folder detection/removal | ✅ |
 | ES-DE startup hooks (`bifrost esde-hooks install`) | ✅ |
 | Watch mode for assets / gamelist auto-rebuild | ❌ planned |
 | Structured metrics / JSON export | ❌ planned |
