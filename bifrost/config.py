@@ -99,6 +99,8 @@ class SyncConfig(BaseModel):
     optimistic_downloads: bool = True
     autocleanup: bool = False
     autocleanup_limit: int = Field(default=3, ge=1)
+    prune_orphan_platforms: bool = False
+    orphan_platform_strategy: str = "ask"
 
 
 class OutputConfig(BaseModel):

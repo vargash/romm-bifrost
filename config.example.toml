@@ -38,8 +38,10 @@ videos = "videos"
 
 [sync]
 conflict_strategy = "ask"
-sync_mode = "push_pull"
+direction = "push_pull"
 parallel_workers = 16   # threads for parallel symlink evaluation/apply (reduce if NAS is overloaded)
+prune_orphan_platforms = false   # opt in to reviewing/removing orphan platform folders
+orphan_platform_strategy = "ask" # ask | remove | skip
 
 [output]
 format = "table"

@@ -56,11 +56,16 @@ from bifrost.preflight import (
 from bifrost.save_sync import build_save_sync_preview, execute_save_sync_preview
 from bifrost.state_sync import build_state_sync_preview, execute_state_sync_preview
 from bifrost.symlink_manager import (
+    OrphanRemovalOperation,
     RemoveSymlinkOperation,
     apply_operation,
+    apply_orphan_removal,
     apply_remove_operation,
     evaluate_operations,
+    evaluate_orphan_removal,
     evaluate_remove_operation,
+    find_orphan_platform_folders,
+    list_orphan_folder_contents,
     plan_incremental_symlink_ops,
     plan_stale_removals,
     plan_stale_removals_from_deleted_ids,
@@ -705,6 +710,7 @@ def _sync_apply_ops(
     workers: int,
     console: Console,
     quiet: bool,
+    nas_root: Path | None = None,
 ) -> list[Any]:
     """Apply a mixed list of sync operations in parallel, with optional progress."""
     if not all_ops:
@@ -719,6 +725,9 @@ def _sync_apply_ops(
                     results.append(apply_m3u_operation(op))
                 elif isinstance(op, RemoveSymlinkOperation):
                     results.append(apply_remove_operation(op))
+                elif isinstance(op, OrphanRemovalOperation):
+                    assert nas_root is not None
+                    results.append(apply_orphan_removal(op, nas_root))
                 else:
                     pending.append(ex.submit(apply_operation, op))
             for future in as_completed(pending):
@@ -741,6 +750,10 @@ def _sync_apply_ops(
                         progress.advance(task_id)
                     elif isinstance(op, RemoveSymlinkOperation):
                         results.append(apply_remove_operation(op))
+                        progress.advance(task_id)
+                    elif isinstance(op, OrphanRemovalOperation):
+                        assert nas_root is not None
+                        results.append(apply_orphan_removal(op, nas_root))
                         progress.advance(task_id)
                     else:
                         pending2.append(ex.submit(apply_operation, op))
@@ -774,6 +787,7 @@ def _print_sync_summary(
     summary.add_row("BIOS symlinks", str(by_category.get("bios", 0)))
     summary.add_row("Asset symlinks", str(by_category.get("asset", 0)))
     summary.add_row("Legacy asset dirs removed", str(by_category.get("asset-dir", 0)))
+    summary.add_row("Orphan platforms removed", str(by_category.get("orphan-platform", 0)))
     summary.add_row("M3U playlists", str(by_category.get("m3u", 0)))
     summary.add_row("Create", str(counts.get("create", 0)))
     summary.add_row("Replace", str(counts.get("replace", 0)))
@@ -857,6 +871,17 @@ def _print_sync_summary(
     is_flag=True,
     help="Suppress all Rich output. Exits with non-zero code on errors only. For ES-DE hooks.",
 )
+@click.option(
+    "--prune-orphans",
+    "prune_orphans",
+    is_flag=True,
+    help=(
+        "Enable orphan platform folder removal for this run "
+        "(equivalent to setting sync.prune_orphan_platforms=true for this invocation). "
+        "Detection/reporting always happens regardless of this flag; this flag "
+        "additionally allows removal per sync.orphan_platform_strategy."
+    ),
+)
 def sync(
     config_path: Path | None,
     apply: bool,
@@ -864,10 +889,13 @@ def sync(
     incremental: bool,
     check_stale: bool,
     quiet: bool,
+    prune_orphans: bool,
 ) -> None:
     """Create a dry-run plan or apply symlink operations."""
 
     console = Console()
+    _sync_log = logging.getLogger("bifrost.cli.sync")
+    is_interactive = sys.stdin.isatty() and sys.stdout.isatty()
     resolved_path = config_path or default_config_path()
 
     if incremental and check_stale:
@@ -1057,6 +1085,7 @@ def sync(
         with RommApiClient(config, timeout_seconds=config.romm.timeout_seconds, no_cache=no_cache) as client:
             ops = plan_symlink_operations(config, client)
             m3u_ops = plan_m3u_operations(config, client)
+            platforms = client.list_platforms()
     except AuthenticationError as exc:
         console.print(f"[red]Authentication error:[/red] {exc}")
         raise SystemExit(EXIT_AUTH_ERROR) from exc
@@ -1065,17 +1094,81 @@ def sync(
         raise SystemExit(EXIT_API_ERROR) from exc
 
     remove_ops = plan_stale_removals(config, ops)
-    all_ops: list[Any] = list(ops) + list(m3u_ops) + list(remove_ops)
+    nas_root = Path(config.nas.library_path).expanduser()
+
+    orphans = find_orphan_platform_folders(config, platforms)
+    safe_orphans = [o for o in orphans if o.safe]
+    unsafe_orphans = [o for o in orphans if not o.safe]
+    if orphans and not quiet:
+        console.print(
+            f"[yellow]{len(orphans)} orphan platform folder(s) found "
+            "(no matching RomM platform).[/yellow]"
+        )
+        for o in unsafe_orphans:
+            console.print(f"  [dim]{o.path} — kept, {o.reason}[/dim]")
+
+    should_prune = config.sync.prune_orphan_platforms or prune_orphans
+    to_remove: list[OrphanRemovalOperation] = []
+    if safe_orphans and should_prune:
+        strategy = config.sync.orphan_platform_strategy
+        if strategy == "skip":
+            pass
+        elif not apply:
+            # Dry-run: preview what would happen, never prompt for a decision.
+            to_remove = [OrphanRemovalOperation(destination=o.path) for o in safe_orphans]
+        elif strategy == "remove":
+            to_remove = [OrphanRemovalOperation(destination=o.path) for o in safe_orphans]
+        elif is_interactive:  # strategy == "ask" (or unrecognized -> safest, treat as ask)
+            for o in safe_orphans:
+                if Confirm.ask(
+                    f"  Remove orphan platform folder [bold]{o.path}[/bold]?", default=False
+                ):
+                    to_remove.append(OrphanRemovalOperation(destination=o.path))
+        else:
+            _sync_log.info(
+                "orphan platform folder(s) left in place (headless, strategy=ask): %s",
+                [str(o.path) for o in safe_orphans],
+            )
+
+    # Unsafe orphans (contain real files beyond known EmuDeck scaffolding) are never
+    # removed automatically, regardless of strategy. Interactively, review contents
+    # and let the user explicitly override on a per-folder basis.
+    if unsafe_orphans and should_prune and apply:
+        if is_interactive:
+            for o in unsafe_orphans:
+                contents = list_orphan_folder_contents(o.path, nas_root)
+                preview = ", ".join(contents[:5])
+                if len(contents) > 5:
+                    preview += f", … (+{len(contents) - 5} more)"
+                if Confirm.ask(
+                    f"  Orphan folder [bold]{o.path}[/bold] contains real content "
+                    f"({preview}). Remove anyway?",
+                    default=False,
+                ):
+                    to_remove.append(OrphanRemovalOperation(destination=o.path, force=True))
+        else:
+            _sync_log.info(
+                "%d orphan platform folder(s) contain real files and require manual "
+                "review (headless): %s",
+                len(unsafe_orphans),
+                [str(o.path) for o in unsafe_orphans],
+            )
+
+    all_ops: list[Any] = list(ops) + list(m3u_ops) + list(remove_ops) + list(to_remove)
 
     workers = config.sync.parallel_workers
     results: list[Any]
     if apply:
-        results = _sync_apply_ops(all_ops, workers, console, quiet)
+        results = _sync_apply_ops(all_ops, workers, console, quiet, nas_root=nas_root)
         if bifrost_cache:
             bifrost_cache.set_last_applied()
         mode_label = "apply"
     else:
-        sym_ops = [op for op in all_ops if not isinstance(op, (M3uOperation, RemoveSymlinkOperation))]
+        sym_ops = [
+            op
+            for op in all_ops
+            if not isinstance(op, (M3uOperation, RemoveSymlinkOperation, OrphanRemovalOperation))
+        ]
         sym_results = iter(evaluate_operations(sym_ops, workers=workers))
         results = []
         for op in all_ops:
@@ -1083,6 +1176,8 @@ def sync(
                 results.append(evaluate_m3u_operation(op))
             elif isinstance(op, RemoveSymlinkOperation):
                 results.append(evaluate_remove_operation(op))
+            elif isinstance(op, OrphanRemovalOperation):
+                results.append(evaluate_orphan_removal(op))
             else:
                 results.append(next(sym_results))
         mode_label = "dry-run"
@@ -1094,6 +1189,17 @@ def sync(
                 "[cyan]Dry-run mode: no filesystem changes were made. "
                 "Re-run with --apply to execute.[/cyan]"
             )
+            if safe_orphans:
+                console.print(
+                    f"[cyan]{len(safe_orphans)} orphan platform folder(s) can be pruned — "
+                    "run `bifrost sync --apply --prune-orphans` if desired.[/cyan]"
+                )
+            if unsafe_orphans:
+                console.print(
+                    f"[cyan]{len(unsafe_orphans)} orphan platform folder(s) contain real "
+                    "files — re-run interactively with `bifrost sync --apply "
+                    "--prune-orphans` to review and optionally remove them.[/cyan]"
+                )
         if apply and counts.get("error", 0):
             console.print(
                 "[yellow]Apply completed with filesystem errors. "
