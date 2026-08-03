@@ -28,6 +28,45 @@ def test_heartbeat_success_with_json() -> None:
     client.close()
 
 
+def test_heartbeat_romm_5_1_0_nested_shape() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/heartbeat":
+            return httpx.Response(
+                200,
+                json={
+                    "SYSTEM": {"VERSION": "5.1.0", "SHOW_SETUP_WIZARD": False},
+                    "METADATA_SOURCES": {},
+                    "FILESYSTEM": {},
+                    "EMULATION": {},
+                    "FRONTEND": {},
+                    "OIDC": {},
+                    "TASKS": {},
+                },
+            )
+        return httpx.Response(404, json={})
+
+    client = RommApiClient(make_config(), transport=httpx.MockTransport(handler))
+    hb = client.heartbeat()
+    assert hb.version == "5.1.0"
+    assert hb.summary == "ok (RomM 5.1.0)"
+    client.close()
+
+
+def test_untrack_save() -> None:
+    calls: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        assert request.url.path == "/api/saves/55/untrack"
+        return httpx.Response(200, json={"id": 55, "device_syncs": []})
+
+    client = RommApiClient(make_config(), transport=httpx.MockTransport(handler))
+    data = client.untrack_save(55, "device-1")
+    assert data["id"] == 55
+    assert calls == [("POST", "/api/saves/55/untrack")]
+    client.close()
+
+
 def test_authentication_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, json={"detail": "unauthorized"})

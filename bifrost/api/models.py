@@ -17,10 +17,24 @@ class CompleteOutcome(StrEnum):
 
 
 class HeartbeatResponse(BaseModel):
-    """Response payload for GET /api/heartbeat."""
+    """Response payload for GET /api/heartbeat.
+
+    RomM has used different shapes across versions: pre-5.1.0 builds return a
+    flat {status, message} object (or a bare string); 5.1.0+ nests health
+    info under SYSTEM/FILESYSTEM/EMULATION/etc. instead. `version` is
+    populated from SYSTEM.VERSION when the newer shape is present.
+    """
 
     status: str | None = None
     message: str | None = None
+    version: str | None = None
+
+    @property
+    def summary(self) -> str:
+        text = self.status or self.message or "ok"
+        if self.version:
+            return f"{text} (RomM {self.version})"
+        return text
 
 
 class LibrarySetupResponse(BaseModel):

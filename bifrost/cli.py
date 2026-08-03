@@ -506,7 +506,7 @@ def status(config_path: Path | None) -> None:
     table.add_column("Value")
     table.add_row("Config file", str(resolved_path))
     table.add_row("RomM URL", config.romm.url)
-    table.add_row("Heartbeat", heartbeat.status or heartbeat.message or "ok")
+    table.add_row("Heartbeat", heartbeat.summary)
     table.add_row("Platforms", str(stats.PLATFORMS))
     table.add_row("ROMs", str(stats.ROMS))
     if stats.SAVES is not None:
@@ -1427,6 +1427,61 @@ def save_sync(
     raise SystemExit(EXIT_OK)
 
 
+@main.command(
+    name="save-untrack",
+    help="Stop syncing a save to this device (RomM will no longer push/pull it here).",
+)
+@click.argument("save_id", type=int)
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=None,
+    help="Override config file path (default: ~/.config/bifrost/config.toml).",
+)
+@click.option(
+    "--device-id",
+    type=str,
+    default=None,
+    help="Override RomM device_id (default: the enrolled device_id in config).",
+)
+def save_untrack(save_id: int, config_path: Path | None, device_id: str | None) -> None:
+    """Mark a save as untracked for this device via POST /api/saves/{id}/untrack."""
+
+    console = Console()
+    resolved_path = config_path or default_config_path()
+
+    try:
+        config = load_config(resolved_path)
+    except ConfigError as exc:
+        console.print(f"[red]Configuration error:[/red] {exc}")
+        raise SystemExit(EXIT_CONFIG_ERROR) from exc
+
+    resolved_device_id = (device_id or config.romm.device_id).strip()
+    if not resolved_device_id:
+        console.print(
+            "[red]No device_id configured or provided.[/red] Run 'bifrost device-enroll' "
+            "first or pass --device-id."
+        )
+        raise SystemExit(EXIT_CONFIG_ERROR)
+
+    try:
+        with RommApiClient(config, timeout_seconds=config.romm.timeout_seconds) as client:
+            client.untrack_save(save_id, resolved_device_id)
+    except AuthenticationError as exc:
+        console.print(f"[red]Authentication error:[/red] {exc}")
+        raise SystemExit(EXIT_AUTH_ERROR) from exc
+    except (NetworkError, ApiError) as exc:
+        console.print(f"[red]API error:[/red] {exc}")
+        raise SystemExit(EXIT_API_ERROR) from exc
+
+    console.print(
+        f"[green]Save {save_id} untracked for device {resolved_device_id}.[/green] "
+        "It will no longer be synced to this device."
+    )
+    raise SystemExit(EXIT_OK)
+
+
 # DISABILITATO (Fase 0 — state sync escluso, non deve essere richiamabile).
 # Comando deregistrato dalla CLI: la funzione resta definita ma non è collegata al gruppo `main`,
 # quindi `bifrost state-sync` restituisce "No such command". Per riattivarlo, decommentare la riga.
@@ -2092,8 +2147,7 @@ def setup(
             console.print(f"[red]API error:[/red] {exc}")
             raise SystemExit(EXIT_API_ERROR) from exc
 
-        heartbeat_text = heartbeat.status or heartbeat.message or "ok"
-        console.print(f"[green]Heartbeat verified:[/green] {heartbeat_text}")
+        console.print(f"[green]Heartbeat verified:[/green] {heartbeat.summary}")
 
     save_path = save_config(config, resolved_path)
     console.print(f"[green]Configuration saved:[/green] {save_path}")
@@ -2218,8 +2272,7 @@ def doctor(config_path: Path | None, write_log: bool) -> None:
     try:
         with RommApiClient(config, timeout_seconds=config.romm.timeout_seconds) as client:
             hb = client.heartbeat()
-        status_text = hb.status or hb.message or "ok"
-        _ok("Heartbeat", f"{config.romm.url} — {status_text}")
+        _ok("Heartbeat", f"{config.romm.url} — {hb.summary}")
     except AuthenticationError as exc:
         _err("Authentication", str(exc))
     except (NetworkError, ApiError) as exc:
