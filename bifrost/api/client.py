@@ -279,6 +279,7 @@ class RommApiClient:
                     "offset": offset,
                     "with_char_index": False,
                     "with_filter_values": False,
+                    "with_rom_id_index": False,
                     "with_files": False,
                 },
             )
@@ -411,6 +412,16 @@ class RommApiClient:
             raise ApiError("Unexpected response type for /api/saves/{id}/track")
         return data
 
+    def untrack_save(self, save_id: int, device_id: str) -> dict[str, Any]:
+        data = self._request_json(
+            "POST",
+            f"/api/saves/{save_id}/untrack",
+            json={"device_id": device_id},
+        )
+        if not isinstance(data, dict):
+            raise ApiError("Unexpected response type for /api/saves/{id}/untrack")
+        return data
+
     def list_states(self, rom_id: int | None = None) -> list[StateSummary]:
         params: dict[str, Any] = {}
         if rom_id is not None:
@@ -515,7 +526,18 @@ class RommApiClient:
     def heartbeat(self) -> HeartbeatResponse:
         data = self._request_json("GET", "/api/heartbeat")
         if isinstance(data, dict):
-            return HeartbeatResponse.model_validate(data)
+            system = data.get("SYSTEM")
+            version = system.get("VERSION") if isinstance(system, dict) else None
+            if "status" in data or "message" in data:
+                # Pre-5.1.0 flat shape.
+                return HeartbeatResponse.model_validate(
+                    {**data, "version": str(version) if version is not None else None}
+                )
+            # 5.1.0+ shape: no flat status/message, just nested health sections.
+            # A successful response means the server is up.
+            return HeartbeatResponse(
+                status="ok", version=str(version) if version is not None else None
+            )
         # Some RomM builds return simple strings for heartbeat.
         return HeartbeatResponse(status=str(data), message=str(data))
 
@@ -537,6 +559,7 @@ class RommApiClient:
             "offset": 0,
             "with_char_index": False,
             "with_filter_values": False,
+            "with_rom_id_index": False,
             "with_files": False,
             **filters,
         }
@@ -658,6 +681,7 @@ class RommApiClient:
                 "offset": 0,
                 "with_char_index": False,
                 "with_filter_values": False,
+                "with_rom_id_index": False,
                 "with_files": False,
             },
         )
@@ -692,6 +716,7 @@ class RommApiClient:
                     "offset": offset,
                     "with_char_index": False,
                     "with_filter_values": False,
+                    "with_rom_id_index": False,
                     "with_files": False,
                 },
             )
