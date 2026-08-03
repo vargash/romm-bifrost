@@ -310,6 +310,34 @@ def test_setup_preserves_existing_paths_when_not_configuring_paths(tmp_path: Pat
     assert cfg.emudeck.media_path == "~/Emulation/tools/downloaded_media"
 
 
+def test_setup_preserves_existing_sync_slot(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.toml"
+    existing = AppConfig(
+        romm=RommConfig(url="http://romm.local", client_token="rmm_old"),
+    )
+    existing.sync.slot = "main"
+    save_config(existing, config_file)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "setup",
+            "--url",
+            "http://romm.local",
+            "--token",
+            "rmm_new",
+            "--skip-verify",
+            "--config",
+            str(config_file),
+        ],
+    )
+
+    assert result.exit_code == EXIT_OK
+    cfg = load_config(config_file)
+    assert cfg.sync.slot == "main"
+
+
 def test_setup_allows_explicit_path_overrides(tmp_path: Path) -> None:
     config_file = tmp_path / "config.toml"
 

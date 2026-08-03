@@ -2183,6 +2183,7 @@ def setup(
             conflict_strategy=base_config.sync.conflict_strategy,
             direction=base_config.sync.direction,
             parallel_workers=base_config.sync.parallel_workers,
+            slot=base_config.sync.slot,
         ),
         output=base_config.output,
     )

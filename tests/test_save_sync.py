@@ -610,6 +610,154 @@ saves_path = "{saves_root}"
     assert calls["track"] == 0  # track_save removed post-upload (redundant)
 
 
+def test_build_save_sync_preview_uses_default_slot_for_unslotted_save(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    saves_root = Path(config.emudeck.saves_path).expanduser()
+    profile_dir = saves_root / "retroarch/saves"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    (profile_dir / "Mario.sav").write_bytes(b"save-data")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/roms":
+            return httpx.Response(
+                200,
+                json={"items": [{"id": 10, "name": "Mario", "fs_name": "Mario.zip"}], "total": 1},
+            )
+        if request.url.path == "/api/saves":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/api/sync/negotiate":
+            payload = json.loads(request.content.decode("utf-8"))
+            assert payload["saves"][0]["slot"] == "autosave"
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": 1,
+                    "operations": [],
+                    "total_upload": 0,
+                    "total_download": 0,
+                    "total_conflict": 0,
+                    "total_no_op": 0,
+                },
+            )
+        return httpx.Response(404, json={})
+
+    client = RommApiClient(config, transport=httpx.MockTransport(handler))
+    build_save_sync_preview(config, client)
+    client.close()
+
+
+def test_build_save_sync_preview_respects_custom_default_slot(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    config.sync.slot = "main"
+    saves_root = Path(config.emudeck.saves_path).expanduser()
+    profile_dir = saves_root / "retroarch/saves"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    (profile_dir / "Mario.sav").write_bytes(b"save-data")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/roms":
+            return httpx.Response(
+                200,
+                json={"items": [{"id": 10, "name": "Mario", "fs_name": "Mario.zip"}], "total": 1},
+            )
+        if request.url.path == "/api/saves":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/api/sync/negotiate":
+            payload = json.loads(request.content.decode("utf-8"))
+            assert payload["saves"][0]["slot"] == "main"
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": 1,
+                    "operations": [],
+                    "total_upload": 0,
+                    "total_download": 0,
+                    "total_conflict": 0,
+                    "total_no_op": 0,
+                },
+            )
+        return httpx.Response(404, json={})
+
+    client = RommApiClient(config, transport=httpx.MockTransport(handler))
+    build_save_sync_preview(config, client)
+    client.close()
+
+
+def test_build_save_sync_preview_duckstation_primary_slot_uses_default(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    saves_root = Path(config.emudeck.saves_path).expanduser()
+    profile_dir = saves_root / "duckstation/saves"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    (profile_dir / "Mario_1.mcd").write_bytes(b"save-data")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/roms":
+            return httpx.Response(
+                200,
+                json={"items": [{"id": 10, "name": "Mario", "fs_name": "Mario.zip"}], "total": 1},
+            )
+        if request.url.path == "/api/saves":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/api/sync/negotiate":
+            payload = json.loads(request.content.decode("utf-8"))
+            assert payload["saves"][0]["file_name"] == "Mario_1.mcd"
+            assert payload["saves"][0]["slot"] == "autosave"
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": 1,
+                    "operations": [],
+                    "total_upload": 0,
+                    "total_download": 0,
+                    "total_conflict": 0,
+                    "total_no_op": 0,
+                },
+            )
+        return httpx.Response(404, json={})
+
+    client = RommApiClient(config, transport=httpx.MockTransport(handler))
+    build_save_sync_preview(config, client)
+    client.close()
+
+
+def test_build_save_sync_preview_duckstation_secondary_slot_keeps_numeric_value(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+    saves_root = Path(config.emudeck.saves_path).expanduser()
+    profile_dir = saves_root / "duckstation/saves"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    (profile_dir / "Mario_2.mcd").write_bytes(b"save-data")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/roms":
+            return httpx.Response(
+                200,
+                json={"items": [{"id": 10, "name": "Mario", "fs_name": "Mario.zip"}], "total": 1},
+            )
+        if request.url.path == "/api/saves":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/api/sync/negotiate":
+            payload = json.loads(request.content.decode("utf-8"))
+            assert payload["saves"][0]["slot"] == "2"
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": 1,
+                    "operations": [],
+                    "total_upload": 0,
+                    "total_download": 0,
+                    "total_conflict": 0,
+                    "total_no_op": 0,
+                },
+            )
+        return httpx.Response(404, json={})
+
+    client = RommApiClient(config, transport=httpx.MockTransport(handler))
+    build_save_sync_preview(config, client)
+    client.close()
+
+
 def test_build_save_sync_preview_matches_tagged_save_name(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     saves_root = Path(config.emudeck.saves_path).expanduser()

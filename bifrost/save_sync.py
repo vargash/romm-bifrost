@@ -247,6 +247,7 @@ def _build_local_save_state(
     remote_index: dict[str, RomSummary],
     emulator: str | None = None,
     strip_slot_suffix: bool = False,
+    default_slot: str = "autosave",
 ) -> tuple[ClientSaveState | None, str | None]:
     file_name_no_ext = local_save.path.stem
     slot: str | None = None
@@ -255,8 +256,8 @@ def _build_local_save_state(
         if slot_match:
             slot = slot_match.group().lstrip("_")
         file_name_no_ext = _SLOT_SUFFIX_RE.sub("", file_name_no_ext)
-    if slot is None:
-        slot = "1"
+    if slot is None or slot == "1":
+        slot = default_slot
     stripped_name = _strip_trailing_tags(file_name_no_ext)
     candidates = [local_save.file_name, file_name_no_ext, stripped_name]
 
@@ -542,6 +543,7 @@ def build_save_sync_preview(
             remote_rom_index,
             emulator=sf.profile.romm_emulator,
             strip_slot_suffix=sf.profile.strip_slot_suffix,
+            default_slot=config.sync.slot,
         )
         if state is None:
             skipped_paths.append(sf.path)

@@ -40,6 +40,8 @@ videos = "videos"
 conflict_strategy = "ask"
 direction = "push_pull"
 parallel_workers = 16   # threads for parallel symlink evaluation/apply (reduce if NAS is overloaded)
+slot = "autosave"       # stable slot name for saves with no explicit numbered slot; must match
+                        # the slot naming used by other RomM clients
 prune_orphan_platforms = false   # opt in to reviewing/removing orphan platform folders
 orphan_platform_strategy = "ask" # ask | remove | skip
 

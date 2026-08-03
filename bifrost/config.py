@@ -94,6 +94,10 @@ class SyncConfig(BaseModel):
     save_sync_enabled: bool = True
     conflict_strategy: str = "ask"
     direction: Literal["push_pull", "push_only", "pull_only"] = "push_pull"
+    # Stable slot name for saves with no explicit numbered slot. Must match the
+    # slot naming used by other RomM clients so saves stay paired on
+    # (rom_id, slot) across devices.
+    slot: str = "autosave"
     parallel_workers: int = Field(default=16, ge=1)
     profiles: SyncProfilesConfig = Field(default_factory=SyncProfilesConfig)
     optimistic_downloads: bool = True
