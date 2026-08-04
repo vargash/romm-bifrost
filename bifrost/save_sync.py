@@ -960,11 +960,15 @@ def execute_save_sync_preview(
                 # Opt-in reverse fan-out (see find_cross_core_source): also upload a
                 # companion copy tagged as the foreign emulator, renamed to its native
                 # extension, so clients reporting that emulator find a ready-made save.
+                # Deliberately NOT tracked for this device (no track_save_for_device
+                # call): this device has no local file in that naming/extension, so
+                # linking it as "current" here would make every future negotiate see
+                # a mismatch against the local scan and re-upload it forever.
                 _fanout_rule = find_cross_core_source(_emulator, config.sync.cross_core_compat)
                 if _fanout_rule is not None and _fanout_rule.source_extension:
                     _fanout_name = Path(_upload_name).stem + _fanout_rule.source_extension
                     try:
-                        fanout_result = client.upload_save_file(
+                        client.upload_save_file(
                             rom_id=operation.rom_id,
                             save_path=local_file.path,
                             device_id=preview.device_id,
@@ -977,11 +981,6 @@ def execute_save_sync_preview(
                             slot=_slot,
                             upload_file_name=_fanout_name,
                         )
-                        fanout_save_id = (
-                            fanout_result.get("id") if isinstance(fanout_result, dict) else None
-                        )
-                        if fanout_save_id is not None:
-                            client.track_save_for_device(int(fanout_save_id), preview.device_id)
                         _log.info(
                             "cross-core compat: fanned out %s upload as %s-compatible %s (%s)",
                             operation.file_name,

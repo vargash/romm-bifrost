@@ -1830,6 +1830,7 @@ def test_execute_upload_fans_out_opted_in_cross_core_compat(tmp_path: Path) -> N
     local_save.write_bytes(b"local-save-data")
 
     uploaded: list[tuple[bytes, dict[str, str]]] = []
+    tracked_save_ids: list[int] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/roms":
@@ -1882,6 +1883,7 @@ def test_execute_upload_fans_out_opted_in_cross_core_compat(tmp_path: Path) -> N
                 },
             )
         if "/track" in request.url.path:
+            tracked_save_ids.append(int(request.url.path.split("/")[3]))
             return httpx.Response(200, json={"id": 55})
         return httpx.Response(404, json={})
 
@@ -1895,6 +1897,11 @@ def test_execute_upload_fans_out_opted_in_cross_core_compat(tmp_path: Path) -> N
 
     primary_body, primary_params = uploaded[0]
     assert b'filename="Klonoa - Door to Phantomile (USA).mcd"' in primary_body
+    # Only the primary (duckstation) save is tracked for this device — the fan-out
+    # companion has no local .srm file this device can ever match on a future
+    # negotiate, so tracking it would make it look permanently out of sync and
+    # trigger a re-upload loop on every subsequent save-sync run.
+    assert tracked_save_ids == [55]
     assert primary_params.get("emulator") == "duckstation"
 
     fanout_body, fanout_params = uploaded[1]
