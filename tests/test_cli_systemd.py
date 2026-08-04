@@ -32,7 +32,7 @@ def test_systemd_install_resolves_missing_bifrost_bin(
     unit_file = tmp_path / "systemd" / "user" / "bifrost-save-watch.service"
     content = unit_file.read_text()
     assert "%h/.local/bin/bifrost" not in content
-    assert "bifrost.cli watch-saves" in content
+    assert "bifrost.cli save watch" in content
 
 
 def test_systemd_install_bifrost_bin_override(

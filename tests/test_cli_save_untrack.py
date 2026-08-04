@@ -26,7 +26,7 @@ client_token = "rmm_token"
 def test_save_untrack_returns_config_error_for_missing_file(tmp_path: Path) -> None:
     runner = CliRunner()
     result = runner.invoke(
-        main, ["save-untrack", "55", "--config", str(tmp_path / "missing.toml")]
+        main, ["save", "untrack", "55", "--config", str(tmp_path / "missing.toml")]
     )
     assert result.exit_code == EXIT_CONFIG_ERROR
 
@@ -34,7 +34,9 @@ def test_save_untrack_returns_config_error_for_missing_file(tmp_path: Path) -> N
 def test_save_untrack_requires_device_id(tmp_path: Path) -> None:
     write_valid_config(tmp_path / "config.toml")
     runner = CliRunner()
-    result = runner.invoke(main, ["save-untrack", "55", "--config", str(tmp_path / "config.toml")])
+    result = runner.invoke(
+        main, ["save", "untrack", "55", "--config", str(tmp_path / "config.toml")]
+    )
     assert result.exit_code == EXIT_CONFIG_ERROR
     assert "No device_id" in result.output
 
@@ -63,7 +65,9 @@ def test_save_untrack_calls_untrack_endpoint(
     monkeypatch.setattr(httpx.Client, "__init__", patched_init)
 
     runner = CliRunner()
-    result = runner.invoke(main, ["save-untrack", "55", "--config", str(tmp_path / "config.toml")])
+    result = runner.invoke(
+        main, ["save", "untrack", "55", "--config", str(tmp_path / "config.toml")]
+    )
     assert result.exit_code == EXIT_OK, result.output
     assert calls == [("POST", "/api/saves/55/untrack")]
     assert "untracked" in result.output
@@ -88,5 +92,7 @@ def test_save_untrack_returns_api_error_on_server_failure(
     monkeypatch.setattr(httpx.Client, "__init__", patched_init)
 
     runner = CliRunner()
-    result = runner.invoke(main, ["save-untrack", "55", "--config", str(tmp_path / "config.toml")])
+    result = runner.invoke(
+        main, ["save", "untrack", "55", "--config", str(tmp_path / "config.toml")]
+    )
     assert result.exit_code == EXIT_API_ERROR

@@ -255,7 +255,7 @@ fi
 
 if [[ "$_save_sync_enabled" == "true" ]]; then
   info "Running initial save sync..."
-  if bifrost save-sync --apply; then
+  if bifrost save sync --apply; then
     success "Saves synced"
   else
     warn "Save sync returned a non-zero exit code"

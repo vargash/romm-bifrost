@@ -31,7 +31,7 @@ saves_path = "{save_root}"
     config_path.chmod(0o600)
 
     runner = CliRunner()
-    result = runner.invoke(main, ["debug", "saves", "--config", str(config_path)])
+    result = runner.invoke(main, ["save", "debug", "--config", str(config_path)])
 
     assert result.exit_code == 0
     assert "Configured saves_path" in result.output

@@ -819,7 +819,7 @@ def test_cli_save_sync_conflict_server_wins(
     monkeypatch.setattr(httpx.Client, "__init__", patched_init)
 
     runner = CliRunner()
-    result = runner.invoke(main, ["save-sync", "--config", str(cfg), "--apply"])
+    result = runner.invoke(main, ["save", "sync", "--config", str(cfg), "--apply"])
 
     assert result.exit_code == 0
     assert calls["download"] == 1

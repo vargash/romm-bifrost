@@ -23,18 +23,23 @@ bios_path = "~/BIOS"
 media_path = "/Emulation/tools/downloaded_media"
 saves_path = "~/saves"
 
+# Maps each RomM per-game asset type to its ES-DE media subfolder. This is the
+# built-in default (shown here for reference) — omit [assets.folder_map]
+# entirely to use it, or override only the keys you want to change (an
+# override replaces the whole table, so re-list every key you keep).
 [assets.folder_map]
-backcovers = "backcovers"
-bezels = "bezels"
-boxes = "box3dfront"
-covers = "covers"
+cover = "covers"
 fanart = "fanart"
-manuals = "manuals"
-marquees = "marquees"
-miximages = "miximages"
+box3d = "3dboxes"
+box2d_back = "backcovers"
+logo = "marquees"          # ES-DE marquees = game logos, not arcade marquees
+miximage = "miximages"
+title_screen = "titlescreens"
+video_normalized = "videos"
+manual = "manuals"
+physical = "physicalmedia"
 screenshots = "screenshots"
-titlescreens = "titlescreens"
-videos = "videos"
+bezel = "bezels"           # non-standard ES-DE path, used by some themes
 
 [sync]
 conflict_strategy = "ask"

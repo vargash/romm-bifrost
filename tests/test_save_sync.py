@@ -147,7 +147,7 @@ saves_path = "{saves_root}"
     monkeypatch.setattr(httpx.Client, "__init__", patched_init)
 
     runner = CliRunner()
-    result = runner.invoke(main, ["save-sync", "--config", str(config_path)])
+    result = runner.invoke(main, ["save", "sync", "--config", str(config_path)])
 
     assert result.exit_code == 0
     assert "Bifrost Save Sync (preview)" in result.output
@@ -282,7 +282,7 @@ saves_path = "{saves_root}"
     result = runner.invoke(
         main,
         [
-            "save-sync",
+            "save", "sync",
             "--config",
             str(config_path),
             "--apply",
@@ -442,7 +442,7 @@ saves_path = "{saves_root}"
     result = runner.invoke(
         main,
         [
-            "save-sync",
+            "save", "sync",
             "--config",
             str(config_path),
             "--apply",
@@ -595,7 +595,7 @@ saves_path = "{saves_root}"
     result = runner.invoke(
         main,
         [
-            "save-sync",
+            "save", "sync",
             "--config",
             str(config_path),
             "--apply",
@@ -1013,7 +1013,7 @@ saves_path = "{saves_root}"
     runner = CliRunner()
     result = runner.invoke(
         main,
-        ["save-sync", "--config", str(config_path), "--apply"],
+        ["save", "sync", "--config", str(config_path), "--apply"],
     )
 
     assert result.exit_code == 0, result.output
@@ -1106,7 +1106,7 @@ saves_path = "{saves_root}"
     runner = CliRunner()
     result = runner.invoke(
         main,
-        ["save-sync", "--config", str(config_path), "--apply"],
+        ["save", "sync", "--config", str(config_path), "--apply"],
     )
 
     assert result.exit_code == 0, result.output
