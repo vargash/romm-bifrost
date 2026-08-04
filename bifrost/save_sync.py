@@ -412,9 +412,13 @@ def _legacy_negotiate(
     sync_mode: str,
     device_id: str = "",
 ) -> tuple[list[SyncOperationSchema], None]:
-    """Fallback when /api/sync/negotiate is unavailable (older RomM server).
+    """Fallback when /api/sync/negotiate is unavailable (older RomM server), also
+    used directly when the caller passes force_resync=True to build_save_sync_preview.
 
-    Builds upload/download operations by direct local↔server comparison.
+    Builds upload/download operations by direct local↔server comparison, ignoring
+    any server-side per-device sync state (e.g. DeviceSyncSchema.is_current) that
+    /api/sync/negotiate's stateful pairing may rely on — useful to recover a save
+    the server still thinks this device has after it was deleted locally.
     Downloads are only added in push_pull mode.
     Saves marked is_current for our device are skipped (already in sync).
     """
@@ -574,6 +578,7 @@ def build_save_sync_preview(
     client: RommApiClient,
     device_id: str | None = None,
     file_filters: list[str] | None = None,
+    force_resync: bool = False,
 ) -> SaveSyncPreview:
     resolved_device_id = (device_id or config.romm.device_id).strip()
     if not resolved_device_id:
@@ -665,33 +670,45 @@ def build_save_sync_preview(
     for warning in cross_core_warnings:
         _log.warning("cross-core: %s", warning)
 
-    # Negotiate with RomM, falling back to local comparison on 404/405
+    # Negotiate with RomM, falling back to local comparison on 404/405 (or forced via --resync)
     session_id: int | None
     raw_operations: list[SyncOperationSchema]
-    try:
-        negotiate_response = client.negotiate_sync(
-            SyncNegotiatePayload(device_id=resolved_device_id, saves=local_states)
+    if force_resync:
+        _log.warning(
+            "forced resync: bypassing server negotiate, reconciling purely from local files "
+            "vs server saves (device_syncs state on server is ignored)"
         )
-        session_id = negotiate_response.session_id
-        raw_operations = negotiate_response.operations
-        _log.info(
-            "negotiate complete: session=%d upload=%d download=%d conflict=%d no_op=%d",
-            session_id,
-            negotiate_response.total_upload,
-            negotiate_response.total_download,
-            negotiate_response.total_conflict,
-            negotiate_response.total_no_op,
+        raw_operations, session_id = _legacy_negotiate(
+            local_states,
+            remote_save_index,
+            config.sync.direction,
+            device_id=resolved_device_id,
         )
-    except ApiError as exc:
-        if exc.http_status in {404, 405}:
-            raw_operations, session_id = _legacy_negotiate(
-                local_states,
-                remote_save_index,
-                config.sync.direction,
-                device_id=resolved_device_id,
+    else:
+        try:
+            negotiate_response = client.negotiate_sync(
+                SyncNegotiatePayload(device_id=resolved_device_id, saves=local_states)
             )
-        else:
-            raise
+            session_id = negotiate_response.session_id
+            raw_operations = negotiate_response.operations
+            _log.info(
+                "negotiate complete: session=%d upload=%d download=%d conflict=%d no_op=%d",
+                session_id,
+                negotiate_response.total_upload,
+                negotiate_response.total_download,
+                negotiate_response.total_conflict,
+                negotiate_response.total_no_op,
+            )
+        except ApiError as exc:
+            if exc.http_status in {404, 405}:
+                raw_operations, session_id = _legacy_negotiate(
+                    local_states,
+                    remote_save_index,
+                    config.sync.direction,
+                    device_id=resolved_device_id,
+                )
+            else:
+                raise
 
     filtered_operations = [
         operation

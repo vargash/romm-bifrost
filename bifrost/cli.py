@@ -1263,6 +1263,15 @@ def sync(
     default=None,
     help="Hard timeout in seconds; exits 0 on expiry (fail-open, for ES-DE event hooks).",
 )
+@click.option(
+    "--resync",
+    is_flag=True,
+    help=(
+        "Force a full local-vs-server reconciliation, bypassing the server's stateful "
+        "negotiate. Use to recover a save deleted locally that the server still thinks "
+        "this device has synced."
+    ),
+)
 def save_sync(
     config_path: Path | None,
     device_id: str | None,
@@ -1272,6 +1281,7 @@ def save_sync(
     on_event: str | None,
     rom_path: str | None,
     timeout_seconds: int | None,
+    resync: bool,
 ) -> None:
     """Scan local saves and preview the RomM sync negotiation."""
 
@@ -1341,6 +1351,7 @@ def save_sync(
                     client,
                     device_id=device_id,
                     file_filters=effective_filters if effective_filters else None,
+                    force_resync=resync,
                 )
 
                 # Event-based direction filtering
@@ -1465,6 +1476,8 @@ def save_sync(
         summary.add_row("File filter", ", ".join(effective_filters))
     if on_event:
         summary.add_row("Event", on_event)
+    if resync:
+        summary.add_row("Mode", "forced resync (server negotiate bypassed)")
     console.print(summary)
 
     operations_table = Table(title="Sync Operations")

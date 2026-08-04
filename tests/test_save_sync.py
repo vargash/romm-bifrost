@@ -1404,3 +1404,74 @@ def test_execute_download_applies_opted_in_cross_core_compat(tmp_path: Path) -> 
     assert destination.exists(), list((saves_root / "duckstation/saves").iterdir())
     assert destination.read_bytes() == b"psx-memcard-bytes"
     assert not (saves_root / "Crash Bandicoot.srm").exists()
+
+
+def test_build_save_sync_preview_resync_bypasses_server_negotiate(tmp_path: Path) -> None:
+    """A save was deleted locally after already being synced. The server still
+    thinks this device has it (a stateful is_current flag on its side) and a
+    normal negotiate would return no operation for it — force_resync=True must
+    skip /api/sync/negotiate entirely and reconcile purely from what's on disk
+    right now, which should surface it as a download.
+    """
+    config = make_config(tmp_path)
+    saves_root = Path(config.emudeck.saves_path).expanduser()
+    (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
+    # Klonoa.srm intentionally absent: simulates the user having deleted it.
+
+    negotiate_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal negotiate_calls
+        if request.url.path == "/api/roms":
+            return httpx.Response(
+                200,
+                json={"items": [{"id": 10, "name": "Klonoa", "fs_name": "Klonoa.zip"}], "total": 1},
+            )
+        if request.url.path == "/api/saves" and request.method == "GET":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 99,
+                        "rom_id": 10,
+                        "file_name": "Klonoa.srm",
+                        "updated_at": "2026-01-01T00:00:00Z",
+                        "content_hash": "abc123",
+                        "device_syncs": [
+                            {
+                                "device_id": "device-1",
+                                "device_name": None,
+                                "last_synced_at": "2026-01-01T00:00:00Z",
+                                "is_untracked": False,
+                                "is_current": True,
+                            }
+                        ],
+                    }
+                ],
+            )
+        if request.url.path == "/api/sync/negotiate":
+            negotiate_calls += 1
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": 1,
+                    "operations": [],
+                    "total_upload": 0,
+                    "total_download": 0,
+                    "total_conflict": 0,
+                    "total_no_op": 0,
+                },
+            )
+        return httpx.Response(404, json={})
+
+    client = RommApiClient(config, transport=httpx.MockTransport(handler))
+    preview = build_save_sync_preview(config, client, force_resync=True)
+    client.close()
+
+    assert negotiate_calls == 0, "force_resync must bypass /api/sync/negotiate entirely"
+    assert preview.session_id is None
+    assert len(preview.operations) == 1
+    op = preview.operations[0]
+    assert op.action == "download"
+    assert op.rom_id == 10
+    assert op.file_name == "Klonoa.srm"
