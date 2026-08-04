@@ -1622,3 +1622,110 @@ def test_execute_download_truncates_cross_core_trailer_to_expected_size(tmp_path
     written = destination.read_bytes()
     assert len(written) == 131072
     assert written == raw_memcard
+
+
+def test_execute_upload_matches_local_file_by_rom_and_slot_when_name_diverges(
+    tmp_path: Path,
+) -> None:
+    """Real-world case: this device previously downloaded a cross-core-compat save
+    (mednafen_psx_hw -> duckstation), renamed on write to the local naming
+    convention ("Klonoa - Door to Phantomile (USA)_1.mcd"). The user then played
+    and saved again locally, so the negotiated "upload" operation's file_name still
+    echoes the *original* server-side save name from the mobile client
+    ("Klonoa - Door to Phantomile (USA) [2026-08-03_21-19-47].srm") — per RomM's
+    own docs, saves are paired on (rom_id, slot), not filename, and the echoed
+    name is informational, not a local lookup key. Upload must not be skipped
+    just because no local file has that literal echoed name.
+    """
+    config = make_config(tmp_path)
+    saves_root = Path(config.emudeck.saves_path)
+    (saves_root / "duckstation/saves").mkdir(parents=True, exist_ok=True)
+    local_save = saves_root / "duckstation/saves/Klonoa - Door to Phantomile (USA)_1.mcd"
+    local_save.write_bytes(b"fresh-local-save-data")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/roms":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "id": 4762,
+                            "name": "Klonoa - Door to Phantomile (USA)",
+                            "fs_name": "Klonoa - Door to Phantomile (USA).zip",
+                        }
+                    ],
+                    "total": 1,
+                },
+            )
+        if request.url.path == "/api/saves" and request.method == "GET":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/api/sync/negotiate":
+            payload = json.loads(request.content.decode("utf-8"))
+            assert payload["saves"][0]["slot"] == "autosave"
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": 5,
+                    "operations": [
+                        {
+                            "action": "upload",
+                            "rom_id": 4762,
+                            "save_id": 200,
+                            "file_name": "Klonoa - Door to Phantomile (USA) "
+                            "[2026-08-03_21-19-47].srm",
+                            "slot": "autosave",
+                            "reason": "Client save is newer than last sync",
+                        }
+                    ],
+                    "total_upload": 1,
+                    "total_download": 0,
+                    "total_conflict": 0,
+                    "total_no_op": 0,
+                },
+            )
+        if request.url.path == "/api/saves" and request.method == "POST":
+            return httpx.Response(
+                200,
+                json={
+                    "id": 200,
+                    "rom_id": 4762,
+                    "file_name": "Klonoa - Door to Phantomile (USA)_1.mcd",
+                    "updated_at": "2026-08-04T00:00:00Z",
+                },
+            )
+        if "/track" in request.url.path:
+            return httpx.Response(200, json={"id": 200})
+        if "/api/sync/sessions/" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "session": {
+                        "id": 5,
+                        "device_id": "device-1",
+                        "user_id": 1,
+                        "status": "completed",
+                        "initiated_at": "2026-08-04T00:00:00Z",
+                        "completed_at": "2026-08-04T00:00:01Z",
+                        "operations_planned": 1,
+                        "operations_completed": 1,
+                        "operations_failed": 0,
+                        "error_message": None,
+                        "created_at": "2026-08-04T00:00:00Z",
+                        "updated_at": "2026-08-04T00:00:01Z",
+                    }
+                },
+            )
+        return httpx.Response(404, json={})
+
+    client = RommApiClient(config, transport=httpx.MockTransport(handler))
+    preview = build_save_sync_preview(config, client)
+    result = execute_save_sync_preview(config, client, preview)
+    client.close()
+
+    assert result.executed == 1, result.details
+    assert result.details[0] == (
+        "upload",
+        "Klonoa - Door to Phantomile (USA) [2026-08-03_21-19-47].srm",
+        "ok",
+    )

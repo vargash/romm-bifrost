@@ -395,6 +395,7 @@ def _lookup_local_file_for_operation(
     operation: SyncOperationSchema,
     local_index: dict[str, list[LocalSaveFile]],
     rom_index: dict[int, RomSummary] | None = None,
+    local_states: list[ClientSaveState] | None = None,
 ) -> LocalSaveFile | None:
     candidates = local_index.get(operation.file_name.lower())
     if candidates:
@@ -404,6 +405,19 @@ def _lookup_local_file_for_operation(
         candidates = local_index.get(canonical.lower())
         if candidates:
             return candidates[0]
+    # Fall back to the server's own (rom_id, slot) pairing key instead of filename
+    # matching. operation.file_name for an upload can echo the *existing* server
+    # save's name rather than this device's local filename — e.g. a save that
+    # arrived here via cross-core routing (renamed to the target profile's
+    # convention on download) and was then genuinely modified locally never
+    # matches by name, even though it's exactly the file the server is asking
+    # to receive an update for.
+    if local_states is not None:
+        for state in local_states:
+            if state.rom_id == operation.rom_id and state.slot == operation.slot:
+                candidates = local_index.get(state.file_name.lower())
+                if candidates:
+                    return candidates[0]
     return None
 
 
@@ -779,9 +793,15 @@ def execute_save_sync_preview(
         local_index.setdefault(local_save.file_name.lower(), []).append(local_save)
 
     # Index emulator/slot from negotiated local states for use during upload.
+    # Keyed both by (rom_id, file_name) — the common case — and by (rom_id, slot),
+    # the server's own pairing key, as a fallback for when operation.file_name
+    # doesn't match this device's local filename (see _lookup_local_file_for_operation).
     local_state_meta: dict[tuple[int, str], tuple[str | None, str | None]] = {
         (s.rom_id, s.file_name.lower()): (s.emulator, s.slot)
         for s in preview.local_saves
+    }
+    local_state_meta_by_slot: dict[tuple[int, str | None], tuple[str | None, str | None]] = {
+        (s.rom_id, s.slot): (s.emulator, s.slot) for s in preview.local_saves
     }
 
     selected_ops = [
@@ -843,7 +863,9 @@ def execute_save_sync_preview(
 
         try:
             if operation.action == "upload":
-                local_file = _lookup_local_file_for_operation(operation, local_index, preview.rom_index)
+                local_file = _lookup_local_file_for_operation(
+                    operation, local_index, preview.rom_index, preview.local_saves
+                )
                 if local_file is None:
                     skipped += 1
                     details.append(
@@ -852,9 +874,10 @@ def execute_save_sync_preview(
                     continue
                 _do_autocleanup = config.sync.autocleanup
                 _autocleanup_limit = config.sync.autocleanup_limit
-                _emulator, _slot = local_state_meta.get(
-                    (operation.rom_id, operation.file_name.lower()), (None, None)
-                )
+                _meta = local_state_meta.get((operation.rom_id, operation.file_name.lower()))
+                if _meta is None:
+                    _meta = local_state_meta_by_slot.get((operation.rom_id, operation.slot))
+                _emulator, _slot = _meta or (None, None)
                 try:
                     upload_result = client.upload_save_file(
                         rom_id=operation.rom_id,
