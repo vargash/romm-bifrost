@@ -8,6 +8,39 @@ from bifrost.cli import EXIT_CONFIG_ERROR, EXIT_OK, main
 from bifrost.config import AppConfig, RommConfig, load_config, save_config
 
 
+def test_config_migrate_drops_obsolete_key_and_fills_new_default(tmp_path: Path) -> None:
+    """A config predating sync.core_mappings (still on legacy
+    sync.cross_core_compat) round-trips through 'config migrate' into the
+    current schema on disk: the legacy key is gone, the migrated
+    core_mappings entry and any new field defaults are written out.
+    """
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[romm]
+url = "http://romm.local"
+client_token = "rmm_token"
+
+[sync]
+cross_core_compat = ["mednafen_psx_hw"]
+""".strip(),
+        encoding="utf-8",
+    )
+    config_path.chmod(0o600)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["config", "migrate", "--config", str(config_path)])
+
+    assert result.exit_code == EXIT_OK, result.output
+    raw = config_path.read_text(encoding="utf-8")
+    assert "cross_core_compat" not in raw
+    assert "core_mappings" in raw
+    assert "save_sync_enabled" in raw  # a field this legacy file never had
+
+    cfg = load_config(config_path)
+    assert cfg.sync.core_mappings[0].remote_core == "mednafen_psx_hw"
+
+
 def test_config_show_prints_current_values(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     save_config(

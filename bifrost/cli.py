@@ -457,6 +457,30 @@ def save_debug(config_path: Path | None, limit: int) -> None:
     raise SystemExit(EXIT_OK)
 
 
+@config.command(
+    name="migrate",
+    help="Rewrite the config file: apply migrations, fill new defaults, drop obsolete keys.",
+)
+@config_path_option
+def config_migrate(config_path: Path | None) -> None:
+    """Reload and resave the config file headlessly (no prompts).
+
+    load_config already runs every legacy-key migration in-memory (see
+    _migrate_sync_mode, _migrate_cross_core_compat, etc.) and save_config
+    only ever writes fields declared on AppConfig — so this round-trip is
+    enough to drop obsolete keys the current schema no longer has and add
+    any new field's default that a config file predating it doesn't carry
+    yet. Intended for non-interactive upgrade flows (e.g. install-deck.sh
+    --update) where re-running the interactive setup wizard isn't wanted.
+    """
+
+    console = Console()
+    loaded, resolved_path = load_config_or_exit(console, config_path)
+    save_path = save_config(loaded, resolved_path)
+    console.print(f"[green]Configuration migrated:[/green] {save_path}")
+    raise SystemExit(EXIT_OK)
+
+
 @config.command(name="show", help="Print current configuration values.")
 @config_path_option
 def config_show(config_path: Path | None) -> None:

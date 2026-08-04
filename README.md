@@ -170,6 +170,11 @@ bifrost config show
 # Update one config value
 bifrost config set romm.url http://192.168.1.x:8080
 
+# Rewrite the config file on the current schema: drop obsolete keys, fill new
+# defaults. Run after upgrading bifrost (install-deck.sh --update does this
+# automatically). No prompts — safe for scripts.
+bifrost config migrate
+
 # Preview save sync operations
 bifrost save sync
 

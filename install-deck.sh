@@ -176,6 +176,7 @@ if [[ "$MODE" != "update" ]] || [[ ! -f "$CONFIG_FILE" ]]; then
 else
   info "Config already exists at $CONFIG_FILE — skipping wizard (--update mode)"
   info "Run 'bifrost setup' any time to change settings."
+  bifrost config migrate
 fi
 
 # ── read save_sync_enabled from config ────────────────────────────────────
