@@ -1477,6 +1477,59 @@ def test_build_save_sync_preview_resync_bypasses_server_negotiate(tmp_path: Path
     assert op.file_name == "Klonoa.srm"
 
 
+def test_build_save_sync_preview_resync_matches_duckstation_slot_suffix(tmp_path: Path) -> None:
+    """_save_lookup_key (used by --resync's local-only reconciliation) must strip
+    DuckStation's local "_N" slot suffix the same way _upload_file_name strips it
+    before uploading — otherwise a local "Game_1.mcd" never matches the server's
+    bare "Game.mcd" and --resync treats an already-synced DuckStation save as
+    permanently new, re-uploading it every run.
+    """
+    config = make_config(tmp_path)
+    saves_root = Path(config.emudeck.saves_path).expanduser()
+    (saves_root / "duckstation/saves").mkdir(parents=True, exist_ok=True)
+    local_save = saves_root / "duckstation/saves/Klonoa - Door to Phantomile (USA)_1.mcd"
+    local_save.write_bytes(b"same-content")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/roms":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "id": 10,
+                            "name": "Klonoa - Door to Phantomile (USA)",
+                            "fs_name": "Klonoa - Door to Phantomile (USA).zip",
+                        }
+                    ],
+                    "total": 1,
+                },
+            )
+        if request.url.path == "/api/saves" and request.method == "GET":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 99,
+                        "rom_id": 10,
+                        "file_name": "Klonoa - Door to Phantomile (USA) [2026-08-04_10-08-27].mcd",
+                        "updated_at": "2026-08-04T10:08:27Z",
+                        "emulator": "duckstation",
+                        "slot": "autosave",
+                        "content_hash": hashlib.md5(b"same-content").hexdigest(),
+                        "device_syncs": [],
+                    }
+                ],
+            )
+        return httpx.Response(404, json={})
+
+    client = RommApiClient(config, transport=httpx.MockTransport(handler), no_cache=True)
+    preview = build_save_sync_preview(config, client, force_resync=True)
+    client.close()
+
+    assert preview.operations == [], preview.operations
+
+
 def test_build_save_sync_preview_resync_still_warns_on_unrouted_remote_emulator(
     tmp_path: Path,
 ) -> None:

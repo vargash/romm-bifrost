@@ -302,9 +302,15 @@ def _build_local_save_state(
 
 
 def _save_lookup_key(rom_id: int, file_name: str) -> tuple[int, str]:
-    path = Path(file_name)
-    stem = _normalize_name(_strip_trailing_tags(path.stem))
-    extension = path.suffix.lower()
+    # Strip a trailing "_N" slot suffix (DuckStation's local naming convention,
+    # see SaveProfile.strip_slot_suffix) before _normalize_name turns "_" into a
+    # space — otherwise a local "Game_1.mcd" never matches the server's bare
+    # "Game.mcd" (uploaded without the suffix, see _upload_file_name), so
+    # _legacy_negotiate/_build_remote_save_index treat every DuckStation save as
+    # permanently new and re-upload it on every --resync.
+    stem = _SLOT_SUFFIX_RE.sub("", Path(file_name).stem)
+    stem = _normalize_name(_strip_trailing_tags(stem))
+    extension = Path(file_name).suffix.lower()
     return (rom_id, f"{stem}{extension}")
 
 
