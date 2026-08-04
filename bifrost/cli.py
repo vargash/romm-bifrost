@@ -1497,6 +1497,13 @@ def save_sync(
         if len(preview.skipped_paths) > 25:
             console.print("[yellow]Showing first 25 unmapped saves only.[/yellow]")
 
+    if preview.cross_core_warnings:
+        console.print("[yellow]Cross-core save notices:[/yellow]")
+        for notice in preview.cross_core_warnings[:25]:
+            console.print(f"  [yellow]![/yellow] {notice}")
+        if len(preview.cross_core_warnings) > 25:
+            console.print("[yellow]Showing first 25 notices only.[/yellow]")
+
     if apply and execution is not None:
         result_table = Table(title="Save Sync Execution")
         result_table.add_column("Metric")

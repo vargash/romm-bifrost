@@ -105,6 +105,13 @@ class SyncConfig(BaseModel):
     autocleanup_limit: int = Field(default=3, ge=1)
     prune_orphan_platforms: bool = False
     orphan_platform_strategy: str = "ask"
+    # Foreign "emulator" tags (as reported by other RomM clients, e.g. a mobile
+    # RetroArch app sending its libretro core id) this device accepts as
+    # save-compatible with one of its local profiles — see
+    # bifrost.saves.profiles.CROSS_CORE_COMPAT. Empty by default: cross-core
+    # save compatibility must be verified manually before enabling, since a
+    # wrong assumption can corrupt a save file.
+    cross_core_compat: list[str] = Field(default_factory=list)
 
 
 class OutputConfig(BaseModel):

@@ -25,7 +25,7 @@ from bifrost.config import AppConfig
 from bifrost.errors import ApiError, ConfigError
 from bifrost.play_sessions import consume_pending_sessions
 from bifrost.saves.layout import EmudeckEsdeLayout, ScannedFile
-from bifrost.saves.profiles import PROFILES
+from bifrost.saves.profiles import PROFILES, SaveProfile, find_cross_core_target
 
 _log = logging.getLogger("bifrost.save_sync")
 
@@ -77,12 +77,19 @@ class SaveSyncPreview:
     profile_destinations: dict[str, Path] = None  # type: ignore[assignment]
     # Maps rom_id → RomSummary for canonical filename derivation on download.
     rom_index: dict[int, RomSummary] = None  # type: ignore[assignment]
+    # Human-readable notices for ROMs whose local saves were scanned from more
+    # than one emulator without sharing a matching key — i.e. Bifrost treats
+    # them as unrelated save families. See find_cross_core_target for opting
+    # specific pairs into automatic cross-core matching.
+    cross_core_warnings: list[str] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         if self.profile_destinations is None:
             object.__setattr__(self, "profile_destinations", {})
         if self.rom_index is None:
             object.__setattr__(self, "rom_index", {})
+        if self.cross_core_warnings is None:
+            object.__setattr__(self, "cross_core_warnings", [])
 
 
 @dataclass(frozen=True)
@@ -462,6 +469,56 @@ def _legacy_negotiate(
     return ops, None
 
 
+def _detect_unlinked_cross_core_saves(
+    local_states: list[ClientSaveState],
+    rom_names: dict[int, str],
+) -> list[str]:
+    """Return advisory messages for ROMs with local saves from >1 emulator that
+    don't share a save-matching key, meaning Bifrost treats them as unrelated
+    save families with no automatic linking between them (see _save_lookup_key).
+    """
+    by_rom: dict[int, dict[str, set[tuple[int, str]]]] = {}
+    for state in local_states:
+        key = _save_lookup_key(state.rom_id, state.file_name)
+        by_rom.setdefault(state.rom_id, {}).setdefault(state.emulator or "?", set()).add(key)
+
+    warnings: list[str] = []
+    for rom_id, per_emulator in sorted(by_rom.items()):
+        if len(per_emulator) < 2:
+            continue
+        all_keys: set[tuple[int, str]] = set()
+        for keys in per_emulator.values():
+            all_keys |= keys
+        if len(all_keys) <= 1:
+            continue  # every emulator agreed on the same key -> already linked
+        name = rom_names.get(rom_id, f"rom #{rom_id}")
+        emulators = ", ".join(sorted(per_emulator))
+        warnings.append(
+            f"{name}: local saves found under different emulators ({emulators}) that "
+            "are not linked — each will sync independently, not with each other."
+        )
+    return warnings
+
+
+def _cross_core_target_filename(name: str, target_profile: SaveProfile) -> str:
+    """Rename a foreign-core save to the naming convention of a local profile.
+
+    Used only for opt-in cross-core matches (see find_cross_core_target):
+    swaps the extension to the target profile's and, for profiles that expect
+    a slot suffix (e.g. DuckStation's "<game>_<slot>.mcd"), appends "_1" when
+    the source filename didn't already carry one.
+    """
+    stem = Path(name).stem
+    ext = (
+        target_profile.include_globs[0].lstrip("*")
+        if target_profile.include_globs
+        else Path(name).suffix
+    )
+    if target_profile.strip_slot_suffix and not _SLOT_SUFFIX_RE.search(stem):
+        stem = f"{stem}_1"
+    return f"{stem}{ext}"
+
+
 def build_save_sync_preview(
     config: AppConfig,
     client: RommApiClient,
@@ -535,10 +592,11 @@ def build_save_sync_preview(
     local_states: list[ClientSaveState] = []
     local_state_index: dict[tuple[int, str], ClientSaveState] = {}
     skipped_paths: list[Path] = []
+    rom_names: dict[int, str] = {}
 
     for sf in scanned_files:
         local_save = _scanned_to_local(sf)
-        state, _rom_name = _build_local_save_state(
+        state, rom_name = _build_local_save_state(
             local_save,
             remote_rom_index,
             emulator=sf.profile.romm_emulator,
@@ -550,6 +608,12 @@ def build_save_sync_preview(
             continue
         local_states.append(state)
         local_state_index[_save_lookup_key(state.rom_id, state.file_name)] = state
+        if rom_name:
+            rom_names[state.rom_id] = rom_name
+
+    cross_core_warnings = _detect_unlinked_cross_core_saves(local_states, rom_names)
+    for warning in cross_core_warnings:
+        _log.warning("cross-core: %s", warning)
 
     # Negotiate with RomM, falling back to local comparison on 404/405
     session_id: int | None
@@ -596,6 +660,7 @@ def build_save_sync_preview(
         session_id=session_id,
         profile_destinations=profile_destinations,
         rom_index={rom.id: rom for rom in remote_roms},
+        cross_core_warnings=cross_core_warnings,
     )
 
 
@@ -618,6 +683,9 @@ def execute_save_sync_preview(
         p.romm_emulator: save_root / p.save_subpath
         for p in PROFILES
         if p.romm_emulator and p.supported
+    }
+    profile_by_romm_emulator: dict[str, SaveProfile] = {
+        p.romm_emulator: p for p in PROFILES if p.romm_emulator and p.supported
     }
     local_files = scan_local_save_files(save_root)
     local_index: dict[str, list[LocalSaveFile]] = {}
@@ -761,14 +829,36 @@ def execute_save_sync_preview(
                 details.append(("download", operation.file_name, "failed (missing save_id)"))
                 continue
 
-            # Derive canonical local filename (strips timestamp, resolves slot numbers via ROM index)
+            # Derive canonical local filename (strips timestamp, resolves slot numbers via ROM
+            # index)
             canonical_name = _local_filename_for_operation(operation, preview.rom_index)
-            # Resolve dest: existing-file map → emulator subdir → bare root
-            dest_dir = (
-                preview.profile_destinations.get(canonical_name)
-                or (emulator_dest_dirs.get(operation.emulator) if operation.emulator else None)
-                or save_root
-            )
+            # Resolve dest: existing-file map -> emulator subdir -> opt-in cross-core match ->
+            # bare root
+            dest_dir = preview.profile_destinations.get(canonical_name)
+            if dest_dir is None and operation.emulator:
+                dest_dir = emulator_dest_dirs.get(operation.emulator)
+                if dest_dir is None:
+                    compat_rule = find_cross_core_target(
+                        operation.emulator, config.sync.cross_core_compat
+                    )
+                    if compat_rule is not None:
+                        target_profile = profile_by_romm_emulator.get(compat_rule.target_emulator)
+                        if target_profile is not None:
+                            dest_dir = save_root / target_profile.save_subpath
+                            canonical_name = _cross_core_target_filename(
+                                canonical_name, target_profile
+                            )
+                            _log.warning(
+                                "cross-core compat: %s save %r treated as %s-compatible "
+                                "(%s) -> %s",
+                                operation.emulator,
+                                operation.file_name,
+                                compat_rule.target_emulator,
+                                compat_rule.note,
+                                canonical_name,
+                            )
+            if dest_dir is None:
+                dest_dir = save_root
             destination = dest_dir / canonical_name
 
             # Skip download if local already matches server

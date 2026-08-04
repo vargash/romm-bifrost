@@ -11,7 +11,7 @@ from click.testing import CliRunner
 from bifrost.api.client import RommApiClient
 from bifrost.cli import main
 from bifrost.config import AppConfig, EmudeckConfig, RommConfig
-from bifrost.save_sync import build_save_sync_preview
+from bifrost.save_sync import build_save_sync_preview, execute_save_sync_preview
 
 
 def make_config(tmp_path: Path) -> AppConfig:
@@ -1114,3 +1114,184 @@ saves_path = "{saves_root}"
     assert expected.exists(), f"Expected {expected}. Output:\n{result.output}"
     assert expected.read_bytes() == b"mario-save"
     assert not (saves_root / "Mario.sav").exists(), "Must not land in bare save_root"
+
+
+def test_build_save_sync_preview_warns_on_unlinked_cross_core_saves(tmp_path: Path) -> None:
+    """Same ROM, saves scanned from two emulators with no shared matching key.
+
+    Bifrost has no way to know a DuckStation .mcd and a RetroArch .srm are the
+    same game's save family unless the pair is explicitly opted into
+    sync.cross_core_compat — so this should surface as an advisory notice
+    rather than fail silently.
+    """
+    config = make_config(tmp_path)
+    saves_root = Path(config.emudeck.saves_path).expanduser()
+    (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
+    (saves_root / "retroarch/saves/Mario.srm").write_bytes(b"retroarch-save")
+    (saves_root / "duckstation/saves").mkdir(parents=True, exist_ok=True)
+    (saves_root / "duckstation/saves/Mario_1.mcd").write_bytes(b"duckstation-save")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/roms":
+            return httpx.Response(
+                200,
+                json={"items": [{"id": 10, "name": "Mario", "fs_name": "Mario.zip"}], "total": 1},
+            )
+        if request.url.path == "/api/saves":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/api/sync/negotiate":
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": 1,
+                    "operations": [],
+                    "total_upload": 0,
+                    "total_download": 0,
+                    "total_conflict": 0,
+                    "total_no_op": 0,
+                },
+            )
+        return httpx.Response(404, json={})
+
+    client = RommApiClient(config, transport=httpx.MockTransport(handler))
+    preview = build_save_sync_preview(config, client)
+    client.close()
+
+    assert len(preview.cross_core_warnings) == 1
+    notice = preview.cross_core_warnings[0]
+    assert "Mario" in notice
+    assert "duckstation" in notice
+    assert "retroarch" in notice
+
+
+def test_build_save_sync_preview_no_warning_when_single_emulator(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    saves_root = Path(config.emudeck.saves_path).expanduser()
+    (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
+    (saves_root / "retroarch/saves/Mario.sav").write_bytes(b"save-data")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/roms":
+            return httpx.Response(
+                200,
+                json={"items": [{"id": 10, "name": "Mario", "fs_name": "Mario.zip"}], "total": 1},
+            )
+        if request.url.path == "/api/saves":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/api/sync/negotiate":
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": 1,
+                    "operations": [],
+                    "total_upload": 0,
+                    "total_download": 0,
+                    "total_conflict": 0,
+                    "total_no_op": 0,
+                },
+            )
+        return httpx.Response(404, json={})
+
+    client = RommApiClient(config, transport=httpx.MockTransport(handler))
+    preview = build_save_sync_preview(config, client)
+    client.close()
+
+    assert preview.cross_core_warnings == []
+
+
+def _mednafen_download_handler(request: httpx.Request) -> httpx.Response:
+    if request.url.path == "/api/roms":
+        return httpx.Response(
+            200,
+            json={"items": [{"id": 10, "name": "Crash Bandicoot", "fs_name": "Crash Bandicoot.zip"}], "total": 1},
+        )
+    if request.url.path == "/api/saves" and request.method == "GET":
+        return httpx.Response(200, json=[])
+    if request.url.path == "/api/sync/negotiate":
+        return httpx.Response(
+            200,
+            json={
+                "session_id": 51,
+                "operations": [
+                    {
+                        "action": "download",
+                        "rom_id": 10,
+                        "save_id": 99,
+                        "file_name": "Crash Bandicoot.srm",
+                        "emulator": "mednafen_psx_hw",
+                        "reason": "Save exists on server but not on client",
+                    }
+                ],
+                "total_upload": 0,
+                "total_download": 1,
+                "total_conflict": 0,
+                "total_no_op": 0,
+            },
+        )
+    if request.url.path == "/api/saves/99/content":
+        return httpx.Response(200, content=b"psx-memcard-bytes")
+    if request.url.path == "/api/saves/99/downloaded":
+        return httpx.Response(200, json={"id": 99})
+    if "/api/sync/sessions/" in request.url.path:
+        return httpx.Response(
+            200,
+            json={
+                "session": {
+                    "id": 51,
+                    "device_id": "device-1",
+                    "user_id": 1,
+                    "status": "completed",
+                    "initiated_at": "2026-06-22T00:00:00Z",
+                    "completed_at": "2026-06-22T00:00:01Z",
+                    "operations_planned": 1,
+                    "operations_completed": 1,
+                    "operations_failed": 0,
+                    "error_message": None,
+                    "created_at": "2026-06-22T00:00:00Z",
+                    "updated_at": "2026-06-22T00:00:01Z",
+                }
+            },
+        )
+    return httpx.Response(404, json={})
+
+
+def test_execute_download_ignores_unmapped_foreign_emulator_by_default(tmp_path: Path) -> None:
+    """Baseline: without opting into sync.cross_core_compat, a save tagged with a
+    foreign core (mednafen_psx_hw, as a mobile RetroArch client would report it)
+    lands in the bare save_root, not inside a local profile directory — this is
+    the existing fallback behavior and must not change unless the user opts in.
+    """
+    config = make_config(tmp_path)
+    saves_root = Path(config.emudeck.saves_path)
+    (saves_root / "duckstation/saves").mkdir(parents=True, exist_ok=True)
+
+    client = RommApiClient(config, transport=httpx.MockTransport(_mednafen_download_handler))
+    preview = build_save_sync_preview(config, client)
+    result = execute_save_sync_preview(config, client, preview)
+    client.close()
+
+    assert result.executed == 1
+    assert (saves_root / "Crash Bandicoot.srm").exists()
+    assert not (saves_root / "duckstation/saves/Crash Bandicoot_1.mcd").exists()
+
+
+def test_execute_download_applies_opted_in_cross_core_compat(tmp_path: Path) -> None:
+    """With sync.cross_core_compat = ["mednafen_psx_hw"], a save tagged with that
+    core is treated as DuckStation-compatible (per CROSS_CORE_COMPAT) and lands
+    in duckstation/saves renamed to DuckStation's "<game>_<slot>.mcd" convention.
+    """
+    config = make_config(tmp_path)
+    config.sync.cross_core_compat = ["mednafen_psx_hw"]
+    saves_root = Path(config.emudeck.saves_path)
+    (saves_root / "duckstation/saves").mkdir(parents=True, exist_ok=True)
+
+    client = RommApiClient(config, transport=httpx.MockTransport(_mednafen_download_handler))
+    preview = build_save_sync_preview(config, client)
+    result = execute_save_sync_preview(config, client, preview)
+    client.close()
+
+    assert result.executed == 1
+    destination = saves_root / "duckstation/saves/Crash Bandicoot_1.mcd"
+    assert destination.exists(), list((saves_root / "duckstation/saves").iterdir())
+    assert destination.read_bytes() == b"psx-memcard-bytes"
+    assert not (saves_root / "Crash Bandicoot.srm").exists()

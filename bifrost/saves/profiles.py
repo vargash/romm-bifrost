@@ -115,3 +115,53 @@ PROFILES: tuple[SaveProfile, ...] = (
         supported=False,
     ),
 )
+
+
+@dataclass(frozen=True)
+class CrossCoreCompat:
+    """A manually-verified save-format compatibility mapping.
+
+    Maps a foreign "emulator" tag — as reported by RomM clients other than
+    this Bifrost install, e.g. a mobile RetroArch app sending its libretro
+    core id directly — to a local SaveProfile.romm_emulator this device can
+    substitute it with. Save-file format compatibility across cores must be
+    verified by hand per pair (extension/framing can differ even when the
+    underlying memory-card bytes are the same standard). Never applied
+    automatically: only takes effect when the user opts in via
+    sync.cross_core_compat in config, since a wrong assumption here can
+    corrupt a save file.
+    """
+
+    platform: str
+    source_emulator: str
+    target_emulator: str
+    note: str
+
+
+CROSS_CORE_COMPAT: tuple[CrossCoreCompat, ...] = (
+    # RetroArch's Beetle PSX HW core (mednafen_psx_hw) and DuckStation both
+    # read/write the standard 128KB PS1 per-game memory card image format.
+    CrossCoreCompat(
+        platform="psx",
+        source_emulator="mednafen_psx_hw",
+        target_emulator="duckstation",
+        note="both use the standard 128KB PS1 per-game memory card image",
+    ),
+)
+
+
+def find_cross_core_target(
+    source_emulator: str | None, enabled: list[str]
+) -> CrossCoreCompat | None:
+    """Return the opt-in CrossCoreCompat rule for source_emulator, if any.
+
+    enabled is config.sync.cross_core_compat: the list of foreign emulator
+    tags the user has explicitly confirmed as save-compatible. An empty list
+    (the default) disables all cross-core matching.
+    """
+    if not source_emulator or source_emulator not in enabled:
+        return None
+    for rule in CROSS_CORE_COMPAT:
+        if rule.source_emulator == source_emulator:
+            return rule
+    return None
