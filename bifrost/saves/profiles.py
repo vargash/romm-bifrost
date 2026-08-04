@@ -150,6 +150,21 @@ CROSS_CORE_COMPAT: tuple[CrossCoreCompat, ...] = (
 )
 
 
+def find_cross_core_rule(source_emulator: str | None) -> CrossCoreCompat | None:
+    """Return the known CrossCoreCompat rule for source_emulator, if any.
+
+    This does NOT check opt-in — use find_cross_core_target for that. Useful
+    to tell "no rule exists for this core" apart from "a rule exists but the
+    user hasn't opted in yet" when building advisory messages.
+    """
+    if not source_emulator:
+        return None
+    for rule in CROSS_CORE_COMPAT:
+        if rule.source_emulator == source_emulator:
+            return rule
+    return None
+
+
 def find_cross_core_target(
     source_emulator: str | None, enabled: list[str]
 ) -> CrossCoreCompat | None:
@@ -161,7 +176,4 @@ def find_cross_core_target(
     """
     if not source_emulator or source_emulator not in enabled:
         return None
-    for rule in CROSS_CORE_COMPAT:
-        if rule.source_emulator == source_emulator:
-            return rule
-    return None
+    return find_cross_core_rule(source_emulator)

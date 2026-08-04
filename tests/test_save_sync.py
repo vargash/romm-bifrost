@@ -1199,6 +1199,115 @@ def test_build_save_sync_preview_no_warning_when_single_emulator(tmp_path: Path)
     assert preview.cross_core_warnings == []
 
 
+def test_build_save_sync_preview_warns_on_unrouted_remote_emulator(tmp_path: Path) -> None:
+    """The realistic case: a mobile RetroArch client uploaded a mednafen_psx_hw
+    save straight to RomM. This device only has a duckstation profile locally
+    — the two save files were never scanned together on this filesystem — so
+    _detect_unlinked_cross_core_saves (local-scan-only) can't see the clash.
+    The preview must still warn, from the negotiate response's pending
+    download, that this rom has a server save this device can't place.
+    """
+    config = make_config(tmp_path)
+    saves_root = Path(config.emudeck.saves_path).expanduser()
+    (saves_root / "duckstation/saves").mkdir(parents=True, exist_ok=True)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/roms":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {"id": 10, "name": "Crash Bandicoot", "fs_name": "Crash Bandicoot.zip"}
+                    ],
+                    "total": 1,
+                },
+            )
+        if request.url.path == "/api/saves":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/api/sync/negotiate":
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": 1,
+                    "operations": [
+                        {
+                            "action": "download",
+                            "rom_id": 10,
+                            "save_id": 99,
+                            "file_name": "Crash Bandicoot.srm",
+                            "emulator": "mednafen_psx_hw",
+                            "reason": "Save exists on server but not on client",
+                        }
+                    ],
+                    "total_upload": 0,
+                    "total_download": 1,
+                    "total_conflict": 0,
+                    "total_no_op": 0,
+                },
+            )
+        return httpx.Response(404, json={})
+
+    client = RommApiClient(config, transport=httpx.MockTransport(handler))
+    preview = build_save_sync_preview(config, client)
+    client.close()
+
+    assert len(preview.cross_core_warnings) == 1
+    notice = preview.cross_core_warnings[0]
+    assert "Crash Bandicoot" in notice
+    assert "mednafen_psx_hw" in notice
+    assert "duckstation" in notice
+    assert "cross_core_compat" in notice
+
+
+def test_build_save_sync_preview_no_remote_warning_once_opted_in(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    config.sync.cross_core_compat = ["mednafen_psx_hw"]
+    saves_root = Path(config.emudeck.saves_path).expanduser()
+    (saves_root / "duckstation/saves").mkdir(parents=True, exist_ok=True)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/roms":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {"id": 10, "name": "Crash Bandicoot", "fs_name": "Crash Bandicoot.zip"}
+                    ],
+                    "total": 1,
+                },
+            )
+        if request.url.path == "/api/saves":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/api/sync/negotiate":
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": 1,
+                    "operations": [
+                        {
+                            "action": "download",
+                            "rom_id": 10,
+                            "save_id": 99,
+                            "file_name": "Crash Bandicoot.srm",
+                            "emulator": "mednafen_psx_hw",
+                            "reason": "Save exists on server but not on client",
+                        }
+                    ],
+                    "total_upload": 0,
+                    "total_download": 1,
+                    "total_conflict": 0,
+                    "total_no_op": 0,
+                },
+            )
+        return httpx.Response(404, json={})
+
+    client = RommApiClient(config, transport=httpx.MockTransport(handler))
+    preview = build_save_sync_preview(config, client)
+    client.close()
+
+    assert preview.cross_core_warnings == []
+
+
 def _mednafen_download_handler(request: httpx.Request) -> httpx.Response:
     if request.url.path == "/api/roms":
         return httpx.Response(

@@ -25,7 +25,12 @@ from bifrost.config import AppConfig
 from bifrost.errors import ApiError, ConfigError
 from bifrost.play_sessions import consume_pending_sessions
 from bifrost.saves.layout import EmudeckEsdeLayout, ScannedFile
-from bifrost.saves.profiles import PROFILES, SaveProfile, find_cross_core_target
+from bifrost.saves.profiles import (
+    PROFILES,
+    SaveProfile,
+    find_cross_core_rule,
+    find_cross_core_target,
+)
 
 _log = logging.getLogger("bifrost.save_sync")
 
@@ -519,6 +524,51 @@ def _cross_core_target_filename(name: str, target_profile: SaveProfile) -> str:
     return f"{stem}{ext}"
 
 
+def _detect_unrouted_remote_emulators(
+    operations: list[SyncOperationSchema],
+    rom_names: dict[int, str],
+    known_local_emulators: set[str],
+    enabled_compat: list[str],
+) -> list[str]:
+    """Return advisory messages for pending downloads tagged with a foreign
+    "emulator" (a core/client this device has no local profile for), e.g. a
+    save originally uploaded by a mobile RetroArch client whose core id never
+    appears in a local scan on this machine. Unlike
+    _detect_unlinked_cross_core_saves, this catches the case where the other
+    side of the pair was never scanned locally at all — only reported by
+    RomM in the negotiate response.
+    """
+    warnings: list[str] = []
+    seen: set[tuple[int, str]] = set()
+    for op in operations:
+        if op.action != "download" or not op.emulator:
+            continue
+        if op.emulator in known_local_emulators:
+            continue
+        if find_cross_core_target(op.emulator, enabled_compat) is not None:
+            continue  # opted in already -> will be routed correctly on execute
+        key = (op.rom_id, op.emulator)
+        if key in seen:
+            continue
+        seen.add(key)
+        name = rom_names.get(op.rom_id, f"rom #{op.rom_id}")
+        rule = find_cross_core_rule(op.emulator)
+        if rule is not None:
+            warnings.append(
+                f"{name}: server save tagged '{op.emulator}' has no local profile on "
+                f"this device — known-compatible with {rule.target_emulator} "
+                f"({rule.note}); add \"{op.emulator}\" to sync.cross_core_compat to "
+                "sync it there."
+            )
+        else:
+            warnings.append(
+                f"{name}: server save tagged '{op.emulator}' has no matching local "
+                "profile — it will download to the bare saves root, not a game "
+                "directory, unless a profile or cross-core compat rule is added for it."
+            )
+    return warnings
+
+
 def build_save_sync_preview(
     config: AppConfig,
     client: RommApiClient,
@@ -648,6 +698,22 @@ def build_save_sync_preview(
         for operation in raw_operations
         if operation.save_id not in untracked_save_ids
     ]
+
+    known_local_emulators = {
+        p.romm_emulator for p in PROFILES if p.romm_emulator and p.supported
+    }
+    remote_rom_names = {
+        rom.id: (rom.name or rom.fs_name or f"rom #{rom.id}") for rom in remote_roms
+    }
+    remote_warnings = _detect_unrouted_remote_emulators(
+        filtered_operations,
+        remote_rom_names,
+        known_local_emulators,
+        config.sync.cross_core_compat,
+    )
+    for warning in remote_warnings:
+        _log.warning("cross-core: %s", warning)
+    cross_core_warnings = cross_core_warnings + remote_warnings
 
     return SaveSyncPreview(
         device_id=resolved_device_id,
