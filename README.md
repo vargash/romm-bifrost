@@ -211,6 +211,21 @@ Every automatic trigger that can run `save-sync` on its own, in one place — us
 
 So: play on mobile, close it, launch the same game from ES-DE on the console — the `game-start` hook pulls the latest save from RomM *before* the emulator reads it (up to an 8 s wait). No manual `bifrost save-sync` needed once `bifrost esde-hooks install` has been run and ES-DE's custom event scripts setting is enabled. The other triggers (watcher, 2 h timer, `game-end`/`suspend`/`quit` pushes) exist as a safety net in case a save changes outside of a tracked game session, or the 8 s pull times out.
 
+**Savestates** (`bifrost state-sync`) are *not* covered by any of the above except the 2 h timer — the file watcher explicitly skips them, and no ES-DE hook calls `state-sync`. If you rely on savestates across devices, run `bifrost state-sync --apply` manually or add your own trigger.
+
+### Library sync timing at a glance
+
+Same idea for ROMs/BIOS/assets/gamelist.xml (`bifrost sync` / `bifrost gamelist`) — this is metadata pulled from RomM, not files you generate by playing, so it only needs to run when your RomM library actually changes:
+
+| Trigger | What runs | Fires | Blocking |
+|---|---|---|---|
+| ES-DE `startup` hook | Incremental ROM sync (`--incremental`) + incremental gamelist.xml patch | ES-DE launch | yes — 15 s timeout |
+| ES-DE `startup` hook (background) | Stale-symlink check (`--check-stale`) | ES-DE launch, right after the above | no — backgrounded |
+| `bifrost-sync.timer` | Full `bifrost sync --apply` + full `bifrost gamelist --apply` | boot +2 min, then every 6 h | no — background oneshot |
+| `bifrost sync --apply` / `bifrost gamelist --apply` (manual) | Full symlink + gamelist regeneration, orphan-platform detection | on demand | yes |
+
+The incremental path (ES-DE startup) only picks up ROMs `updated_after` the last run, so it's fast (~300–600 ms) but can drift from a full re-scan over time; the 6 h timer's full sync is the periodic correction for that.
+
 | Unit | Trigger | What it does |
 |------|---------|--------------|
 | `bifrost-sync.timer` | Boot +2 min, then every 6 h | ROM symlinks + gamelist.xml |
