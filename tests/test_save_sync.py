@@ -10,7 +10,7 @@ from click.testing import CliRunner
 
 from bifrost.api.client import RommApiClient
 from bifrost.cli import main
-from bifrost.config import AppConfig, EmudeckConfig, RommConfig
+from bifrost.config import AppConfig, CoreMapping, EmudeckConfig, RommConfig
 from bifrost.save_sync import build_save_sync_preview, execute_save_sync_preview
 
 
@@ -1129,7 +1129,7 @@ def test_build_save_sync_preview_warns_on_unlinked_cross_core_saves(tmp_path: Pa
 
     Bifrost has no way to know a DuckStation .mcd and a RetroArch .srm are the
     same game's save family unless the pair is explicitly opted into
-    sync.cross_core_compat — so this should surface as an advisory notice
+    sync.core_mappings — so this should surface as an advisory notice
     rather than fail silently.
     """
     config = make_config(tmp_path)
@@ -1264,12 +1264,19 @@ def test_build_save_sync_preview_warns_on_unrouted_remote_emulator(tmp_path: Pat
     assert "Crash Bandicoot" in notice
     assert "mednafen_psx_hw" in notice
     assert "duckstation" in notice
-    assert "cross_core_compat" in notice
+    assert "core_mappings" in notice
 
 
 def test_build_save_sync_preview_no_remote_warning_once_opted_in(tmp_path: Path) -> None:
     config = make_config(tmp_path)
-    config.sync.cross_core_compat = ["mednafen_psx_hw"]
+    config.sync.core_mappings = [
+        CoreMapping(
+            platform="psx",
+            remote_core="mednafen_psx_hw",
+            local_emulator="duckstation",
+            expected_size_bytes=131072,
+        )
+    ]
     saves_root = Path(config.emudeck.saves_path).expanduser()
     (saves_root / "duckstation/saves").mkdir(parents=True, exist_ok=True)
 
@@ -1373,7 +1380,7 @@ def _mednafen_download_handler(request: httpx.Request) -> httpx.Response:
 
 
 def test_execute_download_ignores_unmapped_foreign_emulator_by_default(tmp_path: Path) -> None:
-    """Baseline: without opting into sync.cross_core_compat, a save tagged with a
+    """Baseline: without opting into sync.core_mappings, a save tagged with a
     foreign core (mednafen_psx_hw, as a mobile RetroArch client would report it)
     lands in the bare save_root, not inside a local profile directory — this is
     the existing fallback behavior and must not change unless the user opts in.
@@ -1393,12 +1400,20 @@ def test_execute_download_ignores_unmapped_foreign_emulator_by_default(tmp_path:
 
 
 def test_execute_download_applies_opted_in_cross_core_compat(tmp_path: Path) -> None:
-    """With sync.cross_core_compat = ["mednafen_psx_hw"], a save tagged with that
-    core is treated as DuckStation-compatible (per CROSS_CORE_COMPAT) and lands
-    in duckstation/saves renamed to DuckStation's "<game>_<slot>.mcd" convention.
+    """With a sync.core_mappings entry for "mednafen_psx_hw", a save tagged with
+    that core is treated as DuckStation-compatible (per the curated
+    compatible_remote_cores alias) and lands in duckstation/saves renamed to
+    DuckStation's "<game>_<slot>.mcd" convention.
     """
     config = make_config(tmp_path)
-    config.sync.cross_core_compat = ["mednafen_psx_hw"]
+    config.sync.core_mappings = [
+        CoreMapping(
+            platform="psx",
+            remote_core="mednafen_psx_hw",
+            local_emulator="duckstation",
+            expected_size_bytes=131072,
+        )
+    ]
     saves_root = Path(config.emudeck.saves_path)
     (saves_root / "duckstation/saves").mkdir(parents=True, exist_ok=True)
 
@@ -1412,6 +1427,175 @@ def test_execute_download_applies_opted_in_cross_core_compat(tmp_path: Path) -> 
     assert destination.exists(), list((saves_root / "duckstation/saves").iterdir())
     assert destination.read_bytes() == b"psx-memcard-bytes"
     assert not (saves_root / "Crash Bandicoot.srm").exists()
+
+
+def test_execute_download_applies_unverified_custom_core_mapping(tmp_path: Path, caplog) -> None:
+    """A remote_core not among any profile's curated compatible_remote_cores
+    still routes the save (the user explicitly configured it) but is flagged
+    unverified in the warning log — matching extension/size alone doesn't
+    guarantee true byte-compatibility.
+    """
+    config = make_config(tmp_path)
+    config.sync.core_mappings = [
+        CoreMapping(platform="psx", remote_core="some_other_psx_core", local_emulator="duckstation")
+    ]
+    saves_root = Path(config.emudeck.saves_path)
+    (saves_root / "duckstation/saves").mkdir(parents=True, exist_ok=True)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/roms":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {"id": 10, "name": "Crash Bandicoot", "fs_name": "Crash Bandicoot.zip"}
+                    ],
+                    "total": 1,
+                },
+            )
+        if request.url.path == "/api/saves" and request.method == "GET":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/api/sync/negotiate":
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": 1,
+                    "operations": [
+                        {
+                            "action": "download",
+                            "rom_id": 10,
+                            "save_id": 99,
+                            "file_name": "Crash Bandicoot.srm",
+                            "emulator": "some_other_psx_core",
+                            "reason": "Save exists on server but not on client",
+                        }
+                    ],
+                    "total_upload": 0,
+                    "total_download": 1,
+                    "total_conflict": 0,
+                    "total_no_op": 0,
+                },
+            )
+        if request.url.path == "/api/saves/99/content":
+            return httpx.Response(200, content=b"psx-memcard-bytes")
+        if request.url.path == "/api/saves/99/confirm-download":
+            return httpx.Response(200, json={})
+        return httpx.Response(404, json={})
+
+    client = RommApiClient(config, transport=httpx.MockTransport(handler))
+    preview = build_save_sync_preview(config, client)
+    with caplog.at_level("WARNING"):
+        result = execute_save_sync_preview(config, client, preview)
+    client.close()
+
+    assert result.executed == 1
+    destination = saves_root / "duckstation/saves/Crash Bandicoot_1.mcd"
+    assert destination.exists()
+    assert any("Bifrost has no data on" in record.message for record in caplog.records)
+
+
+def test_execute_download_falls_back_when_core_mapping_platform_mismatched(tmp_path: Path) -> None:
+    """An invalid sync.core_mappings entry (platform doesn't match the target
+    profile) behaves like nothing was configured — falls back to the bare
+    save_root instead of raising or silently mis-routing.
+    """
+    config = make_config(tmp_path)
+    config.sync.core_mappings = [
+        CoreMapping(platform="ps2", remote_core="mednafen_psx_hw", local_emulator="duckstation")
+    ]
+    saves_root = Path(config.emudeck.saves_path)
+    (saves_root / "duckstation/saves").mkdir(parents=True, exist_ok=True)
+
+    client = RommApiClient(config, transport=httpx.MockTransport(_mednafen_download_handler))
+    preview = build_save_sync_preview(config, client)
+    result = execute_save_sync_preview(config, client, preview)
+    client.close()
+
+    assert result.executed == 1
+    assert (saves_root / "Crash Bandicoot.srm").exists()
+    assert not (saves_root / "duckstation/saves/Crash Bandicoot_1.mcd").exists()
+
+
+def test_execute_download_falls_back_when_core_mapping_targets_unsupported_profile(
+    tmp_path: Path,
+) -> None:
+    """local_emulator pointing at a recognised-but-unsupported profile (e.g.
+    pcsx2) is rejected by resolve_core_mapping and falls back to the bare root.
+    """
+    config = make_config(tmp_path)
+    config.sync.core_mappings = [
+        CoreMapping(platform="psx", remote_core="mednafen_psx_hw", local_emulator="pcsx2")
+    ]
+    saves_root = Path(config.emudeck.saves_path)
+    (saves_root / "duckstation/saves").mkdir(parents=True, exist_ok=True)
+
+    client = RommApiClient(config, transport=httpx.MockTransport(_mednafen_download_handler))
+    preview = build_save_sync_preview(config, client)
+    result = execute_save_sync_preview(config, client, preview)
+    client.close()
+
+    assert result.executed == 1
+    assert (saves_root / "Crash Bandicoot.srm").exists()
+
+
+def test_detect_unrouted_remote_emulators_warns_distinctly_for_invalid_configured_mapping(
+    tmp_path: Path,
+) -> None:
+    """A configured-but-invalid mapping produces different advisory text than
+    "nothing configured" — the user misconfigured something rather than simply
+    forgetting to opt in, and the message should say so.
+    """
+    config = make_config(tmp_path)
+    config.sync.core_mappings = [
+        CoreMapping(platform="ps2", remote_core="mednafen_psx_hw", local_emulator="duckstation")
+    ]
+    saves_root = Path(config.emudeck.saves_path).expanduser()
+    (saves_root / "duckstation/saves").mkdir(parents=True, exist_ok=True)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/roms":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {"id": 10, "name": "Crash Bandicoot", "fs_name": "Crash Bandicoot.zip"}
+                    ],
+                    "total": 1,
+                },
+            )
+        if request.url.path == "/api/saves":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/api/sync/negotiate":
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": 1,
+                    "operations": [
+                        {
+                            "action": "download",
+                            "rom_id": 10,
+                            "save_id": 99,
+                            "file_name": "Crash Bandicoot.srm",
+                            "emulator": "mednafen_psx_hw",
+                            "reason": "Save exists on server but not on client",
+                        }
+                    ],
+                    "total_upload": 0,
+                    "total_download": 1,
+                    "total_conflict": 0,
+                    "total_no_op": 0,
+                },
+            )
+        return httpx.Response(404, json={})
+
+    client = RommApiClient(config, transport=httpx.MockTransport(handler))
+    preview = build_save_sync_preview(config, client)
+    client.close()
+
+    assert len(preview.cross_core_warnings) == 1
+    notice = preview.cross_core_warnings[0]
+    assert "invalid" in notice
+    assert "platform mismatch" in notice
 
 
 def test_build_save_sync_preview_resync_bypasses_server_negotiate(tmp_path: Path) -> None:
@@ -1602,7 +1786,14 @@ def test_execute_download_truncates_cross_core_trailer_to_expected_size(tmp_path
     compat rule's expected_size_bytes must truncate the trailer before writing.
     """
     config = make_config(tmp_path)
-    config.sync.cross_core_compat = ["mednafen_psx_hw"]
+    config.sync.core_mappings = [
+        CoreMapping(
+            platform="psx",
+            remote_core="mednafen_psx_hw",
+            local_emulator="duckstation",
+            expected_size_bytes=131072,
+        )
+    ]
     saves_root = Path(config.emudeck.saves_path)
     (saves_root / "duckstation/saves").mkdir(parents=True, exist_ok=True)
 
