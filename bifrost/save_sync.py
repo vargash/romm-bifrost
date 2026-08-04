@@ -325,6 +325,30 @@ def _find_device_sync(save: SaveSummary, device_id: str) -> DeviceSyncSchema | N
     return next((ds for ds in save.device_syncs if ds.device_id == device_id), None)
 
 
+def _find_save_by_content_hash(
+    client: RommApiClient, rom_id: int, slot: str | None, content_hash: str
+) -> SaveSummary | None:
+    """Look up an existing save for (rom_id, slot) with the same content_hash,
+    regardless of emulator.
+
+    RomM's own POST /api/saves dedups on (user, rom_id, content_hash, slot) —
+    emulator is not part of that key — and when it finds a match it silently
+    discards the uploaded bytes and returns the existing row *without* linking
+    this device via DeviceSaveSync (that link is only created on the code path
+    that actually creates a new row). Checking here first lets the caller use
+    a PUT-based link (see RommApiClient.link_save_for_device) instead of a
+    POST that would just be discarded again — otherwise this device's local
+    file can permanently look "out of sync" even though the content already
+    exists on the server under a different emulator tag.
+    """
+    if not slot:
+        return None
+    for save in client.list_saves(rom_id=rom_id, slot=slot):
+        if save.content_hash and save.content_hash.lower() == content_hash.lower():
+            return save
+    return None
+
+
 def _is_redundant_upload_operation(
     operation: SyncOperationSchema,
     local_state: ClientSaveState | None,
@@ -907,6 +931,23 @@ def execute_save_sync_preview(
                 _upload_name = _upload_file_name(
                     local_file, _source_profile, preview.rom_index.get(operation.rom_id)
                 )
+
+                # If the server already has this exact content for this (rom_id, slot)
+                # under any emulator, POSTing it again would just be silently discarded
+                # by RomM's own dedup without linking this device — see
+                # _find_save_by_content_hash. Link directly instead of uploading bytes
+                # that would never actually land.
+                _existing_by_hash = _find_save_by_content_hash(
+                    client, operation.rom_id, operation.slot, local_file.content_hash
+                )
+                if _existing_by_hash is not None:
+                    client.link_save_for_device(_existing_by_hash.id, preview.device_id)
+                    completed += 1
+                    details.append(
+                        ("upload", operation.file_name, "linked (content already on server)")
+                    )
+                    continue
+
                 try:
                     upload_result = client.upload_save_file(
                         rom_id=operation.rom_id,
