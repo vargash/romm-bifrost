@@ -1477,6 +1477,59 @@ def test_build_save_sync_preview_resync_bypasses_server_negotiate(tmp_path: Path
     assert op.file_name == "Klonoa.srm"
 
 
+def test_build_save_sync_preview_resync_matches_duckstation_slot_suffix(tmp_path: Path) -> None:
+    """_save_lookup_key (used by --resync's local-only reconciliation) must strip
+    DuckStation's local "_N" slot suffix the same way _upload_file_name strips it
+    before uploading — otherwise a local "Game_1.mcd" never matches the server's
+    bare "Game.mcd" and --resync treats an already-synced DuckStation save as
+    permanently new, re-uploading it every run.
+    """
+    config = make_config(tmp_path)
+    saves_root = Path(config.emudeck.saves_path).expanduser()
+    (saves_root / "duckstation/saves").mkdir(parents=True, exist_ok=True)
+    local_save = saves_root / "duckstation/saves/Klonoa - Door to Phantomile (USA)_1.mcd"
+    local_save.write_bytes(b"same-content")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/roms":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "id": 10,
+                            "name": "Klonoa - Door to Phantomile (USA)",
+                            "fs_name": "Klonoa - Door to Phantomile (USA).zip",
+                        }
+                    ],
+                    "total": 1,
+                },
+            )
+        if request.url.path == "/api/saves" and request.method == "GET":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 99,
+                        "rom_id": 10,
+                        "file_name": "Klonoa - Door to Phantomile (USA) [2026-08-04_10-08-27].mcd",
+                        "updated_at": "2026-08-04T10:08:27Z",
+                        "emulator": "duckstation",
+                        "slot": "autosave",
+                        "content_hash": hashlib.md5(b"same-content").hexdigest(),
+                        "device_syncs": [],
+                    }
+                ],
+            )
+        return httpx.Response(404, json={})
+
+    client = RommApiClient(config, transport=httpx.MockTransport(handler), no_cache=True)
+    preview = build_save_sync_preview(config, client, force_resync=True)
+    client.close()
+
+    assert preview.operations == [], preview.operations
+
+
 def test_build_save_sync_preview_resync_still_warns_on_unrouted_remote_emulator(
     tmp_path: Path,
 ) -> None:
@@ -1813,6 +1866,127 @@ def test_execute_upload_strips_local_slot_suffix_for_duckstation(tmp_path: Path)
     # local file on disk untouched
     assert local_save.exists()
     assert local_save.read_bytes() == b"local-save-data"
+
+
+def test_execute_upload_links_instead_of_reposting_when_content_already_on_server(
+    tmp_path: Path,
+) -> None:
+    """RomM's POST /api/saves dedups on (user, rom_id, content_hash, slot) —
+    ignoring emulator — and when it matches, it discards the uploaded bytes and
+    returns the existing row *without* creating a DeviceSaveSync for this
+    device (that link is only made on the fresh-row path). If bifrost just
+    POSTs blindly, this device's negotiate state never converges: it looks
+    "out of sync" forever even though the content already exists on the server
+    under a different emulator tag (e.g. a foreign mednafen_psx_hw save with
+    byte-identical content to what DuckStation just produced). Bifrost must
+    detect this via a pre-check and PUT-link to the existing save instead of
+    POSTing content that would just be silently discarded again.
+    """
+    config = make_config(tmp_path)
+    saves_root = Path(config.emudeck.saves_path).expanduser()
+    (saves_root / "duckstation/saves").mkdir(parents=True, exist_ok=True)
+    local_save = saves_root / "duckstation/saves/Klonoa - Door to Phantomile (USA)_1.mcd"
+    local_save.write_bytes(b"local-save-data")
+    local_hash = hashlib.md5(b"local-save-data").hexdigest()
+
+    post_calls = 0
+    put_calls: list[tuple[str, dict[str, str]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal post_calls
+        if request.url.path == "/api/roms":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "id": 10,
+                            "name": "Klonoa - Door to Phantomile (USA)",
+                            "fs_name": "Klonoa - Door to Phantomile (USA).zip",
+                        }
+                    ],
+                    "total": 1,
+                },
+            )
+        if request.url.path == "/api/saves" and request.method == "GET":
+            # Existing save for the same (rom_id, slot) but a different emulator,
+            # with content_hash matching what DuckStation is about to upload.
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 99,
+                        "rom_id": 10,
+                        "file_name": "Klonoa - Door to Phantomile (USA).srm",
+                        "updated_at": "2026-08-03T21:19:47Z",
+                        "emulator": "mednafen_psx_hw",
+                        "slot": "autosave",
+                        "content_hash": local_hash,
+                        "device_syncs": [],
+                    }
+                ],
+            )
+        if request.url.path == "/api/sync/negotiate":
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": 1,
+                    "operations": [
+                        {
+                            "action": "upload",
+                            "rom_id": 10,
+                            "save_id": None,
+                            "file_name": "Klonoa - Door to Phantomile (USA)_1.mcd",
+                            "slot": "autosave",
+                            "reason": "New save",
+                        }
+                    ],
+                    "total_upload": 1,
+                    "total_download": 0,
+                    "total_conflict": 0,
+                    "total_no_op": 0,
+                },
+            )
+        if request.url.path == "/api/saves" and request.method == "POST":
+            post_calls += 1
+            return httpx.Response(
+                200,
+                json={
+                    "id": 100,
+                    "rom_id": 10,
+                    "file_name": "Klonoa - Door to Phantomile (USA).mcd",
+                    "updated_at": "2026-08-04T00:00:00Z",
+                },
+            )
+        if request.url.path == "/api/saves/99" and request.method == "PUT":
+            put_calls.append((request.content.decode("utf-8", "replace"), dict(request.url.params)))
+            return httpx.Response(
+                200,
+                json={
+                    "id": 99,
+                    "rom_id": 10,
+                    "file_name": "Klonoa - Door to Phantomile (USA).srm",
+                    "updated_at": "2026-08-03T21:19:47Z",
+                },
+            )
+        return httpx.Response(404, json={})
+
+    client = RommApiClient(config, transport=httpx.MockTransport(handler), no_cache=True)
+    preview = build_save_sync_preview(config, client)
+    result = execute_save_sync_preview(config, client, preview)
+    client.close()
+
+    assert result.executed == 1, result.details
+    assert post_calls == 0, "must not re-POST content the server already has under another emulator"
+    assert len(put_calls) == 1
+    put_body, put_params = put_calls[0]
+    assert put_body == "", "PUT must not attach a file — no bytes need re-uploading"
+    assert put_params.get("device_id") == "device-1"
+    assert result.details[0] == (
+        "upload",
+        "Klonoa - Door to Phantomile (USA)_1.mcd",
+        "linked (content already on server)",
+    )
 
 
 def test_execute_download_restores_local_slot_suffix_for_duckstation(tmp_path: Path) -> None:

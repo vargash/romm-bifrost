@@ -194,6 +194,38 @@ bifrost debug saves
 
 Bifrost ships with five systemd **user** services (no root required) that make sync fully automatic on a console-style device.
 
+### Save-sync timing at a glance
+
+Every automatic trigger that can run `save-sync` on its own, in one place — useful when you're not calling `bifrost save-sync` manually at all (e.g. playing purely through ES-DE):
+
+| Trigger | Direction | Fires | Blocking |
+|---|---|---|---|
+| ES-DE `game-start` hook | download only | the moment you launch a game | yes — blocks launch up to 8 s, fail-open (game starts anyway on timeout) |
+| ES-DE `game-end` hook | upload only | the moment you quit a game | no — backgrounded |
+| ES-DE `suspend` hook | upload only | device suspend | no — backgrounded |
+| ES-DE `quit`/`poweroff`/`reboot` hooks | full push/pull | ES-DE quit, shutdown, reboot | yes — up to 30 s, fail-open |
+| ES-DE `startup` hook | full push/pull | ES-DE launch | no — backgrounded (only the 15 s incremental *ROM* sync blocks startup) |
+| Save file watcher (`bifrost-save-watch.service`) | full push/pull | 15 s after the last local save file change (60 s cooldown between runs) | no — always-running background daemon |
+| `bifrost-save-sync.timer` | full push/pull | boot +3 min, then every 2 h | no — background oneshot |
+| `bifrost save-sync --apply` | whatever `[sync].direction` says | on demand | yes |
+
+So: play on mobile, close it, launch the same game from ES-DE on the console — the `game-start` hook pulls the latest save from RomM *before* the emulator reads it (up to an 8 s wait). No manual `bifrost save-sync` needed once `bifrost esde-hooks install` has been run and ES-DE's custom event scripts setting is enabled. The other triggers (watcher, 2 h timer, `game-end`/`suspend`/`quit` pushes) exist as a safety net in case a save changes outside of a tracked game session, or the 8 s pull times out.
+
+**Savestates** (`bifrost state-sync`) are *not* covered by any of the above except the 2 h timer — the file watcher explicitly skips them, and no ES-DE hook calls `state-sync`. If you rely on savestates across devices, run `bifrost state-sync --apply` manually or add your own trigger.
+
+### Library sync timing at a glance
+
+Same idea for ROMs/BIOS/assets/gamelist.xml (`bifrost sync` / `bifrost gamelist`) — this is metadata pulled from RomM, not files you generate by playing, so it only needs to run when your RomM library actually changes:
+
+| Trigger | What runs | Fires | Blocking |
+|---|---|---|---|
+| ES-DE `startup` hook | Incremental ROM sync (`--incremental`) + incremental gamelist.xml patch | ES-DE launch | yes — 15 s timeout |
+| ES-DE `startup` hook (background) | Stale-symlink check (`--check-stale`) | ES-DE launch, right after the above | no — backgrounded |
+| `bifrost-sync.timer` | Full `bifrost sync --apply` + full `bifrost gamelist --apply` | boot +2 min, then every 6 h | no — background oneshot |
+| `bifrost sync --apply` / `bifrost gamelist --apply` (manual) | Full symlink + gamelist regeneration, orphan-platform detection | on demand | yes |
+
+The incremental path (ES-DE startup) only picks up ROMs `updated_after` the last run, so it's fast (~300–600 ms) but can drift from a full re-scan over time; the 6 h timer's full sync is the periodic correction for that.
+
 | Unit | Trigger | What it does |
 |------|---------|--------------|
 | `bifrost-sync.timer` | Boot +2 min, then every 6 h | ROM symlinks + gamelist.xml |
@@ -229,20 +261,25 @@ Uninstall:
 bifrost systemd uninstall
 ```
 
-### ES-DE startup hooks
+### ES-DE event hooks
 
-For zero-perceptible-delay sync directly from ES-DE (no systemd required), install the ES-DE event hooks:
+For save-sync that's tied to actually playing (not just a timer), install the ES-DE custom event scripts — this also needs *Main menu → Other settings → Enable custom event scripts* turned on in ES-DE itself:
 
 ```bash
 bifrost esde-hooks install
 ```
 
-This writes `~/.emulationstation/scripts/game-start/bifrost.sh` and `~/.emulationstation/scripts/startup/bifrost.sh`. The startup hook launches two background jobs the moment ES-DE starts — before the UI is drawn:
+This writes one script per ES-DE lifecycle event under `~/ES-DE/scripts/<event>/` (override with `--scripts-path`):
 
-- `bifrost sync --apply --incremental --quiet` — fetches only ROMs updated since last run and applies any new/changed symlinks + gamelist entries
-- `bifrost sync --check-stale --quiet` — diffs the current ROM identifier set against the cached one and removes stale symlinks for deleted ROMs
+| Event | Script | What it does |
+|---|---|---|
+| `startup` | `10-bifrost-sync.sh` | Blocking 15 s incremental ROM sync, then backgrounds a stale-symlink check and a full save-sync |
+| `game-start` | `10-bifrost-pull.sh` | Blocking, **download-only** save-sync scoped to the launched ROM, 8 s timeout |
+| `game-end` | `10-bifrost-push.sh` | Backgrounded, **upload-only** save-sync scoped to the ROM just played |
+| `suspend` | `10-bifrost-push.sh` | Backgrounded, upload-only save-sync (best-effort) |
+| `quit` / `poweroff` / `reboot` | `10-bifrost-flush.sh` | Blocking, full push/pull save-sync, 30 s timeout |
 
-Both run via `setsid ... &` so they never block ES-DE startup. On a stable library (nothing changed), the incremental path completes in ~300 ms; with 5 ROM changes it takes ~600 ms — invisible to the user.
+Every hook is fail-open: on timeout or error it exits `0` so ES-DE / the game / the shutdown is never blocked or aborted by a sync problem. `--rom-path`-scoped hooks (`game-start`, `game-end`) also record play-session timestamps used for save-sync bookkeeping.
 
 ```bash
 # Verify hooks are installed

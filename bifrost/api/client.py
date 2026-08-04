@@ -399,6 +399,28 @@ class RommApiClient:
         except ApiError as exc:
             _log.warning("track_save_for_device: save_id=%d failed (%s); continuing", save_id, exc)
 
+    def link_save_for_device(self, save_id: int, device_id: str) -> dict[str, Any]:
+        """PUT /api/saves/{id}?device_id=... with no file attached.
+
+        RomM's POST /api/saves upload endpoint dedupes by (user, rom_id,
+        content_hash, slot) — ignoring emulator — and when a match is found it
+        discards the uploaded bytes and returns the existing row *without*
+        creating a DeviceSaveSync for the uploading device (that link is only
+        established further down the same function, on the non-dedup path). A
+        plain PUT (server-side: update_save) always upserts the device's sync
+        regardless of whether a file is attached, so it's the correct way to
+        link this device to a save whose content it already knows the server
+        has, without re-uploading bytes that would just be discarded again.
+        """
+        data = self._request_json(
+            "PUT",
+            f"/api/saves/{save_id}",
+            params={"device_id": device_id},
+        )
+        if not isinstance(data, dict):
+            raise ApiError("Unexpected response type for save link")
+        return data
+
     def confirm_save_download(self, save_id: int, device_id: str) -> dict[str, Any]:
         data = self._request_json(
             "POST",
@@ -822,10 +844,19 @@ class RommApiClient:
             json=payload.model_dump(mode="python", exclude_none=True),
         )
 
-    def list_saves(self, device_id: str | None = None) -> list[SaveSummary]:
+    def list_saves(
+        self,
+        device_id: str | None = None,
+        rom_id: int | None = None,
+        slot: str | None = None,
+    ) -> list[SaveSummary]:
         params: dict[str, Any] = {}
         if device_id:
             params["device_id"] = device_id
+        if rom_id is not None:
+            params["rom_id"] = rom_id
+        if slot:
+            params["slot"] = slot
         data = self._request_json("GET", "/api/saves", params=params)
         if not isinstance(data, list):
             raise ApiError("Unexpected response type for /api/saves")

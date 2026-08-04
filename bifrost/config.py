@@ -110,7 +110,7 @@ class SyncConfig(BaseModel):
     # save-compatible with one of its local profiles — see
     # bifrost.saves.profiles.CROSS_CORE_COMPAT. Empty by default: cross-core
     # save compatibility must be verified manually before enabling, since a
-    # wrong assumption can corrupt a save file.
+    # wrong assumption here can corrupt a save file.
     cross_core_compat: list[str] = Field(default_factory=list)
 
 
