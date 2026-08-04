@@ -49,6 +49,48 @@ def test_config_set_updates_single_value(tmp_path: Path) -> None:
     assert cfg.romm.url == "http://new.local"
 
 
+def test_config_set_parses_comma_separated_list_value(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    save_config(
+        AppConfig(romm=RommConfig(url="http://romm.local", client_token="rmm_token")),
+        config_path,
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "config",
+            "set",
+            "sync.cross_core_compat",
+            "mednafen_psx_hw, other_core",
+            "--config",
+            str(config_path),
+        ],
+    )
+
+    assert result.exit_code == EXIT_OK, result.output
+    cfg = load_config(config_path)
+    assert cfg.sync.cross_core_compat == ["mednafen_psx_hw", "other_core"]
+
+
+def test_config_set_empty_string_clears_list_value(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    base = AppConfig(romm=RommConfig(url="http://romm.local", client_token="rmm_token"))
+    base.sync.cross_core_compat = ["mednafen_psx_hw"]
+    save_config(base, config_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["config", "set", "sync.cross_core_compat", "", "--config", str(config_path)],
+    )
+
+    assert result.exit_code == EXIT_OK, result.output
+    cfg = load_config(config_path)
+    assert cfg.sync.cross_core_compat == []
+
+
 def test_config_set_rejects_unknown_key(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     save_config(

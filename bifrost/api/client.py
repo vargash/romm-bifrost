@@ -322,9 +322,16 @@ class RommApiClient:
         autocleanup_limit: int = 3,
         emulator: str | None = None,
         slot: str | None = None,
+        upload_file_name: str | None = None,
     ) -> dict[str, Any]:
+        """upload_file_name overrides the name reported to RomM (default:
+        save_path.name) without touching the file on disk — used to upload
+        under a canonical name that differs from this device's local naming
+        convention (see bifrost.save_sync._upload_file_name)."""
         with save_path.open("rb") as handle:
-            files = {"saveFile": (save_path.name, handle, "application/octet-stream")}
+            files = {
+                "saveFile": (upload_file_name or save_path.name, handle, "application/octet-stream")
+            }
             if save_id is not None:
                 put_params: dict[str, Any] = {}
                 if device_id:
@@ -358,7 +365,7 @@ class RommApiClient:
             raise ApiError("Unexpected response type for save upload")
         _log.debug(
             "upload_save_file response: file=%s save_id=%s content_hash=%s",
-            save_path.name,
+            upload_file_name or save_path.name,
             data.get("id"),
             data.get("content_hash"),
         )
