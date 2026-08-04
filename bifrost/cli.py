@@ -121,6 +121,7 @@ def _abort_on_preflight(result: PreflightResult, console: Console) -> None:
 
 
 @click.group(help="Bifrost: RomM <-> ES-DE bridge CLI")
+@click.version_option(version=_bifrost_version, prog_name="bifrost")
 def main() -> None:
     """Main CLI group."""
 
@@ -1749,6 +1750,106 @@ def state_sync(
     raise SystemExit(EXIT_OK)
 
 
+def _enroll_device(
+    console: Console,
+    config: AppConfig,
+    resolved_path: Path,
+    *,
+    replace: bool,
+    name: str | None,
+    platform: str | None,
+    client_name: str | None,
+    client_version: str | None,
+    hostname: str | None,
+    allow_duplicate: bool,
+    allow_existing: bool,
+    reset_syncs: bool,
+) -> AppConfig:
+    """Register this machine in RomM, persist the returned device ID, and return updated config."""
+
+    if config.romm.device_id and not replace:
+        console.print(
+            "[yellow]Existing device_id found in config.[/yellow] Use --replace to re-enroll."
+        )
+        raise SystemExit(EXIT_CONFIG_ERROR)
+
+    hostname_value = (hostname or sys_platform.node() or "bifrost").strip()
+    device_name_value = (
+        name or Prompt.ask("Device name", default=f"Bifrost on {hostname_value}")
+    ).strip()
+    platform_value = (
+        platform or Prompt.ask("Device platform", default=sys_platform.system().lower())
+    ).strip()
+    client_value = (client_name or Prompt.ask("Client name", default="bifrost")).strip()
+    client_version_value = (
+        client_version or Prompt.ask("Client version", default=_bifrost_version)
+    ).strip()
+    hostname_reported = (hostname or Prompt.ask("Hostname", default=hostname_value)).strip()
+
+    mac_address_value = _get_mac_address()
+    existing_device_id = config.romm.device_id  # non-empty only if previously enrolled
+
+    try:
+        with RommApiClient(config, timeout_seconds=config.romm.timeout_seconds) as client:
+            response = client.register_device(
+                DeviceCreatePayload(
+                    name=device_name_value,
+                    platform=platform_value,
+                    client=client_value,
+                    client_version=client_version_value,
+                    hostname=hostname_reported,
+                    mac_address=mac_address_value,
+                    sync_mode="api",
+                    allow_existing=allow_existing,
+                    allow_duplicate=allow_duplicate,
+                    reset_syncs=reset_syncs,
+                )
+            )
+            # POST with allow_existing returns the existing device without updating its fields.
+            # If the config already had this device_id, the device pre-existed → PUT to sync.
+            if existing_device_id and existing_device_id == response.device_id:
+                client.update_device(
+                    response.device_id,
+                    DeviceUpdatePayload(
+                        name=device_name_value,
+                        platform=platform_value,
+                        client=client_value,
+                        client_version=client_version_value,
+                        hostname=hostname_reported,
+                        mac_address=mac_address_value,
+                        sync_mode="api",
+                    ),
+                )
+    except AuthenticationError as exc:
+        console.print(f"[red]Authentication error:[/red] {exc}")
+        raise SystemExit(EXIT_AUTH_ERROR) from exc
+    except (NetworkError, ApiError) as exc:
+        console.print(f"[red]API error:[/red] {exc}")
+        raise SystemExit(EXIT_API_ERROR) from exc
+
+    updated_config = config.model_copy(
+        update={
+            "romm": config.romm.model_copy(update={"device_id": response.device_id}),
+        }
+    )
+    save_config(updated_config, resolved_path)
+
+    table = Table(title="Bifrost Device Enrollment")
+    table.add_column("Field")
+    table.add_column("Value")
+    table.add_row("Config file", str(resolved_path))
+    table.add_row("Device ID", response.device_id)
+    table.add_row("Device name", device_name_value)
+    table.add_row("Platform", platform_value)
+    table.add_row("Client", client_value)
+    table.add_row("Version", client_version_value)
+    table.add_row("Hostname", hostname_reported)
+    table.add_row("Sync mode", "api")
+    console.print(table)
+    console.print("[green]Device enrollment saved to config.[/green]")
+    return updated_config
+
+
 @main.command(name="device-enroll", help="Register this machine in RomM and store its device_id.")
 @click.option(
     "--config",
@@ -1831,86 +1932,20 @@ def device_enroll(
         console.print(f"[red]Configuration error:[/red] {exc}")
         raise SystemExit(EXIT_CONFIG_ERROR) from exc
 
-    if config.romm.device_id and not replace:
-        console.print(
-            "[yellow]Existing device_id found in config.[/yellow] Use --replace to re-enroll."
-        )
-        raise SystemExit(EXIT_CONFIG_ERROR)
-
-    hostname_value = (hostname or sys_platform.node() or "bifrost").strip()
-    device_name_value = (
-        name or Prompt.ask("Device name", default=f"Bifrost on {hostname_value}")
-    ).strip()
-    platform_value = (
-        platform or Prompt.ask("Device platform", default=sys_platform.system().lower())
-    ).strip()
-    client_value = (client_name or Prompt.ask("Client name", default="bifrost")).strip()
-    client_version_value = (
-        client_version or Prompt.ask("Client version", default=_bifrost_version)
-    ).strip()
-    hostname_reported = (hostname or Prompt.ask("Hostname", default=hostname_value)).strip()
-
-    mac_address_value = _get_mac_address()
-    existing_device_id = config.romm.device_id  # non-empty only if previously enrolled
-
-    try:
-        with RommApiClient(config, timeout_seconds=config.romm.timeout_seconds) as client:
-            response = client.register_device(
-                DeviceCreatePayload(
-                    name=device_name_value,
-                    platform=platform_value,
-                    client=client_value,
-                    client_version=client_version_value,
-                    hostname=hostname_reported,
-                    mac_address=mac_address_value,
-                    sync_mode="api",
-                    allow_existing=allow_existing,
-                    allow_duplicate=allow_duplicate,
-                    reset_syncs=reset_syncs,
-                )
-            )
-            # POST with allow_existing returns the existing device without updating its fields.
-            # If the config already had this device_id, the device pre-existed → PUT to sync.
-            if existing_device_id and existing_device_id == response.device_id:
-                client.update_device(
-                    response.device_id,
-                    DeviceUpdatePayload(
-                        name=device_name_value,
-                        platform=platform_value,
-                        client=client_value,
-                        client_version=client_version_value,
-                        hostname=hostname_reported,
-                        mac_address=mac_address_value,
-                        sync_mode="api",
-                    ),
-                )
-    except AuthenticationError as exc:
-        console.print(f"[red]Authentication error:[/red] {exc}")
-        raise SystemExit(EXIT_AUTH_ERROR) from exc
-    except (NetworkError, ApiError) as exc:
-        console.print(f"[red]API error:[/red] {exc}")
-        raise SystemExit(EXIT_API_ERROR) from exc
-
-    updated_config = config.model_copy(
-        update={
-            "romm": config.romm.model_copy(update={"device_id": response.device_id}),
-        }
+    _enroll_device(
+        console,
+        config,
+        resolved_path,
+        replace=replace,
+        name=name,
+        platform=platform,
+        client_name=client_name,
+        client_version=client_version,
+        hostname=hostname,
+        allow_duplicate=allow_duplicate,
+        allow_existing=allow_existing,
+        reset_syncs=reset_syncs,
     )
-    save_config(updated_config, resolved_path)
-
-    table = Table(title="Bifrost Device Enrollment")
-    table.add_column("Field")
-    table.add_column("Value")
-    table.add_row("Config file", str(resolved_path))
-    table.add_row("Device ID", response.device_id)
-    table.add_row("Device name", device_name_value)
-    table.add_row("Platform", platform_value)
-    table.add_row("Client", client_value)
-    table.add_row("Version", client_version_value)
-    table.add_row("Hostname", hostname_reported)
-    table.add_row("Sync mode", "api")
-    console.print(table)
-    console.print("[green]Device enrollment saved to config.[/green]")
     raise SystemExit(EXIT_OK)
 
 
@@ -1972,6 +2007,11 @@ def device_enroll(
     help="EmuDeck media destination path for asset symlinks.",
 )
 @click.option("--emudeck-saves-path", type=str, default=None, help="EmuDeck saves root path.")
+@click.option(
+    "--enroll-device",
+    is_flag=True,
+    help="Also enroll this device with RomM after saving config (needed for save sync).",
+)
 def setup(
     romm_url: str | None,
     client_token: str | None,
@@ -1988,6 +2028,7 @@ def setup(
     emudeck_bios_path: str | None,
     emudeck_media_path: str | None,
     emudeck_saves_path: str | None,
+    enroll_device: bool,
 ) -> None:
     """Run setup using wizard defaults or CLI options."""
 
@@ -2020,6 +2061,7 @@ def setup(
             emudeck_media_path,
             emudeck_saves_path,
             skip_verify,
+            enroll_device,
         ]
     )
 
@@ -2258,6 +2300,32 @@ def setup(
 
     save_path = save_config(config, resolved_path)
     console.print(f"[green]Configuration saved:[/green] {save_path}")
+
+    if not config.romm.device_id:
+        if use_interactive_wizard:
+            should_enroll = Confirm.ask(
+                "Enroll this device with RomM now (required for save sync)",
+                default=True,
+            )
+        else:
+            should_enroll = enroll_device
+
+        if should_enroll:
+            _enroll_device(
+                console,
+                config,
+                resolved_path,
+                replace=False,
+                name=None,
+                platform=None,
+                client_name=None,
+                client_version=None,
+                hostname=None,
+                allow_duplicate=False,
+                allow_existing=True,
+                reset_syncs=False,
+            )
+
     raise SystemExit(EXIT_OK)
 
 
