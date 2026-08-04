@@ -608,7 +608,9 @@ def config_set(key: str, value: str, config_path: Path | None) -> None:
     help="Declare a cross-core save compatibility mapping (see README).",
 )
 @click.option(
-    "--remote-core", required=True, help="Foreign core/emulator tag as reported by RomM."
+    "--remote-core",
+    default=None,
+    help="Foreign core/emulator tag as reported by RomM. Omit to be prompted interactively.",
 )
 @click.option("--local-emulator", default=None, help="Local profile to route matching saves to.")
 @click.option("--platform", "platform_", default=None, help="Platform this mapping applies to.")
@@ -620,7 +622,7 @@ def config_set(key: str, value: str, config_path: Path | None) -> None:
 )
 @config_path_option
 def config_add_core_mapping(
-    remote_core: str,
+    remote_core: str | None,
     local_emulator: str | None,
     platform_: str | None,
     expected_size_bytes: int | None,
@@ -632,7 +634,54 @@ def config_add_core_mapping(
     console = Console()
     loaded, resolved_path = load_config_or_exit(console, config_path)
 
-    if local_emulator is None or platform_ is None:
+    if remote_core is None:
+        known_platforms = sorted({p.platform for p in PROFILES if p.platform != "multi"})
+        console.print(f"Known platforms: {', '.join(known_platforms)} (or any other slug).")
+        platform_ = platform_ or Prompt.ask("Platform this mapping applies to")
+
+        remote_core = Prompt.ask(
+            "Remote/source core slug, as reported by RomM (e.g. mednafen_psx_hw)"
+        )
+        curated = find_compatible_profile(remote_core)
+        default_target = None
+        if curated is not None:
+            curated_profile, curated_alias = curated
+            console.print(
+                f"[green]Bifrost knows this core:[/green] compatible with "
+                f"'{curated_profile.romm_emulator}' ({curated_alias.note})"
+            )
+            default_target = curated_profile.romm_emulator
+
+        candidates = sorted(
+            {
+                p.romm_emulator
+                for p in PROFILES
+                if p.supported and p.romm_emulator and p.platform in (platform_, "multi")
+            }
+        )
+        if candidates:
+            console.print(f"Local profiles for platform {platform_!r}: {', '.join(candidates)}")
+        local_emulator = local_emulator or Prompt.ask(
+            "Local emulator to route these saves to", default=default_target
+        )
+        if not local_emulator:
+            console.print("[red]Configuration error:[/red] a local emulator is required.")
+            raise SystemExit(EXIT_CONFIG_ERROR)
+
+        if expected_size_bytes is None and curated is None:
+            size_answer = Prompt.ask(
+                "Expected raw save size in bytes, to truncate downloads to (blank to skip)",
+                default="",
+            )
+            if size_answer.strip():
+                try:
+                    expected_size_bytes = int(size_answer)
+                except ValueError:
+                    console.print(
+                        f"[red]Configuration error:[/red] not a valid byte count: {size_answer!r}"
+                    )
+                    raise SystemExit(EXIT_CONFIG_ERROR) from None
+    elif local_emulator is None or platform_ is None:
         curated = find_compatible_profile(remote_core)
         if curated is None:
             console.print(

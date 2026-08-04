@@ -172,6 +172,82 @@ def test_config_add_core_mapping_curated_autofill(tmp_path: Path) -> None:
     assert mapping.expected_size_bytes == 131072
 
 
+def test_config_add_core_mapping_interactive_curated(tmp_path: Path) -> None:
+    """Running with no flags at all walks the user through platform -> source
+    core -> target, suggesting the curated target as the default answer."""
+    config_path = tmp_path / "config.toml"
+    save_config(
+        AppConfig(romm=RommConfig(url="http://romm.local", client_token="rmm_token")),
+        config_path,
+    )
+
+    runner = CliRunner()
+    # platform, remote core, accept suggested target (blank -> curated default)
+    result = runner.invoke(
+        main,
+        ["config", "add-core-mapping", "--config", str(config_path)],
+        input="psx\nmednafen_psx_hw\n\n",
+    )
+
+    assert result.exit_code == EXIT_OK, result.output
+    assert "Bifrost knows this core" in result.output
+    assert "Verified mapping" in result.output
+    cfg = load_config(config_path)
+    assert len(cfg.sync.core_mappings) == 1
+    mapping = cfg.sync.core_mappings[0]
+    assert mapping.local_emulator == "duckstation"
+    assert mapping.expected_size_bytes == 131072
+
+
+def test_config_add_core_mapping_interactive_custom(tmp_path: Path) -> None:
+    """No curated match: prompts for target explicitly, then asks for the
+    optional expected-size-bytes, then confirms before saving the unverified
+    mapping."""
+    config_path = tmp_path / "config.toml"
+    save_config(
+        AppConfig(romm=RommConfig(url="http://romm.local", client_token="rmm_token")),
+        config_path,
+    )
+
+    runner = CliRunner()
+    # platform, remote core, explicit target, blank size, confirm yes
+    result = runner.invoke(
+        main,
+        ["config", "add-core-mapping", "--config", str(config_path)],
+        input="psx\npcsxrearmed\nduckstation\n\ny\n",
+    )
+
+    assert result.exit_code == EXIT_OK, result.output
+    assert "Unknown core" in result.output
+    cfg = load_config(config_path)
+    assert len(cfg.sync.core_mappings) == 1
+    mapping = cfg.sync.core_mappings[0]
+    assert mapping.remote_core == "pcsxrearmed"
+    assert mapping.local_emulator == "duckstation"
+    assert mapping.expected_size_bytes is None
+
+
+def test_config_add_core_mapping_interactive_requires_target(tmp_path: Path) -> None:
+    """Blank target with no curated default is a hard error, not a silent no-op."""
+    config_path = tmp_path / "config.toml"
+    save_config(
+        AppConfig(romm=RommConfig(url="http://romm.local", client_token="rmm_token")),
+        config_path,
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["config", "add-core-mapping", "--config", str(config_path)],
+        input="psx\npcsxrearmed\n\n",
+    )
+
+    assert result.exit_code == EXIT_CONFIG_ERROR
+    assert "local emulator is required" in result.output
+    cfg = load_config(config_path)
+    assert cfg.sync.core_mappings == []
+
+
 def test_config_add_core_mapping_custom_requires_explicit_fields(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     save_config(

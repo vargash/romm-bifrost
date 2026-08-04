@@ -426,12 +426,16 @@ Bifrost matches saves on `(ROM, emulator)`. If the same game is synced from two 
 Cross-core save mappings tell Bifrost that a foreign emulator/core tag is safe to route into one of your local emulator profiles, because the two produce byte-compatible save files. There are two kinds:
 
 - **Built-in (verified)** — pairings Bifrost's maintainers have manually confirmed are byte-compatible (currently: `mednafen_psx_hw` → `duckstation`, both using the standard 128KB PS1 memory card image). Still requires an explicit `sync.core_mappings` entry to take effect on a given device — nothing routes automatically.
-- **Custom (unverified)** — a pairing *you* declare, for a core/emulator pair Bifrost hasn't vetted. Same file extension or size is not proof of true compatibility; a wrong mapping can corrupt a save on download. Adding one requires confirmation (or `--yes`), and it's always flagged "not verified by Bifrost" in warnings/logs.
+- **Custom (unverified)** — a pairing *you* declare, for a core/emulator pair Bifrost hasn't vetted. Same file extension or size is not proof of true compatibility; a wrong mapping can corrupt a save on download. Adding one requires confirmation (or `--yes`), and warnings/logs distinguish two cases: the remote core is entirely unknown to Bifrost, or it's curated — just for a *different* local emulator than the one you targeted (likely a typo/mistake worth double-checking).
 
 Manage mappings with:
 
 ```sh
-# Add a mapping. For a built-in pairing, --local-emulator/--platform auto-fill:
+# No flags at all: walks you through platform -> source core -> target,
+# suggesting the curated target automatically when one exists.
+bifrost config add-core-mapping
+
+# For a built-in pairing, --local-emulator/--platform auto-fill:
 bifrost config add-core-mapping --remote-core mednafen_psx_hw
 
 # For a custom pairing, specify everything explicitly (asks for confirmation):
