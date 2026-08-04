@@ -111,6 +111,84 @@ sync_mode = "push_pull"
     assert config.sync.direction == "push_pull"
 
 
+def test_load_config_migrates_legacy_cross_core_compat_to_core_mappings(tmp_path: Path) -> None:
+    """Old sync.cross_core_compat tags resolve to sync.core_mappings entries via
+    the curated compatible_remote_cores table; the old field is gone afterward.
+    """
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[romm]
+url = "http://romm.local"
+client_token = "rmm_token"
+
+[sync]
+cross_core_compat = ["mednafen_psx_hw"]
+""".strip(),
+        encoding="utf-8",
+    )
+    config_file.chmod(0o600)
+
+    config = load_config(config_file)
+    assert len(config.sync.core_mappings) == 1
+    mapping = config.sync.core_mappings[0]
+    assert mapping.platform == "psx"
+    assert mapping.remote_core == "mednafen_psx_hw"
+    assert mapping.local_emulator == "duckstation"
+    assert mapping.expected_size_bytes == 131072
+    assert not hasattr(config.sync, "cross_core_compat")
+
+
+def test_load_config_migrates_unknown_cross_core_compat_tag_drops_it(tmp_path: Path) -> None:
+    """A legacy tag with no curated match has nothing to migrate to and is
+    dropped silently rather than erroring."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[romm]
+url = "http://romm.local"
+client_token = "rmm_token"
+
+[sync]
+cross_core_compat = ["totally_unknown_core"]
+""".strip(),
+        encoding="utf-8",
+    )
+    config_file.chmod(0o600)
+
+    config = load_config(config_file)
+    assert config.sync.core_mappings == []
+
+
+def test_load_config_cross_core_compat_migration_skipped_if_core_mappings_already_present(
+    tmp_path: Path,
+) -> None:
+    """If sync.core_mappings is already set, the legacy tag list is dropped
+    without overwriting it (mirrors _migrate_sync_mode's existing-value guard)."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[romm]
+url = "http://romm.local"
+client_token = "rmm_token"
+
+[sync]
+cross_core_compat = ["mednafen_psx_hw"]
+
+[[sync.core_mappings]]
+platform = "psx"
+remote_core = "some_other_core"
+local_emulator = "duckstation"
+""".strip(),
+        encoding="utf-8",
+    )
+    config_file.chmod(0o600)
+
+    config = load_config(config_file)
+    assert len(config.sync.core_mappings) == 1
+    assert config.sync.core_mappings[0].remote_core == "some_other_core"
+
+
 def test_load_config_migrates_sync_mode_unknown_value_to_default(tmp_path: Path) -> None:
     """sync.sync_mode with a value not valid for direction defaults to push_pull."""
     config_file = tmp_path / "config.toml"

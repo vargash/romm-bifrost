@@ -21,6 +21,31 @@ from typing import Literal
 
 
 @dataclass(frozen=True)
+class RemoteCoreAlias:
+    """A manually-verified foreign core/emulator tag this profile's save format
+    can substitute for.
+
+    core_slug is a foreign "emulator" tag — as reported by RomM clients other
+    than this Bifrost install, e.g. a mobile RetroArch app sending its libretro
+    core id directly. Save-file format compatibility across cores must be
+    verified by hand per alias (extension/framing can differ even when the
+    underlying save bytes are the same standard). Never applied automatically:
+    only takes effect when the user opts in via a matching sync.core_mappings
+    entry in config, since a wrong assumption here can corrupt a save file.
+    """
+
+    core_slug: str
+    note: str
+    # When set, this remote core's saves are expected to be exactly this many
+    # raw bytes (e.g. the PS1 standard memory card is 131072 bytes / 128KiB, a
+    # fixed hardware spec). Any bytes beyond this size are a foreign
+    # wrapper/trailer appended by the uploading client, not part of the save
+    # image itself, and are truncated on download so the target emulator
+    # doesn't reject the file for having the wrong size.
+    expected_size_bytes: int | None = None
+
+
+@dataclass(frozen=True)
 class SaveProfile:
     platform: str
     emulator: str
@@ -35,6 +60,10 @@ class SaveProfile:
     # matching (e.g. "Game_1.mcd" → match against "Game").  The full filename including
     # the suffix is still sent to RomM as-is.
     strip_slot_suffix: bool = False
+    # Foreign cores/emulators Bifrost has verified produce save files byte-compatible
+    # with this profile's format — see RemoteCoreAlias. Still requires an explicit
+    # sync.core_mappings entry in config to take effect on a given device.
+    compatible_remote_cores: tuple[RemoteCoreAlias, ...] = ()
 
 
 PROFILES: tuple[SaveProfile, ...] = (
@@ -89,6 +118,13 @@ PROFILES: tuple[SaveProfile, ...] = (
         romm_emulator="duckstation",
         supported=True,
         strip_slot_suffix=True,
+        compatible_remote_cores=(
+            RemoteCoreAlias(
+                core_slug="mednafen_psx_hw",
+                note="both use the standard 128KB PS1 per-game memory card image",
+                expected_size_bytes=131072,
+            ),
+        ),
     ),
     # PCSX2 (PS2) — shared memory card
     SaveProfile(
@@ -117,72 +153,108 @@ PROFILES: tuple[SaveProfile, ...] = (
 )
 
 
-@dataclass(frozen=True)
-class CrossCoreCompat:
-    """A manually-verified save-format compatibility mapping.
+def find_compatible_profile(core_slug: str | None) -> tuple[SaveProfile, RemoteCoreAlias] | None:
+    """Return the (profile, alias) pair whose compatible_remote_cores lists core_slug.
 
-    Maps a foreign "emulator" tag — as reported by RomM clients other than
-    this Bifrost install, e.g. a mobile RetroArch app sending its libretro
-    core id directly — to a local SaveProfile.romm_emulator this device can
-    substitute it with. Save-file format compatibility across cores must be
-    verified by hand per pair (extension/framing can differ even when the
-    underlying memory-card bytes are the same standard). Never applied
-    automatically: only takes effect when the user opts in via
-    sync.cross_core_compat in config, since a wrong assumption here can
-    corrupt a save file.
+    Curated-only lookup — ignores config entirely. Useful to tell "no
+    Bifrost-verified pairing exists for this core" apart from "a pairing
+    exists but the user hasn't configured a sync.core_mappings entry for it
+    yet" when building advisory messages, and to resolve legacy
+    sync.cross_core_compat tags during config migration. See
+    resolve_core_mapping for the opt-in, config-aware lookup.
     """
-
-    platform: str
-    source_emulator: str
-    target_emulator: str
-    note: str
-    # When set, the target expects exactly this many raw memory-card bytes
-    # (the PS1 standard card is 131072 bytes / 128KiB, a fixed hardware spec).
-    # Any bytes beyond this size are a foreign wrapper/trailer appended by the
-    # uploading client (observed: a JSON blob + magic-string footer from a
-    # mobile client), not part of the memory card image itself, and are
-    # truncated on download so the target emulator doesn't reject the file
-    # for having the wrong size.
-    expected_size_bytes: int | None = None
-
-
-CROSS_CORE_COMPAT: tuple[CrossCoreCompat, ...] = (
-    # RetroArch's Beetle PSX HW core (mednafen_psx_hw) and DuckStation both
-    # read/write the standard 128KB PS1 per-game memory card image format.
-    CrossCoreCompat(
-        platform="psx",
-        source_emulator="mednafen_psx_hw",
-        target_emulator="duckstation",
-        note="both use the standard 128KB PS1 per-game memory card image",
-        expected_size_bytes=131072,
-    ),
-)
-
-
-def find_cross_core_rule(source_emulator: str | None) -> CrossCoreCompat | None:
-    """Return the known CrossCoreCompat rule for source_emulator, if any.
-
-    This does NOT check opt-in — use find_cross_core_target for that. Useful
-    to tell "no rule exists for this core" apart from "a rule exists but the
-    user hasn't opted in yet" when building advisory messages.
-    """
-    if not source_emulator:
+    if not core_slug:
         return None
-    for rule in CROSS_CORE_COMPAT:
-        if rule.source_emulator == source_emulator:
-            return rule
+    for profile in PROFILES:
+        for alias in profile.compatible_remote_cores:
+            if alias.core_slug == core_slug:
+                return profile, alias
     return None
 
 
-def find_cross_core_target(
-    source_emulator: str | None, enabled: list[str]
-) -> CrossCoreCompat | None:
-    """Return the opt-in CrossCoreCompat rule for source_emulator, if any.
+@dataclass(frozen=True)
+class CoreMappingResolution:
+    """Result of validating a (platform, remote_core, local_emulator) mapping."""
 
-    enabled is config.sync.cross_core_compat: the list of foreign emulator
-    tags the user has explicitly confirmed as save-compatible. An empty list
-    (the default) disables all cross-core matching.
+    ok: bool
+    target_profile: SaveProfile | None
+    note: str
+    expected_size_bytes: int | None
+    verified: bool
+    rejected_reason: str | None = None
+
+
+def resolve_core_mapping(
+    *,
+    platform: str,
+    remote_core: str,
+    local_emulator: str,
+    expected_size_bytes: int | None = None,
+) -> CoreMappingResolution:
+    """Validate a user-declared or curated core mapping against PROFILES.
+
+    Checks that local_emulator names an existing, supported local profile and
+    that platform is consistent with it (a target profile with
+    platform="multi", e.g. RetroArch, accepts a mapping declared for any
+    specific platform). If remote_core also appears in the target profile's
+    curated compatible_remote_cores, the mapping is "verified" and its note /
+    expected_size_bytes default to the curated alias's; otherwise it's applied
+    as an unverified custom mapping (matching size/extension alone doesn't
+    guarantee true byte-compatibility, so this is surfaced distinctly by
+    callers).
     """
-    if not source_emulator or source_emulator not in enabled:
-        return None
-    return find_cross_core_rule(source_emulator)
+    target_profile = next(
+        (p for p in PROFILES if p.romm_emulator == local_emulator), None
+    )
+    if target_profile is None:
+        return CoreMappingResolution(
+            ok=False,
+            target_profile=None,
+            note="",
+            expected_size_bytes=None,
+            verified=False,
+            rejected_reason=f"no local profile named {local_emulator!r}",
+        )
+    if not target_profile.supported:
+        return CoreMappingResolution(
+            ok=False,
+            target_profile=None,
+            note="",
+            expected_size_bytes=None,
+            verified=False,
+            rejected_reason=f"{local_emulator!r} is a recognised but unsupported profile",
+        )
+    if target_profile.platform != "multi" and target_profile.platform != platform:
+        return CoreMappingResolution(
+            ok=False,
+            target_profile=None,
+            note="",
+            expected_size_bytes=None,
+            verified=False,
+            rejected_reason=(
+                f"platform mismatch: {local_emulator!r} is a "
+                f"{target_profile.platform!r} profile, not {platform!r}"
+            ),
+        )
+    alias = next(
+        (a for a in target_profile.compatible_remote_cores if a.core_slug == remote_core),
+        None,
+    )
+    if alias is not None:
+        resolved_size = (
+            expected_size_bytes if expected_size_bytes is not None else alias.expected_size_bytes
+        )
+        return CoreMappingResolution(
+            ok=True,
+            target_profile=target_profile,
+            note=alias.note,
+            expected_size_bytes=resolved_size,
+            verified=True,
+        )
+    return CoreMappingResolution(
+        ok=True,
+        target_profile=target_profile,
+        note="custom mapping, not verified by Bifrost — confirm save formats truly match",
+        expected_size_bytes=expected_size_bytes,
+        verified=False,
+    )

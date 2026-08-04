@@ -18,6 +18,7 @@ from typing import Any, TypeVar, get_origin
 
 import click
 from pydantic import BaseModel
+from pydantic.fields import FieldInfo
 from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 from rich.prompt import Confirm, Prompt
@@ -30,6 +31,7 @@ from bifrost.cache import BifrostCache, merge_by_id
 from bifrost.config import (
     AppConfig,
     CacheConfig,
+    CoreMapping,
     EmudeckConfig,
     EsdeConfig,
     NasConfig,
@@ -57,6 +59,7 @@ from bifrost.preflight import (
     run_sync_preflight,
 )
 from bifrost.save_sync import build_save_sync_preview, execute_save_sync_preview
+from bifrost.saves.profiles import PROFILES, find_compatible_profile, resolve_core_mapping
 from bifrost.symlink_manager import (
     OrphanRemovalOperation,
     RemoveSymlinkOperation,
@@ -468,30 +471,36 @@ def config_show(config_path: Path | None) -> None:
     table = Table(title="Bifrost Config")
     table.add_column("Key")
     table.add_column("Value")
-    table.add_row("config.path", str(resolved_path))
+    table.add_column("Description")
+    table.add_row("config.path", str(resolved_path), "Path to the loaded config file.")
     for key in sorted(flattened):
-        table.add_row(key, flattened[key])
+        field_info = _leaf_field_info(key.split("."))
+        description = field_info.description if field_info is not None else ""
+        table.add_row(key, flattened[key], description or "")
     console.print(table)
     raise SystemExit(EXIT_OK)
 
 
-def _leaf_field_annotation(key_path: list[str]) -> Any:
-    """Return the declared type of a dotted AppConfig field, or None if unresolvable.
+def _leaf_field_info(key_path: list[str]) -> FieldInfo | None:
+    """Return the declared pydantic FieldInfo of a dotted AppConfig field, or None.
 
     Walks nested pydantic models (AppConfig -> SyncConfig -> ... ) following
-    key_path; used to decide how a plain string VALUE from `config set` should
-    be parsed (e.g. list[str] fields need comma-splitting, since a bare string
-    is never a valid list on its own).
+    key_path. Callers read .annotation (config set: decide how to parse a
+    plain string value, e.g. list[str] fields need comma-splitting) or
+    .description (config show: one-liner explanation of the field) off the
+    result.
     """
     current: Any = AppConfig
+    field_info: FieldInfo | None = None
     for part in key_path:
         if not (isinstance(current, type) and issubclass(current, BaseModel)):
             return None
         fields = current.model_fields
         if part not in fields:
             return None
-        current = fields[part].annotation
-    return current
+        field_info = fields[part]
+        current = field_info.annotation
+    return field_info
 
 
 @config.command(
@@ -499,10 +508,13 @@ def _leaf_field_annotation(key_path: list[str]) -> Any:
     help=(
         "Update one configuration value using dot notation, e.g.: "
         "bifrost config set romm.url http://romm.local. "
-        "For list values (e.g. sync.cross_core_compat, sync.profiles.enabled), "
+        "For list values (e.g. sync.profiles.enabled), "
         "pass a comma-separated string: "
-        "bifrost config set sync.cross_core_compat mednafen_psx_hw,other_core "
+        "bifrost config set sync.profiles.enabled retroarch,mgba "
         "-- pass an empty string to clear the list. "
+        "For sync.core_mappings, use 'bifrost config add-core-mapping' / "
+        "'remove-core-mapping' instead (it is a list of structured entries, "
+        "not plain strings). "
         "Run 'bifrost config show' to see current keys and values."
     ),
 )
@@ -522,6 +534,14 @@ def config_set(key: str, value: str, config_path: Path | None) -> None:
         )
         raise SystemExit(EXIT_CONFIG_ERROR)
 
+    if key == "sync.core_mappings":
+        console.print(
+            "[red]Configuration error:[/red] sync.core_mappings is a list of structured "
+            "entries and can't be set with a plain comma-separated value. Use "
+            "'bifrost config add-core-mapping' / 'remove-core-mapping' instead."
+        )
+        raise SystemExit(EXIT_CONFIG_ERROR)
+
     dumped = loaded.model_dump(mode="python")
     cursor: Any = dumped
     for part in key_path[:-1]:
@@ -536,7 +556,8 @@ def config_set(key: str, value: str, config_path: Path | None) -> None:
         raise SystemExit(EXIT_CONFIG_ERROR)
 
     normalized_value: Any = value
-    if get_origin(_leaf_field_annotation(key_path)) is list:
+    leaf_field = _leaf_field_info(key_path)
+    if get_origin(leaf_field.annotation if leaf_field is not None else None) is list:
         normalized_value = [item.strip() for item in value.split(",") if item.strip()]
     if key == "romm.url":
         normalized_value = value.strip().rstrip("/")
@@ -555,6 +576,187 @@ def config_set(key: str, value: str, config_path: Path | None) -> None:
     save_path = save_config(updated, resolved_path)
     console.print(f"[green]Updated[/green] {key} = {normalized_value}")
     console.print(f"[green]Configuration saved:[/green] {save_path}")
+    raise SystemExit(EXIT_OK)
+
+
+@config.command(
+    name="add-core-mapping",
+    help="Declare a cross-core save compatibility mapping (see README).",
+)
+@click.option(
+    "--remote-core", required=True, help="Foreign core/emulator tag as reported by RomM."
+)
+@click.option("--local-emulator", default=None, help="Local profile to route matching saves to.")
+@click.option("--platform", "platform_", default=None, help="Platform this mapping applies to.")
+@click.option(
+    "--expected-size-bytes", type=int, default=None, help="Truncate downloads to this many bytes."
+)
+@click.option(
+    "--yes", is_flag=True, default=False, help="Skip confirmation for unverified mappings."
+)
+@config_path_option
+def config_add_core_mapping(
+    remote_core: str,
+    local_emulator: str | None,
+    platform_: str | None,
+    expected_size_bytes: int | None,
+    yes: bool,
+    config_path: Path | None,
+) -> None:
+    """Add or replace a sync.core_mappings entry."""
+
+    console = Console()
+    loaded, resolved_path = load_config_or_exit(console, config_path)
+
+    if local_emulator is None or platform_ is None:
+        curated = find_compatible_profile(remote_core)
+        if curated is None:
+            console.print(
+                f"[red]Configuration error:[/red] no Bifrost-curated pairing known for "
+                f"'{remote_core}' — pass --local-emulator and --platform explicitly."
+            )
+            raise SystemExit(EXIT_CONFIG_ERROR)
+        profile, _alias = curated
+        local_emulator = local_emulator or profile.romm_emulator
+        platform_ = platform_ or profile.platform
+
+    resolution = resolve_core_mapping(
+        platform=platform_,
+        remote_core=remote_core,
+        local_emulator=local_emulator,
+        expected_size_bytes=expected_size_bytes,
+    )
+    if not resolution.ok:
+        console.print(f"[red]Configuration error:[/red] {resolution.rejected_reason}")
+        raise SystemExit(EXIT_CONFIG_ERROR)
+
+    if resolution.verified:
+        console.print(f"[green]Verified mapping:[/green] {resolution.note}")
+    else:
+        console.print(
+            f"[yellow]Warning:[/yellow] {resolution.note}. You are responsible for "
+            "confirming these save formats are truly compatible before it overwrites real saves."
+        )
+        if not yes and not Confirm.ask("Add this unverified mapping anyway?", default=False):
+            console.print("Aborted — no changes made.")
+            raise SystemExit(EXIT_OK)
+
+    resolved_size = (
+        expected_size_bytes if expected_size_bytes is not None else resolution.expected_size_bytes
+    )
+    new_entry = CoreMapping(
+        platform=platform_,
+        remote_core=remote_core,
+        local_emulator=local_emulator,
+        expected_size_bytes=resolved_size,
+    )
+    mappings = [
+        m
+        for m in loaded.sync.core_mappings
+        if (m.platform, m.remote_core) != (new_entry.platform, new_entry.remote_core)
+    ]
+    mappings.append(new_entry)
+    updated = loaded.model_copy(
+        update={"sync": loaded.sync.model_copy(update={"core_mappings": mappings})}
+    )
+    save_path = save_config(updated, resolved_path)
+    console.print(
+        f"[green]Saved[/green] core mapping: {remote_core} -> {local_emulator} ({platform_})"
+    )
+    console.print(f"[green]Configuration saved:[/green] {save_path}")
+    raise SystemExit(EXIT_OK)
+
+
+@config.command(
+    name="remove-core-mapping",
+    help="Remove a sync.core_mappings entry.",
+)
+@click.option("--remote-core", required=True, help="Foreign core/emulator tag to remove.")
+@click.option(
+    "--platform",
+    "platform_",
+    default=None,
+    help="Disambiguate if remote-core maps under multiple platforms.",
+)
+@config_path_option
+def config_remove_core_mapping(
+    remote_core: str, platform_: str | None, config_path: Path | None
+) -> None:
+    """Remove matching sync.core_mappings entries."""
+
+    console = Console()
+    loaded, resolved_path = load_config_or_exit(console, config_path)
+
+    remaining = [
+        m
+        for m in loaded.sync.core_mappings
+        if not (m.remote_core == remote_core and (platform_ is None or m.platform == platform_))
+    ]
+    if len(remaining) == len(loaded.sync.core_mappings):
+        console.print(f"[yellow]No matching core mapping found for '{remote_core}'.[/yellow]")
+        raise SystemExit(EXIT_OK)
+
+    updated = loaded.model_copy(
+        update={"sync": loaded.sync.model_copy(update={"core_mappings": remaining})}
+    )
+    save_path = save_config(updated, resolved_path)
+    console.print(f"[green]Removed[/green] core mapping(s) for '{remote_core}'.")
+    console.print(f"[green]Configuration saved:[/green] {save_path}")
+    raise SystemExit(EXIT_OK)
+
+
+@config.command(
+    name="list-core-mappings",
+    help="List built-in (curated) and configured cross-core save mappings.",
+)
+@config_path_option
+def config_list_core_mappings(config_path: Path | None) -> None:
+    """Show curated compatible_remote_cores alongside configured sync.core_mappings."""
+
+    console = Console()
+    loaded, _resolved_path = load_config_or_exit(console, config_path)
+
+    table = Table(title="Cross-Core Save Mappings")
+    table.add_column("Source")
+    table.add_column("Platform")
+    table.add_column("Remote core")
+    table.add_column("Local emulator")
+    table.add_column("Status")
+    table.add_column("Note")
+
+    for profile in PROFILES:
+        for alias in profile.compatible_remote_cores:
+            table.add_row(
+                "built-in",
+                profile.platform,
+                alias.core_slug,
+                profile.romm_emulator or "",
+                "[green]verified[/green]",
+                alias.note,
+            )
+    for mapping in loaded.sync.core_mappings:
+        resolution = resolve_core_mapping(
+            platform=mapping.platform,
+            remote_core=mapping.remote_core,
+            local_emulator=mapping.local_emulator,
+            expected_size_bytes=mapping.expected_size_bytes,
+        )
+        if not resolution.ok:
+            status = f"[red]invalid ({resolution.rejected_reason})[/red]"
+        elif resolution.verified:
+            status = "[green]verified[/green]"
+        else:
+            status = "[yellow]unverified[/yellow]"
+        table.add_row(
+            "configured",
+            mapping.platform,
+            mapping.remote_core,
+            mapping.local_emulator,
+            status,
+            resolution.note,
+        )
+
+    console.print(table)
     raise SystemExit(EXIT_OK)
 
 

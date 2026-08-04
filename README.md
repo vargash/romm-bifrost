@@ -414,6 +414,33 @@ The default is `ask`. In headless mode (systemd, cron) `ask` is safe: Bifrost ne
 
 Before any download that would overwrite a local file, Bifrost creates a `<filename>.bak` backup in the same directory.
 
+### Cross-core save compatibility
+
+Bifrost matches saves on `(ROM, emulator)`. If the same game is synced from two different emulators/cores — e.g. this device runs DuckStation, but a phone syncs the same PS1 game through RetroArch's Beetle PSX HW core (reported to RomM as `mednafen_psx_hw`) — Bifrost treats them as unrelated save families by default and won't route the phone's save into DuckStation's folder.
+
+Cross-core save mappings tell Bifrost that a foreign emulator/core tag is safe to route into one of your local emulator profiles, because the two produce byte-compatible save files. There are two kinds:
+
+- **Built-in (verified)** — pairings Bifrost's maintainers have manually confirmed are byte-compatible (currently: `mednafen_psx_hw` → `duckstation`, both using the standard 128KB PS1 memory card image). Still requires an explicit `sync.core_mappings` entry to take effect on a given device — nothing routes automatically.
+- **Custom (unverified)** — a pairing *you* declare, for a core/emulator pair Bifrost hasn't vetted. Same file extension or size is not proof of true compatibility; a wrong mapping can corrupt a save on download. Adding one requires confirmation (or `--yes`), and it's always flagged "not verified by Bifrost" in warnings/logs.
+
+Manage mappings with:
+
+```sh
+# Add a mapping. For a built-in pairing, --local-emulator/--platform auto-fill:
+bifrost config add-core-mapping --remote-core mednafen_psx_hw
+
+# For a custom pairing, specify everything explicitly (asks for confirmation):
+bifrost config add-core-mapping --remote-core some_core --local-emulator duckstation --platform psx
+
+# List built-in and configured mappings, with verified/unverified status
+bifrost config list-core-mappings
+
+# Remove a mapping
+bifrost config remove-core-mapping --remote-core mednafen_psx_hw
+```
+
+See `[[sync.core_mappings]]` in [`config.example.toml`](config.example.toml) for the underlying config shape.
+
 ### Logs
 
 Bifrost writes a structured log to `~/.local/share/bifrost/logs/bifrost.log` on every sync run. The log rotates at 10 MB and keeps 5 backups.

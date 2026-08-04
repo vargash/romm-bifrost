@@ -6,6 +6,7 @@ url = "http://192.168.1.x:8080"
 client_token = "rmm_your-token-here"
 device_id = ""
 timeout_seconds = 10.0   # increase if RomM is on a slow NAS or VPN (min 1.0)
+legacy_upload_fallback = false   # use the legacy single-shot upload endpoint instead of chunked uploads
 
 [nas]
 library_path = "/path/to/romm/library"
@@ -42,13 +43,47 @@ screenshots = "screenshots"
 bezel = "bezels"           # non-standard ES-DE path, used by some themes
 
 [sync]
+save_sync_enabled = true         # whether save sync runs at all
 conflict_strategy = "ask"
 direction = "push_pull"
 parallel_workers = 16   # threads for parallel symlink evaluation/apply (reduce if NAS is overloaded)
 slot = "autosave"       # stable slot name for saves with no explicit numbered slot; must match
                         # the slot naming used by other RomM clients
+optimistic_downloads = true      # skip re-downloading a save already matching the server's checksum
+autocleanup = false              # opt in to automatically pruning old .bak backup files
+autocleanup_limit = 3            # number of .bak backups to keep per save when autocleanup is on
 prune_orphan_platforms = false   # opt in to reviewing/removing orphan platform folders
 orphan_platform_strategy = "ask" # ask | remove | skip
+
+# Emulator ids to scan for saves. Empty (default) = all supported profiles.
+[sync.profiles]
+enabled = []
+
+# Cross-core save compatibility: lets Bifrost route a save uploaded by a
+# foreign emulator/core (e.g. a mobile RetroArch client) into a local
+# emulator's save folder, when the two are known (or declared) to use the
+# same save-file format. See "Cross-core save compatibility" in README.md.
+# Manage with 'bifrost config add-core-mapping' / 'remove-core-mapping'
+# rather than editing this by hand.
+#
+# This entry is Bifrost-curated (verified): RetroArch's Beetle PSX HW core
+# (mednafen_psx_hw) and DuckStation both use the standard 128KB PS1 memory
+# card image. Equivalent to: bifrost config add-core-mapping --remote-core mednafen_psx_hw
+[[sync.core_mappings]]
+platform = "psx"
+remote_core = "mednafen_psx_hw"
+local_emulator = "duckstation"
+expected_size_bytes = 131072   # truncates a foreign trailer some clients append after the raw save
+
+# Template for a CUSTOM mapping — a pairing Bifrost has NOT verified. Only add
+# one if you've personally confirmed the two cores' save files are truly
+# byte-compatible: same size/extension is not proof of that, and a wrong
+# mapping can corrupt a save on download. 'add-core-mapping' will ask for
+# confirmation (or require --yes) before saving an entry like this.
+# [[sync.core_mappings]]
+# platform = "n64"
+# remote_core = "some_other_n64_core"
+# local_emulator = "retroarch"
 
 [output]
 format = "table"

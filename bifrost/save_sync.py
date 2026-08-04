@@ -21,16 +21,16 @@ from bifrost.api.models import (
     SyncNegotiatePayload,
     SyncOperationSchema,
 )
-from bifrost.config import AppConfig
+from bifrost.config import AppConfig, CoreMapping
 from bifrost.errors import ApiError, ConfigError
 from bifrost.play_sessions import consume_pending_sessions
 from bifrost.saves.layout import EmudeckEsdeLayout, ScannedFile
 from bifrost.saves.profiles import (
     PROFILES,
-    CrossCoreCompat,
+    CoreMappingResolution,
     SaveProfile,
-    find_cross_core_rule,
-    find_cross_core_target,
+    find_compatible_profile,
+    resolve_core_mapping,
 )
 
 _log = logging.getLogger("bifrost.save_sync")
@@ -85,7 +85,7 @@ class SaveSyncPreview:
     rom_index: dict[int, RomSummary] = None  # type: ignore[assignment]
     # Human-readable notices for ROMs whose local saves were scanned from more
     # than one emulator without sharing a matching key — i.e. Bifrost treats
-    # them as unrelated save families. See find_cross_core_target for opting
+    # them as unrelated save families. See resolve_core_mapping for opting
     # specific pairs into automatic cross-core matching.
     cross_core_warnings: list[str] = None  # type: ignore[assignment]
 
@@ -559,7 +559,7 @@ def _detect_unlinked_cross_core_saves(
 def _apply_profile_naming(name: str, target_profile: SaveProfile) -> str:
     """Rename a downloaded save to the naming convention of the local profile
     that will own it — used both for opt-in cross-core matches (see
-    find_cross_core_target) and for a normal same-emulator download whose
+    resolve_core_mapping) and for a normal same-emulator download whose
     server-side file_name was uploaded bare (see _upload_file_name): swaps
     the extension to the target profile's and, for profiles that expect a
     slot suffix (e.g. DuckStation's "<game>_<slot>.mcd"), appends "_1" when
@@ -588,7 +588,7 @@ def _upload_file_name(
     local "_N" slot suffix is this device's own per-emulator naming
     convention, not something other RomM clients (or the emulator core that
     originally produced the save on another device) share. RomM already
-    pairs saves on (rom_id, slot), not filename — see find_cross_core_target
+    pairs saves on (rom_id, slot), not filename — see resolve_core_mapping
     and _apply_profile_naming for the corresponding read-back conversion.
     The file on disk is never renamed; only the name sent in the upload
     changes.
@@ -603,7 +603,7 @@ def _detect_unrouted_remote_emulators(
     operations: list[SyncOperationSchema],
     rom_names: dict[int, str],
     known_local_emulators: set[str],
-    enabled_compat: list[str],
+    core_mappings: list[CoreMapping],
 ) -> list[str]:
     """Return advisory messages for pending downloads tagged with a foreign
     "emulator" (a core/client this device has no local profile for), e.g. a
@@ -615,31 +615,50 @@ def _detect_unrouted_remote_emulators(
     """
     warnings: list[str] = []
     seen: set[tuple[int, str]] = set()
+    mapping_by_remote_core = {m.remote_core: m for m in core_mappings}
     for op in operations:
         if op.action != "download" or not op.emulator:
             continue
         if op.emulator in known_local_emulators:
             continue
-        if find_cross_core_target(op.emulator, enabled_compat) is not None:
-            continue  # opted in already -> will be routed correctly on execute
         key = (op.rom_id, op.emulator)
         if key in seen:
             continue
+        configured = mapping_by_remote_core.get(op.emulator)
+        if configured is not None:
+            resolution = resolve_core_mapping(
+                platform=configured.platform,
+                remote_core=configured.remote_core,
+                local_emulator=configured.local_emulator,
+                expected_size_bytes=configured.expected_size_bytes,
+            )
+            if resolution.ok:
+                continue  # opted in already -> will be routed correctly on execute
+            seen.add(key)
+            name = rom_names.get(op.rom_id, f"rom #{op.rom_id}")
+            warnings.append(
+                f"{name}: server save tagged '{op.emulator}' has an invalid "
+                f"sync.core_mappings entry ({resolution.rejected_reason}) — it will "
+                "download to the bare saves root until the mapping is fixed."
+            )
+            continue
         seen.add(key)
         name = rom_names.get(op.rom_id, f"rom #{op.rom_id}")
-        rule = find_cross_core_rule(op.emulator)
-        if rule is not None:
+        found = find_compatible_profile(op.emulator)
+        if found is not None:
+            profile, alias = found
             warnings.append(
                 f"{name}: server save tagged '{op.emulator}' has no local profile on "
-                f"this device — known-compatible with {rule.target_emulator} "
-                f"({rule.note}); add \"{op.emulator}\" to sync.cross_core_compat to "
-                "sync it there."
+                f"this device — known-compatible with {profile.romm_emulator} "
+                f"({alias.note}); add a sync.core_mappings entry "
+                f'(platform="{profile.platform}", remote_core="{op.emulator}", '
+                f'local_emulator="{profile.romm_emulator}") to sync it there.'
             )
         else:
             warnings.append(
                 f"{name}: server save tagged '{op.emulator}' has no matching local "
                 "profile — it will download to the bare saves root, not a game "
-                "directory, unless a profile or cross-core compat rule is added for it."
+                "directory, unless a profile or sync.core_mappings entry is added for it."
             )
     return warnings
 
@@ -797,7 +816,7 @@ def build_save_sync_preview(
         filtered_operations,
         remote_rom_names,
         known_local_emulators,
-        config.sync.cross_core_compat,
+        config.sync.core_mappings,
     )
     for warning in remote_warnings:
         _log.warning("cross-core: %s", warning)
@@ -835,6 +854,9 @@ def execute_save_sync_preview(
     save_root = _expand_path(config.emudeck.saves_path)
     profile_by_romm_emulator: dict[str, SaveProfile] = {
         p.romm_emulator: p for p in PROFILES if p.romm_emulator and p.supported
+    }
+    core_mapping_by_remote: dict[str, CoreMapping] = {
+        m.remote_core: m for m in config.sync.core_mappings
     }
     local_files = scan_local_save_files(save_root)
     local_index: dict[str, list[LocalSaveFile]] = {}
@@ -1015,7 +1037,7 @@ def execute_save_sync_preview(
             canonical_name = _local_filename_for_operation(operation, preview.rom_index)
             # Resolve dest: existing-file map -> emulator subdir -> opt-in cross-core match ->
             # bare root
-            compat_rule: CrossCoreCompat | None = None
+            mapping_resolution: CoreMappingResolution | None = None
             target_profile: SaveProfile | None = None
             dest_dir = preview.profile_destinations.get(canonical_name)
             if dest_dir is None and operation.emulator:
@@ -1023,19 +1045,37 @@ def execute_save_sync_preview(
                 if target_profile is not None:
                     dest_dir = save_root / target_profile.save_subpath
                 else:
-                    compat_rule = find_cross_core_target(
-                        operation.emulator, config.sync.cross_core_compat
-                    )
-                    if compat_rule is not None:
-                        target_profile = profile_by_romm_emulator.get(compat_rule.target_emulator)
-                        if target_profile is not None:
+                    configured = core_mapping_by_remote.get(operation.emulator)
+                    if configured is not None:
+                        resolution = resolve_core_mapping(
+                            platform=configured.platform,
+                            remote_core=configured.remote_core,
+                            local_emulator=configured.local_emulator,
+                            expected_size_bytes=configured.expected_size_bytes,
+                        )
+                        if resolution.ok:
+                            mapping_resolution = resolution
+                            target_profile = resolution.target_profile
                             dest_dir = save_root / target_profile.save_subpath
+                            verified_text = (
+                                resolution.note
+                                if resolution.verified
+                                else "custom mapping, not verified by Bifrost — "
+                                "confirm save formats truly match"
+                            )
                             _log.warning(
                                 "cross-core compat: %s save %r treated as %s-compatible (%s)",
                                 operation.emulator,
                                 operation.file_name,
-                                compat_rule.target_emulator,
-                                compat_rule.note,
+                                target_profile.romm_emulator,
+                                verified_text,
+                            )
+                        else:
+                            _log.warning(
+                                "cross-core compat: sync.core_mappings entry for %r is "
+                                "invalid (%s) — leaving save unrouted",
+                                operation.emulator,
+                                resolution.rejected_reason,
                             )
                 # Restore the local profile's own naming convention (e.g. DuckStation's
                 # "_1" slot suffix) — needed whenever the server-side name doesn't already
@@ -1067,21 +1107,21 @@ def execute_save_sync_preview(
                 optimistic=use_optimistic,
             )
             if (
-                compat_rule is not None
-                and compat_rule.expected_size_bytes is not None
-                and len(content) > compat_rule.expected_size_bytes
+                mapping_resolution is not None
+                and mapping_resolution.expected_size_bytes is not None
+                and len(content) > mapping_resolution.expected_size_bytes
             ):
-                stripped = len(content) - compat_rule.expected_size_bytes
+                stripped = len(content) - mapping_resolution.expected_size_bytes
                 _log.warning(
                     "cross-core compat: truncating %s from %d to %d bytes "
                     "(stripping %d trailing bytes not part of the %s memory card image)",
                     operation.file_name,
                     len(content),
-                    compat_rule.expected_size_bytes,
+                    mapping_resolution.expected_size_bytes,
                     stripped,
-                    compat_rule.target_emulator,
+                    target_profile.romm_emulator,
                 )
-                content = content[: compat_rule.expected_size_bytes]
+                content = content[: mapping_resolution.expected_size_bytes]
             destination.parent.mkdir(parents=True, exist_ok=True)
             _backup_local_file(destination)
             part = destination.with_name(destination.name + ".part")
