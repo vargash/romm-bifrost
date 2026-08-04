@@ -475,3 +475,144 @@ def test_setup_wizard_can_change_selected_values(
     assert cfg.nas.library_path == "/new/library"
     assert cfg.nas.resources_path == "/data/resources"
     assert cfg.romm.client_token == "rmm_old"
+
+
+def test_setup_wizard_enrolls_device_when_confirmed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config_file = tmp_path / "config.toml"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/heartbeat":
+            return httpx.Response(200, json={"status": "ok"})
+        if request.url.path == "/api/devices" and request.method == "POST":
+            return httpx.Response(
+                200,
+                json={
+                    "device_id": "device-new",
+                    "name": "Bifrost on test-host",
+                    "created_at": "2026-06-19T10:00:00Z",
+                },
+            )
+        return httpx.Response(404, json={})
+
+    original_init = httpx.Client.__init__
+
+    def patched_init(self: httpx.Client, *args: Any, **kwargs: Any) -> None:
+        kwargs["transport"] = httpx.MockTransport(handler)
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "__init__", patched_init)
+
+    confirm_answers = iter([False, False, False, True])
+
+    def fake_confirm(*_: Any, **__: Any) -> bool:
+        return next(confirm_answers)
+
+    def fake_prompt(message: str, default: str | None = None, **_: Any) -> str:
+        if message == "RomM URL":
+            return "http://romm.local"
+        if message == "RomM Client Token":
+            return "rmm_test_token"
+        return default or ""
+
+    monkeypatch.setattr("bifrost.cli.Confirm.ask", fake_confirm)
+    monkeypatch.setattr("bifrost.cli.Prompt.ask", fake_prompt)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["setup", "--config", str(config_file)])
+
+    assert result.exit_code == EXIT_OK
+    cfg = load_config(config_file)
+    assert cfg.romm.device_id == "device-new"
+    assert "Device enrollment saved to config" in result.output
+
+
+def test_setup_flag_mode_enrolls_device_with_flag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config_file = tmp_path / "config.toml"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/heartbeat":
+            return httpx.Response(200, json={"status": "ok"})
+        if request.url.path == "/api/devices" and request.method == "POST":
+            return httpx.Response(
+                200,
+                json={
+                    "device_id": "device-flag",
+                    "name": "Bifrost on test-host",
+                    "created_at": "2026-06-19T10:00:00Z",
+                },
+            )
+        return httpx.Response(404, json={})
+
+    original_init = httpx.Client.__init__
+
+    def patched_init(self: httpx.Client, *args: Any, **kwargs: Any) -> None:
+        kwargs["transport"] = httpx.MockTransport(handler)
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "__init__", patched_init)
+
+    def fake_prompt(_message: str, default: str | None = None, **_: Any) -> str:
+        return default or ""
+
+    monkeypatch.setattr("bifrost.cli.Prompt.ask", fake_prompt)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "setup",
+            "--url",
+            "http://romm.local",
+            "--token",
+            "rmm_token",
+            "--config",
+            str(config_file),
+            "--enroll-device",
+        ],
+    )
+
+    assert result.exit_code == EXIT_OK
+    cfg = load_config(config_file)
+    assert cfg.romm.device_id == "device-flag"
+    assert "Device enrollment saved to config" in result.output
+
+
+def test_setup_flag_mode_skips_enroll_without_flag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config_file = tmp_path / "config.toml"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/heartbeat":
+            return httpx.Response(200, json={"status": "ok"})
+        return httpx.Response(404, json={})
+
+    original_init = httpx.Client.__init__
+
+    def patched_init(self: httpx.Client, *args: Any, **kwargs: Any) -> None:
+        kwargs["transport"] = httpx.MockTransport(handler)
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "__init__", patched_init)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "setup",
+            "--url",
+            "http://romm.local",
+            "--token",
+            "rmm_token",
+            "--config",
+            str(config_file),
+        ],
+    )
+
+    assert result.exit_code == EXIT_OK
+    cfg = load_config(config_file)
+    assert cfg.romm.device_id == ""
