@@ -12,9 +12,10 @@ import signal
 import sys
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any
+from typing import Any, get_origin
 
 import click
+from pydantic import BaseModel
 from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 from rich.prompt import Confirm, Prompt
@@ -413,7 +414,37 @@ def config_show(config_path: Path | None) -> None:
     raise SystemExit(EXIT_OK)
 
 
-@config.command(name="set", help="Update one configuration value using dot notation.")
+def _leaf_field_annotation(key_path: list[str]) -> Any:
+    """Return the declared type of a dotted AppConfig field, or None if unresolvable.
+
+    Walks nested pydantic models (AppConfig -> SyncConfig -> ... ) following
+    key_path; used to decide how a plain string VALUE from `config set` should
+    be parsed (e.g. list[str] fields need comma-splitting, since a bare string
+    is never a valid list on its own).
+    """
+    current: Any = AppConfig
+    for part in key_path:
+        if not (isinstance(current, type) and issubclass(current, BaseModel)):
+            return None
+        fields = current.model_fields
+        if part not in fields:
+            return None
+        current = fields[part].annotation
+    return current
+
+
+@config.command(
+    name="set",
+    help=(
+        "Update one configuration value using dot notation, e.g.: "
+        "bifrost config set romm.url http://romm.local. "
+        "For list values (e.g. sync.cross_core_compat, sync.profiles.enabled), "
+        "pass a comma-separated string: "
+        "bifrost config set sync.cross_core_compat mednafen_psx_hw,other_core "
+        "-- pass an empty string to clear the list. "
+        "Run 'bifrost config show' to see current keys and values."
+    ),
+)
 @click.argument("key", type=str)
 @click.argument("value", type=str)
 @click.option(
@@ -455,7 +486,9 @@ def config_set(key: str, value: str, config_path: Path | None) -> None:
         console.print(f"[red]Configuration error:[/red] Unknown key: {key}")
         raise SystemExit(EXIT_CONFIG_ERROR)
 
-    normalized_value = value
+    normalized_value: Any = value
+    if get_origin(_leaf_field_annotation(key_path)) is list:
+        normalized_value = [item.strip() for item in value.split(",") if item.strip()]
     if key == "romm.url":
         normalized_value = value.strip().rstrip("/")
     if key == "romm.client_token" and not value.startswith("rmm_"):
