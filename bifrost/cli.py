@@ -2574,12 +2574,13 @@ def watch_saves(config_path: Path | None) -> None:
         raise SystemExit(EXIT_CONFIG_ERROR) from exc
 
     saves_path = Path(cfg.emudeck.saves_path).expanduser()
-    bifrost_bin = shutil.which("bifrost") or sys.executable + " -m bifrost.cli"
+    found_bin = shutil.which("bifrost")
+    bifrost_cmd = [found_bin] if found_bin else [sys.executable, "-m", "bifrost.cli"]
 
     console.print(f"Watching [cyan]{saves_path}[/cyan] for save file changes...")
     console.print("Press Ctrl+C to stop.\n")
 
-    run_save_watcher(saves_path, bifrost_bin)
+    run_save_watcher(saves_path, bifrost_cmd)
     raise SystemExit(EXIT_OK)
 
 

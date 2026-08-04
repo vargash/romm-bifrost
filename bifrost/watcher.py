@@ -11,7 +11,7 @@ import logging
 import subprocess
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 log = logging.getLogger("bifrost.watcher")
@@ -26,20 +26,28 @@ _last_sync_time: float = 0.0
 _SKIP_SUFFIXES = frozenset({".part", ".bak"})
 
 
-def _run_sync(bifrost_bin: str) -> None:
-    """Run save-sync --apply, log outcome."""
+def _run_sync(bifrost_cmd: Sequence[str]) -> None:
+    """Run save-sync --apply, log outcome.
+
+    bifrost_cmd is an argv prefix (e.g. ["bifrost"] or [sys.executable, "-m",
+    "bifrost.cli"]), not a single string — a resolved interpreter path plus
+    "-m bifrost.cli" is two-plus argv tokens, and passing it as one string
+    makes subprocess try to exec a literal file named "<path> -m bifrost.cli",
+    which never exists (always fails with FileNotFoundError).
+    """
     global _last_sync_time
     elapsed = time.monotonic() - _last_sync_time
     if elapsed < _COOLDOWN_SECONDS:
         log.debug("watcher: sync cooldown (%ds remaining)", int(_COOLDOWN_SECONDS - elapsed))
         return
 
-    for cmd_args in (
-        [bifrost_bin, "save-sync", "--apply"],
+    for extra_args in (
+        ["save-sync", "--apply"],
         # DISABILITATO (Fase 0 — state sync escluso): il watcher non invoca più state-sync.
-        # [bifrost_bin, "state-sync", "--apply"],
+        # ["state-sync", "--apply"],
     ):
-        label = " ".join(cmd_args[1:])
+        cmd_args = [*bifrost_cmd, *extra_args]
+        label = " ".join(extra_args)
         log.info("watcher: triggering %s", label)
         try:
             result = subprocess.run(cmd_args, capture_output=True, text=True, timeout=300)
@@ -56,7 +64,7 @@ def _run_sync(bifrost_bin: str) -> None:
         except subprocess.TimeoutExpired:
             log.error("watcher: %s timed out after 300s", label)
         except FileNotFoundError:
-            log.error("watcher: bifrost binary not found at %s", bifrost_bin)
+            log.error("watcher: bifrost command not found: %s", cmd_args)
             return
 
     _last_sync_time = time.monotonic()
@@ -86,11 +94,11 @@ class _DebounceTimer:
                 self._timer = None
 
 
-def _watch_with_watchdog(watch_path: Path, bifrost_bin: str) -> None:
+def _watch_with_watchdog(watch_path: Path, bifrost_cmd: Sequence[str]) -> None:
     from watchdog.events import FileSystemEventHandler  # type: ignore[import-untyped]
     from watchdog.observers import Observer  # type: ignore[import-untyped]
 
-    debouncer = _DebounceTimer(_DEBOUNCE_SECONDS, lambda: _run_sync(bifrost_bin))
+    debouncer = _DebounceTimer(_DEBOUNCE_SECONDS, lambda: _run_sync(bifrost_cmd))
 
     class _Handler(FileSystemEventHandler):
         def on_any_event(self, event: object) -> None:  # type: ignore[override]
@@ -121,14 +129,14 @@ def _watch_with_watchdog(watch_path: Path, bifrost_bin: str) -> None:
     log.info("watcher: stopped")
 
 
-def _watch_with_polling(watch_path: Path, bifrost_bin: str) -> None:
+def _watch_with_polling(watch_path: Path, bifrost_cmd: Sequence[str]) -> None:
     """Fallback: poll directory mtimes every POLL_INTERVAL_SECONDS seconds."""
     log.info(
         "watcher: watching %s (polling every %ds, watchdog not installed)",
         watch_path,
         _POLL_INTERVAL_SECONDS,
     )
-    debouncer = _DebounceTimer(_DEBOUNCE_SECONDS, lambda: _run_sync(bifrost_bin))
+    debouncer = _DebounceTimer(_DEBOUNCE_SECONDS, lambda: _run_sync(bifrost_cmd))
 
     def _snapshot(root: Path) -> dict[str, float]:
         result: dict[str, float] = {}
@@ -159,7 +167,7 @@ def _watch_with_polling(watch_path: Path, bifrost_bin: str) -> None:
     log.info("watcher: stopped")
 
 
-def run_save_watcher(watch_path: Path, bifrost_bin: str = "bifrost") -> None:
+def run_save_watcher(watch_path: Path, bifrost_cmd: Sequence[str] = ("bifrost",)) -> None:
     """Start the save watcher (blocking). Prefers watchdog, falls back to polling."""
     if not watch_path.exists():
         log.warning("watcher: saves path does not exist: %s — waiting for it to appear", watch_path)
@@ -168,7 +176,7 @@ def run_save_watcher(watch_path: Path, bifrost_bin: str = "bifrost") -> None:
 
     try:
         import watchdog  # noqa: F401  # type: ignore[import-untyped]
-        _watch_with_watchdog(watch_path, bifrost_bin)
+        _watch_with_watchdog(watch_path, bifrost_cmd)
     except ImportError:
         log.warning("watcher: watchdog not installed, falling back to polling")
-        _watch_with_polling(watch_path, bifrost_bin)
+        _watch_with_polling(watch_path, bifrost_cmd)
