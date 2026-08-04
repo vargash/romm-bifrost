@@ -785,6 +785,11 @@ def build_save_sync_preview(
         operation
         for operation in raw_operations
         if operation.save_id not in untracked_save_ids
+        and not _is_redundant_upload_operation(
+            operation,
+            local_state_index.get(_save_lookup_key(operation.rom_id, operation.file_name)),
+            remote_save_index.get(_save_lookup_key(operation.rom_id, operation.file_name)),
+        )
     ]
 
     known_local_emulators = {
@@ -949,7 +954,7 @@ def execute_save_sync_preview(
                     continue
 
                 try:
-                    upload_result = client.upload_save_file(
+                    client.upload_save_file(
                         rom_id=operation.rom_id,
                         save_path=local_file.path,
                         device_id=preview.device_id,
@@ -980,7 +985,7 @@ def execute_save_sync_preview(
                             _save_lookup_key(operation.rom_id, operation.file_name)
                         )
                         if existing is not None:
-                            upload_result = client.upload_save_file(
+                            client.upload_save_file(
                                 rom_id=operation.rom_id,
                                 save_path=local_file.path,
                                 device_id=preview.device_id,
@@ -995,11 +1000,10 @@ def execute_save_sync_preview(
                             raise exc
                     else:
                         raise exc
-                # Establish device-save sync link so negotiate sees this device as current.
-                # POST /api/saves does not create DeviceSyncSchema automatically.
-                uploaded_save_id = upload_result.get("id") if isinstance(upload_result, dict) else None
-                if uploaded_save_id is not None:
-                    client.track_save_for_device(int(uploaded_save_id), preview.device_id)
+                # No separate track_save_for_device call needed here: upload_save_file
+                # already sends device_id on the POST/PUT itself, which is what
+                # establishes the DeviceSyncSchema link server-side. A follow-up
+                # POST /api/saves/{id}/track was redundant.
                 completed += 1
                 details.append(("upload", operation.file_name, "ok"))
                 continue

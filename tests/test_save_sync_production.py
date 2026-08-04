@@ -756,6 +756,8 @@ def test_cli_save_sync_conflict_server_wins(
     calls: dict[str, int] = {"download": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/devices/device-1":
+            return httpx.Response(200, json={"device_id": "device-1"})
         if request.url.path == "/api/roms":
             return httpx.Response(
                 200,
