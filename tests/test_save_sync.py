@@ -1729,3 +1729,172 @@ def test_execute_upload_matches_local_file_by_rom_and_slot_when_name_diverges(
         "Klonoa - Door to Phantomile (USA) [2026-08-03_21-19-47].srm",
         "ok",
     )
+
+
+def test_execute_upload_strips_local_slot_suffix_for_duckstation(tmp_path: Path) -> None:
+    """DuckStation's local "_N" slot suffix is this device's own on-disk naming
+    convention, not something other RomM clients share (RomM pairs on
+    (rom_id, slot), not filename) — the file uploaded to the server must be the
+    bare ROM name, not the local "_1.mcd" filename, so other clients (e.g.
+    Argosy Launcher) recognize it as the ROM's autosave/latest save by name too.
+    The local file on disk must NOT be renamed.
+    """
+    config = make_config(tmp_path)
+    saves_root = Path(config.emudeck.saves_path).expanduser()
+    (saves_root / "duckstation/saves").mkdir(parents=True, exist_ok=True)
+    local_save = saves_root / "duckstation/saves/Klonoa - Door to Phantomile (USA)_1.mcd"
+    local_save.write_bytes(b"local-save-data")
+
+    uploaded_names: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/roms":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "id": 10,
+                            "name": "Klonoa - Door to Phantomile (USA)",
+                            "fs_name": "Klonoa - Door to Phantomile (USA).zip",
+                        }
+                    ],
+                    "total": 1,
+                },
+            )
+        if request.url.path == "/api/saves" and request.method == "GET":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/api/sync/negotiate":
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": 1,
+                    "operations": [
+                        {
+                            "action": "upload",
+                            "rom_id": 10,
+                            "save_id": None,
+                            "file_name": "Klonoa - Door to Phantomile (USA)_1.mcd",
+                            "slot": "autosave",
+                            "reason": "New save",
+                        }
+                    ],
+                    "total_upload": 1,
+                    "total_download": 0,
+                    "total_conflict": 0,
+                    "total_no_op": 0,
+                },
+            )
+        if request.url.path == "/api/saves" and request.method == "POST":
+            uploaded_names.append(request.content)
+            return httpx.Response(
+                200,
+                json={
+                    "id": 55,
+                    "rom_id": 10,
+                    "file_name": "Klonoa - Door to Phantomile (USA).mcd",
+                    "updated_at": "2026-08-04T00:00:00Z",
+                },
+            )
+        if "/track" in request.url.path:
+            return httpx.Response(200, json={"id": 55})
+        return httpx.Response(404, json={})
+
+    client = RommApiClient(config, transport=httpx.MockTransport(handler))
+    preview = build_save_sync_preview(config, client)
+    result = execute_save_sync_preview(config, client, preview)
+    client.close()
+
+    assert result.executed == 1, result.details
+    assert len(uploaded_names) == 1
+    body = uploaded_names[0]
+    assert b'filename="Klonoa - Door to Phantomile (USA).mcd"' in body
+    assert b"_1.mcd" not in body
+    # local file on disk untouched
+    assert local_save.exists()
+    assert local_save.read_bytes() == b"local-save-data"
+
+
+def test_execute_download_restores_local_slot_suffix_for_duckstation(tmp_path: Path) -> None:
+    """The read-back side of the upload-naming fix: a same-emulator (non-cross-core)
+    download whose server file_name is bare (uploaded by another duckstation
+    device, or by bifrost itself post-fix) must be written locally with the
+    "_1" suffix DuckStation's per-game memory card convention expects.
+    """
+    config = make_config(tmp_path)
+    saves_root = Path(config.emudeck.saves_path)
+    (saves_root / "duckstation/saves").mkdir(parents=True, exist_ok=True)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/roms":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "id": 10,
+                            "name": "Klonoa - Door to Phantomile (USA)",
+                            "fs_name": "Klonoa - Door to Phantomile (USA).zip",
+                        }
+                    ],
+                    "total": 1,
+                },
+            )
+        if request.url.path == "/api/saves" and request.method == "GET":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/api/sync/negotiate":
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": 51,
+                    "operations": [
+                        {
+                            "action": "download",
+                            "rom_id": 10,
+                            "save_id": 99,
+                            "file_name": "Klonoa - Door to Phantomile (USA) [2026-08-04_00-00-00].mcd",
+                            "emulator": "duckstation",
+                            "reason": "Save exists on server but not on client",
+                        }
+                    ],
+                    "total_upload": 0,
+                    "total_download": 1,
+                    "total_conflict": 0,
+                    "total_no_op": 0,
+                },
+            )
+        if request.url.path == "/api/saves/99/content":
+            return httpx.Response(200, content=b"remote-save-data")
+        if request.url.path == "/api/saves/99/downloaded":
+            return httpx.Response(200, json={"id": 99})
+        if "/api/sync/sessions/" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "session": {
+                        "id": 51,
+                        "device_id": "device-1",
+                        "user_id": 1,
+                        "status": "completed",
+                        "initiated_at": "2026-08-04T00:00:00Z",
+                        "completed_at": "2026-08-04T00:00:01Z",
+                        "operations_planned": 1,
+                        "operations_completed": 1,
+                        "operations_failed": 0,
+                        "error_message": None,
+                        "created_at": "2026-08-04T00:00:00Z",
+                        "updated_at": "2026-08-04T00:00:01Z",
+                    }
+                },
+            )
+        return httpx.Response(404, json={})
+
+    client = RommApiClient(config, transport=httpx.MockTransport(handler))
+    preview = build_save_sync_preview(config, client)
+    result = execute_save_sync_preview(config, client, preview)
+    client.close()
+
+    assert result.executed == 1, result.details
+    destination = saves_root / "duckstation/saves/Klonoa - Door to Phantomile (USA)_1.mcd"
+    assert destination.exists(), list((saves_root / "duckstation/saves").iterdir())
+    assert destination.read_bytes() == b"remote-save-data"

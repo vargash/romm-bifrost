@@ -526,13 +526,14 @@ def _detect_unlinked_cross_core_saves(
     return warnings
 
 
-def _cross_core_target_filename(name: str, target_profile: SaveProfile) -> str:
-    """Rename a foreign-core save to the naming convention of a local profile.
-
-    Used only for opt-in cross-core matches (see find_cross_core_target):
-    swaps the extension to the target profile's and, for profiles that expect
-    a slot suffix (e.g. DuckStation's "<game>_<slot>.mcd"), appends "_1" when
-    the source filename didn't already carry one.
+def _apply_profile_naming(name: str, target_profile: SaveProfile) -> str:
+    """Rename a downloaded save to the naming convention of the local profile
+    that will own it — used both for opt-in cross-core matches (see
+    find_cross_core_target) and for a normal same-emulator download whose
+    server-side file_name was uploaded bare (see _upload_file_name): swaps
+    the extension to the target profile's and, for profiles that expect a
+    slot suffix (e.g. DuckStation's "<game>_<slot>.mcd"), appends "_1" when
+    the name didn't already carry one.
     """
     stem = Path(name).stem
     ext = (
@@ -543,6 +544,29 @@ def _cross_core_target_filename(name: str, target_profile: SaveProfile) -> str:
     if target_profile.strip_slot_suffix and not _SLOT_SUFFIX_RE.search(stem):
         stem = f"{stem}_1"
     return f"{stem}{ext}"
+
+
+def _upload_file_name(
+    local_file: LocalSaveFile,
+    source_profile: SaveProfile | None,
+    rom: RomSummary | None,
+) -> str:
+    """Name to report to RomM for an uploaded save.
+
+    For profiles with strip_slot_suffix (e.g. DuckStation's "<game>_1.mcd"),
+    upload under the bare ROM name instead of the local on-disk filename: the
+    local "_N" slot suffix is this device's own per-emulator naming
+    convention, not something other RomM clients (or the emulator core that
+    originally produced the save on another device) share. RomM already
+    pairs saves on (rom_id, slot), not filename — see find_cross_core_target
+    and _apply_profile_naming for the corresponding read-back conversion.
+    The file on disk is never renamed; only the name sent in the upload
+    changes.
+    """
+    if source_profile is None or not source_profile.strip_slot_suffix or rom is None:
+        return local_file.file_name
+    stem = Path(rom.fs_name).stem if rom.fs_name else (rom.name or local_file.path.stem)
+    return f"{stem}{local_file.path.suffix}"
 
 
 def _detect_unrouted_remote_emulators(
@@ -779,11 +803,6 @@ def execute_save_sync_preview(
     config is applied automatically (headless-safe).
     """
     save_root = _expand_path(config.emudeck.saves_path)
-    emulator_dest_dirs: dict[str, Path] = {
-        p.romm_emulator: save_root / p.save_subpath
-        for p in PROFILES
-        if p.romm_emulator and p.supported
-    }
     profile_by_romm_emulator: dict[str, SaveProfile] = {
         p.romm_emulator: p for p in PROFILES if p.romm_emulator and p.supported
     }
@@ -878,6 +897,10 @@ def execute_save_sync_preview(
                 if _meta is None:
                     _meta = local_state_meta_by_slot.get((operation.rom_id, operation.slot))
                 _emulator, _slot = _meta or (None, None)
+                _source_profile = profile_by_romm_emulator.get(_emulator) if _emulator else None
+                _upload_name = _upload_file_name(
+                    local_file, _source_profile, preview.rom_index.get(operation.rom_id)
+                )
                 try:
                     upload_result = client.upload_save_file(
                         rom_id=operation.rom_id,
@@ -890,6 +913,7 @@ def execute_save_sync_preview(
                         autocleanup_limit=_autocleanup_limit,
                         emulator=_emulator,
                         slot=_slot,
+                        upload_file_name=_upload_name,
                     )
                 except ApiError as exc:
                     # Legacy workaround: some RomM builds return 500 on POST when a save
@@ -918,6 +942,7 @@ def execute_save_sync_preview(
                                 overwrite=True,
                                 emulator=_emulator,
                                 slot=_slot,
+                                upload_file_name=_upload_name,
                             )
                         else:
                             raise exc
@@ -944,10 +969,13 @@ def execute_save_sync_preview(
             # Resolve dest: existing-file map -> emulator subdir -> opt-in cross-core match ->
             # bare root
             compat_rule: CrossCoreCompat | None = None
+            target_profile: SaveProfile | None = None
             dest_dir = preview.profile_destinations.get(canonical_name)
             if dest_dir is None and operation.emulator:
-                dest_dir = emulator_dest_dirs.get(operation.emulator)
-                if dest_dir is None:
+                target_profile = profile_by_romm_emulator.get(operation.emulator)
+                if target_profile is not None:
+                    dest_dir = save_root / target_profile.save_subpath
+                else:
                     compat_rule = find_cross_core_target(
                         operation.emulator, config.sync.cross_core_compat
                     )
@@ -955,18 +983,25 @@ def execute_save_sync_preview(
                         target_profile = profile_by_romm_emulator.get(compat_rule.target_emulator)
                         if target_profile is not None:
                             dest_dir = save_root / target_profile.save_subpath
-                            canonical_name = _cross_core_target_filename(
-                                canonical_name, target_profile
-                            )
                             _log.warning(
-                                "cross-core compat: %s save %r treated as %s-compatible "
-                                "(%s) -> %s",
+                                "cross-core compat: %s save %r treated as %s-compatible (%s)",
                                 operation.emulator,
                                 operation.file_name,
                                 compat_rule.target_emulator,
                                 compat_rule.note,
-                                canonical_name,
                             )
+                # Restore the local profile's own naming convention (e.g. DuckStation's
+                # "_1" slot suffix) — needed whenever the server-side name doesn't already
+                # carry it: either a cross-core save (foreign naming entirely) or a
+                # same-emulator save this device itself uploaded bare (see
+                # _upload_file_name).
+                if target_profile is not None and target_profile.strip_slot_suffix:
+                    renamed = _apply_profile_naming(canonical_name, target_profile)
+                    if renamed != canonical_name:
+                        canonical_name = renamed
+                        _log.info(
+                            "save-sync: restored local naming convention -> %s", canonical_name
+                        )
             if dest_dir is None:
                 dest_dir = save_root
             destination = dest_dir / canonical_name
