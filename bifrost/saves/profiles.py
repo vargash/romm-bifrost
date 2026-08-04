@@ -136,6 +136,14 @@ class CrossCoreCompat:
     source_emulator: str
     target_emulator: str
     note: str
+    # When set, the target expects exactly this many raw memory-card bytes
+    # (the PS1 standard card is 131072 bytes / 128KiB, a fixed hardware spec).
+    # Any bytes beyond this size are a foreign wrapper/trailer appended by the
+    # uploading client (observed: a JSON blob + magic-string footer from a
+    # mobile client), not part of the memory card image itself, and are
+    # truncated on download so the target emulator doesn't reject the file
+    # for having the wrong size.
+    expected_size_bytes: int | None = None
 
 
 CROSS_CORE_COMPAT: tuple[CrossCoreCompat, ...] = (
@@ -146,6 +154,7 @@ CROSS_CORE_COMPAT: tuple[CrossCoreCompat, ...] = (
         source_emulator="mednafen_psx_hw",
         target_emulator="duckstation",
         note="both use the standard 128KB PS1 per-game memory card image",
+        expected_size_bytes=131072,
     ),
 )
 

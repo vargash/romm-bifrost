@@ -1531,3 +1531,94 @@ def test_build_save_sync_preview_resync_still_warns_on_unrouted_remote_emulator(
     assert "Crash Bandicoot" in notice
     assert "mednafen_psx_hw" in notice
     assert "duckstation" in notice
+
+
+def test_execute_download_truncates_cross_core_trailer_to_expected_size(tmp_path: Path) -> None:
+    """Real-world observed case: a mednafen_psx_hw save uploaded by a mobile client
+    carries a 28-byte trailer (a JSON blob + magic-string footer) appended after the
+    raw 131072-byte PS1 memory card image. DuckStation rejects the file outright if
+    handed all 131100 bytes verbatim ("expected 131072, got 131100"). The opt-in
+    compat rule's expected_size_bytes must truncate the trailer before writing.
+    """
+    config = make_config(tmp_path)
+    config.sync.cross_core_compat = ["mednafen_psx_hw"]
+    saves_root = Path(config.emudeck.saves_path)
+    (saves_root / "duckstation/saves").mkdir(parents=True, exist_ok=True)
+
+    raw_memcard = bytes(range(256)) * 512  # 131072 bytes of deterministic filler
+    assert len(raw_memcard) == 131072
+    trailer = b'{"h":true,"v":1}' + b"\x10\x00\x00\x00" + b"ARGOSY\x01\x00"
+    assert len(trailer) == 28
+    uploaded_content = raw_memcard + trailer
+    assert len(uploaded_content) == 131100
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/roms":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {"id": 10, "name": "Klonoa - Door to Phantomile", "fs_name": "Klonoa.zip"}
+                    ],
+                    "total": 1,
+                },
+            )
+        if request.url.path == "/api/saves" and request.method == "GET":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/api/sync/negotiate":
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": 51,
+                    "operations": [
+                        {
+                            "action": "download",
+                            "rom_id": 10,
+                            "save_id": 99,
+                            "file_name": "Klonoa.srm",
+                            "emulator": "mednafen_psx_hw",
+                            "reason": "Save exists on server but not on client",
+                        }
+                    ],
+                    "total_upload": 0,
+                    "total_download": 1,
+                    "total_conflict": 0,
+                    "total_no_op": 0,
+                },
+            )
+        if request.url.path == "/api/saves/99/content":
+            return httpx.Response(200, content=uploaded_content)
+        if request.url.path == "/api/saves/99/downloaded":
+            return httpx.Response(200, json={"id": 99})
+        if "/api/sync/sessions/" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "session": {
+                        "id": 51,
+                        "device_id": "device-1",
+                        "user_id": 1,
+                        "status": "completed",
+                        "initiated_at": "2026-06-22T00:00:00Z",
+                        "completed_at": "2026-06-22T00:00:01Z",
+                        "operations_planned": 1,
+                        "operations_completed": 1,
+                        "operations_failed": 0,
+                        "error_message": None,
+                        "created_at": "2026-06-22T00:00:00Z",
+                        "updated_at": "2026-06-22T00:00:01Z",
+                    }
+                },
+            )
+        return httpx.Response(404, json={})
+
+    client = RommApiClient(config, transport=httpx.MockTransport(handler))
+    preview = build_save_sync_preview(config, client)
+    result = execute_save_sync_preview(config, client, preview)
+    client.close()
+
+    assert result.executed == 1
+    destination = saves_root / "duckstation/saves/Klonoa_1.mcd"
+    written = destination.read_bytes()
+    assert len(written) == 131072
+    assert written == raw_memcard

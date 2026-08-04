@@ -27,6 +27,7 @@ from bifrost.play_sessions import consume_pending_sessions
 from bifrost.saves.layout import EmudeckEsdeLayout, ScannedFile
 from bifrost.saves.profiles import (
     PROFILES,
+    CrossCoreCompat,
     SaveProfile,
     find_cross_core_rule,
     find_cross_core_target,
@@ -919,6 +920,7 @@ def execute_save_sync_preview(
             canonical_name = _local_filename_for_operation(operation, preview.rom_index)
             # Resolve dest: existing-file map -> emulator subdir -> opt-in cross-core match ->
             # bare root
+            compat_rule: CrossCoreCompat | None = None
             dest_dir = preview.profile_destinations.get(canonical_name)
             if dest_dir is None and operation.emulator:
                 dest_dir = emulator_dest_dirs.get(operation.emulator)
@@ -959,6 +961,22 @@ def execute_save_sync_preview(
                 session_id=preview.session_id,
                 optimistic=use_optimistic,
             )
+            if (
+                compat_rule is not None
+                and compat_rule.expected_size_bytes is not None
+                and len(content) > compat_rule.expected_size_bytes
+            ):
+                stripped = len(content) - compat_rule.expected_size_bytes
+                _log.warning(
+                    "cross-core compat: truncating %s from %d to %d bytes "
+                    "(stripping %d trailing bytes not part of the %s memory card image)",
+                    operation.file_name,
+                    len(content),
+                    compat_rule.expected_size_bytes,
+                    stripped,
+                    compat_rule.target_emulator,
+                )
+                content = content[: compat_rule.expected_size_bytes]
             destination.parent.mkdir(parents=True, exist_ok=True)
             _backup_local_file(destination)
             part = destination.with_name(destination.name + ".part")
