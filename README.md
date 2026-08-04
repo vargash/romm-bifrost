@@ -126,6 +126,10 @@ bifrost setup --pair --url http://192.168.1.x:8080 --pair-code MCM9-FDSQ
 
 ## Usage
 
+> **0.4.0 breaking change:** save-related commands moved under a `save` group —
+> `save-sync` → `save sync`, `save-untrack` → `save untrack`, `watch-saves` → `save watch`,
+> `debug saves` → `save debug`. Update any scripts, cron entries or aliases that call the old names.
+
 ```bash
 # Check connection and library stats
 bifrost status
@@ -167,25 +171,27 @@ bifrost config show
 bifrost config set romm.url http://192.168.1.x:8080
 
 # Preview save sync operations
-bifrost save-sync
+bifrost save sync
 
 # Apply save sync operations (optionally filtered)
-bifrost save-sync --apply
-bifrost save-sync --apply --only-file "Game.srm"
+bifrost save sync --apply
+bifrost save sync --apply --only-file "Game.srm"
 
-# Preview/apply state sync (emulator savestates)
-bifrost state-sync
-bifrost state-sync --apply --only-file "Game.state1"
+# Stop syncing one save to this device
+bifrost save untrack 123
+
+# Watch local saves and trigger sync on change (used by bifrost-save-watch.service)
+bifrost save watch
 
 # Bypass disk cache for a fresh run
-bifrost save-sync --apply --no-cache
+bifrost save sync --apply --no-cache
 
 # Cache status and invalidation
 bifrost cache status
 bifrost cache invalidate
 
 # Debug local save discovery
-bifrost debug saves
+bifrost save debug
 ```
 
 ---
@@ -229,7 +235,7 @@ The incremental path (ES-DE startup) only picks up ROMs `updated_after` the last
 | Unit | Trigger | What it does |
 |------|---------|--------------|
 | `bifrost-sync.timer` | Boot +2 min, then every 6 h | ROM symlinks + gamelist.xml |
-| `bifrost-save-sync.timer` | Boot +3 min, then every 2 h | Save files + savestates |
+| `bifrost-save-sync.timer` | Boot +3 min, then every 2 h | Save files |
 | `bifrost-save-watch.service` | Always running | Detects save file changes, triggers sync within 15 s |
 
 Install and enable all services in one command:
@@ -291,14 +297,14 @@ bifrost esde-hooks uninstall
 
 ### Save file watcher
 
-`bifrost-save-watch.service` watches your saves directory using inotify (via `watchdog`) and triggers a save + state sync after a 15-second quiet window following the last file change. This means saves reach RomM within seconds of an emulator writing them, without polling.
+`bifrost-save-watch.service` watches your saves directory using inotify (via `watchdog`) and triggers a save sync after a 15-second quiet window following the last file change. This means saves reach RomM within seconds of an emulator writing them, without polling.
 
 If `watchdog` is not installed, the service falls back to polling every 30 seconds.
 
 Run the watcher manually (useful for testing or debugging):
 
 ```bash
-bifrost watch-saves
+bifrost save watch
 ```
 
 ### Running unattended from cron (alternative to systemd)
@@ -308,7 +314,7 @@ If you prefer cron over systemd timers:
 ```bash
 # Add with: crontab -e
 0 */6 * * * bifrost sync --apply >> ~/.local/share/bifrost/logs/cron.log 2>&1
-0 */2 * * * bifrost save-sync --apply >> ~/.local/share/bifrost/logs/cron.log 2>&1
+0 */2 * * * bifrost save sync --apply >> ~/.local/share/bifrost/logs/cron.log 2>&1
 ```
 
 ---
@@ -339,7 +345,7 @@ bifrost doctor --log
 
 ## Pre-flight checks
 
-Every `--apply` command (sync, gamelist, save-sync, state-sync) runs pre-flight checks before making any changes:
+Every `--apply` command (sync, gamelist, save sync) runs pre-flight checks before making any changes:
 
 - NAS paths exist and are readable (detects stale/empty mounts)
 - Destination directories are writable
@@ -381,18 +387,18 @@ The default is `ask`, gated behind `prune_orphan_platforms = false` — nothing 
 
 ---
 
-## Save/State Sync
+## Save Sync
 
 ### How it works
 
-`bifrost save-sync` syncs local save files (`.srm`, `.sav`, etc.) with RomM using the negotiate/complete handshake:
+`bifrost save sync` syncs local save files (`.srm`, `.sav`, etc.) with RomM using the negotiate/complete handshake:
 
 1. Scans `[emudeck].saves_path` for local save files
 2. Fuzzy-matches each save to a ROM in the RomM library by filename
 3. Calls `POST /api/sync/negotiate` — sends the full inventory, receives upload/download/conflict operations
 4. In `--apply` mode, executes each operation; calls `POST /api/sync/sessions/{id}/complete` at the end
 
-`bifrost state-sync` handles emulator savestates (`.state`, `.state1`, …) via a simpler upload-only flow against `/api/states`.
+Emulator savestate sync (`.state`, `.state1`, …) is implemented at the module level (`bifrost/state_sync.py`) but not currently wired up to a CLI command — it's on hold pending RomM device-sync API compliance work.
 
 ### Conflict resolution
 
@@ -444,37 +450,6 @@ ttl_roms_hours = 6
 ttl_platforms_hours = 24
 ttl_firmware_hours = 24
 ```
-
----
-
-## Implementation status
-
-| Area | Status |
-|------|--------|
-| Config (TOML, wizard, validation) | ✅ |
-| RomM API client | ✅ |
-| `bifrost sync` — ROM/BIOS/asset symlinks | ✅ |
-| `bifrost gamelist` — gamelist.xml merge-safe | ✅ |
-| `bifrost save-sync` — conflict resolution, backup, legacy fallback | ✅ |
-| `bifrost state-sync` | ✅ |
-| `bifrost device-enroll` | ✅ |
-| Three-level API cache (L1 mem + L2 disk + L3 HTTP) | ✅ |
-| Structured logging + log rotation | ✅ |
-| Pre-flight checks (NAS, paths, disk space) | ✅ |
-| `bifrost doctor` — diagnostics command | ✅ |
-| Systemd user services + timers | ✅ |
-| Save file watcher (inotify/polling) | ✅ |
-| `install-deck.sh` — one-shot Steam Deck installer (installs from GitHub release) | ✅ |
-| GitHub Actions release workflow (wheel + sdist + installer asset on tag) | ✅ |
-| `bifrost sync --incremental` — delta sync via `updated_after` | ✅ |
-| `bifrost sync --check-stale` — identifier-set diff, stale symlink removal | ✅ |
-| `bifrost sync --prune-orphans` — orphan platform folder detection/removal | ✅ |
-| ES-DE startup hooks (`bifrost esde-hooks install`) | ✅ |
-| Watch mode for assets / gamelist auto-rebuild | ❌ planned |
-| Structured metrics / JSON export | ❌ planned |
-| Parallel symlink evaluation/apply (ThreadPoolExecutor, configurable workers) | ✅ |
-| API request batching | ❌ planned |
-| Partial sync resume on failure | ❌ planned |
 
 ---
 

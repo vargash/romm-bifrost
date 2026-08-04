@@ -10,9 +10,11 @@ import re
 import shutil
 import signal
 import sys
+from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, get_origin
+from typing import Any, TypeVar, get_origin
 
 import click
 from pydantic import BaseModel
@@ -38,8 +40,8 @@ from bifrost.config import (
     save_config,
 )
 from bifrost.errors import ApiError, AuthenticationError, ConfigError, NetworkError
-from bifrost.locking import SaveSyncLockError, save_sync_lock
 from bifrost.gamelist import apply_gamelist_delta, apply_gamelist_plan, build_gamelist_plan
+from bifrost.locking import SaveSyncLockError, save_sync_lock
 from bifrost.logging_setup import setup_file_logging
 from bifrost.multidisc import (
     M3uOperation,
@@ -55,7 +57,6 @@ from bifrost.preflight import (
     run_sync_preflight,
 )
 from bifrost.save_sync import build_save_sync_preview, execute_save_sync_preview
-from bifrost.state_sync import build_state_sync_preview, execute_state_sync_preview
 from bifrost.symlink_manager import (
     OrphanRemovalOperation,
     RemoveSymlinkOperation,
@@ -121,15 +122,72 @@ def _abort_on_preflight(result: PreflightResult, console: Console) -> None:
         raise SystemExit(EXIT_CONFIG_ERROR)
 
 
+# ---------------------------------------------------------------------------
+# Shared option decorators + error-handling helpers
+#
+# Every subcommand that touches the config file or the RomM API used to
+# hand-roll its own --config option and its own try/except around
+# load_config()/RommApiClient calls. These four helpers are the single
+# implementation; commands below apply them instead of repeating the pattern.
+# ---------------------------------------------------------------------------
+
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def config_path_option(f: _F) -> _F:
+    """Shared `--config` option for commands that load AppConfig from a TOML file."""
+    return click.option(
+        "--config",
+        "config_path",
+        type=click.Path(path_type=Path, dir_okay=False),
+        default=None,
+        help="Override config file path (default: ~/.config/bifrost/config.toml).",
+    )(f)
+
+
+def no_cache_option(f: _F) -> _F:
+    """Shared `--no-cache` flag for commands that hit the RomM API."""
+    return click.option(
+        "--no-cache", "no_cache", is_flag=True, help="Bypass disk cache for this run."
+    )(f)
+
+
+def load_config_or_exit(console: Console, config_path: Path | None) -> tuple[AppConfig, Path]:
+    """Resolve config_path (or the XDG default), load it, or print an error and exit.
+
+    Exits EXIT_CONFIG_ERROR on a ConfigError, matching every command's previous
+    hand-rolled try/except around load_config().
+    """
+    resolved_path = config_path or default_config_path()
+    try:
+        return load_config(resolved_path), resolved_path
+    except ConfigError as exc:
+        console.print(f"[red]Configuration error:[/red] {exc}")
+        raise SystemExit(EXIT_CONFIG_ERROR) from exc
+
+
+@contextmanager
+def api_errors(console: Console) -> Iterator[None]:
+    """Wrap RomM API calls: print an error and exit on auth/network/API failures."""
+    try:
+        yield
+    except AuthenticationError as exc:
+        console.print(f"[red]Authentication error:[/red] {exc}")
+        raise SystemExit(EXIT_AUTH_ERROR) from exc
+    except (NetworkError, ApiError) as exc:
+        console.print(f"[red]API error:[/red] {exc}")
+        raise SystemExit(EXIT_API_ERROR) from exc
+
+
 @click.group(help="Bifrost: RomM <-> ES-DE bridge CLI")
 @click.version_option(version=_bifrost_version, prog_name="bifrost")
 def main() -> None:
     """Main CLI group."""
 
 
-@main.group(help="Debug helpers for inspecting local paths and RomM discovery.")
-def debug() -> None:
-    """Debug command group."""
+@main.group(name="save", help="Sync, untrack, watch and debug local save files.")
+def save_group() -> None:
+    """Save command group."""
 
 
 @main.group(help="View and update Bifrost configuration values.")
@@ -153,13 +211,7 @@ def _format_age(age_seconds: float | None) -> str:
 
 
 @cache_group.command(name="status", help="Show age and item count for each cached collection.")
-@click.option(
-    "--config",
-    "config_path",
-    type=click.Path(path_type=Path, dir_okay=False),
-    default=None,
-    help="Override config file path (default: ~/.config/bifrost/config.toml).",
-)
+@config_path_option
 def cache_status(config_path: Path | None) -> None:
     console = Console()
     resolved_path = config_path or default_config_path()
@@ -206,13 +258,7 @@ def cache_status(config_path: Path | None) -> None:
 
 
 @cache_group.command(name="invalidate", help="Invalidate one or all cached collections.")
-@click.option(
-    "--config",
-    "config_path",
-    type=click.Path(path_type=Path, dir_okay=False),
-    default=None,
-    help="Override config file path (default: ~/.config/bifrost/config.toml).",
-)
+@config_path_option
 @click.option(
     "--key",
     type=click.Choice(["platforms", "roms", "firmware"]),
@@ -258,6 +304,45 @@ def _resolve_interactive_base_config(existing_config: AppConfig | None) -> AppCo
     return AppConfig(
         romm=RommConfig(url="http://localhost:8080", client_token="rmm_placeholder", device_id="")
     )
+
+
+# (result key, prompt label, "section.field" on AppConfig) for every NAS/ES-DE/EmuDeck
+# path `setup` can configure. Drives _resolve_setup_paths so the interactive wizard and
+# the --flag-driven path don't each hand-roll the same 8 prompt-or-default blocks.
+_SETUP_PATH_FIELDS: list[tuple[str, str, str]] = [
+    ("nas_library", "NAS library path", "nas.library_path"),
+    ("nas_resources", "NAS resources path", "nas.resources_path"),
+    ("esde_roms", "ES-DE ROMs path", "esde.roms_path"),
+    ("esde_gamelists", "ES-DE gamelists path", "esde.gamelists_path"),
+    ("esde_custom_systems", "ES-DE custom_systems path", "esde.custom_systems_path"),
+    ("emudeck_bios", "EmuDeck BIOS path", "emudeck.bios_path"),
+    ("emudeck_media", "EmuDeck media path", "emudeck.media_path"),
+    ("emudeck_saves", "EmuDeck saves path", "emudeck.saves_path"),
+]
+
+
+def _resolve_setup_paths(
+    base_config: AppConfig, *, prompt: bool, flag_values: dict[str, str | None]
+) -> dict[str, str]:
+    """Resolve every setup path field from an explicit flag, a prompt, or the config default.
+
+    Used by both `setup` branches: the interactive wizard calls this with
+    flag_values={} (no flags exist in that branch) and prompt=<user said yes to
+    updating paths>; the --flag-driven branch passes prompt=configure_paths and
+    the real flag values, so an explicit flag always wins over prompting.
+    """
+    resolved: dict[str, str] = {}
+    for key, label, attr_path in _SETUP_PATH_FIELDS:
+        section, field = attr_path.split(".")
+        default = str(getattr(getattr(base_config, section), field))
+        flag_value = flag_values.get(key)
+        if prompt:
+            resolved[key] = flag_value if flag_value is not None else Prompt.ask(
+                label, default=default
+            )
+        else:
+            resolved[key] = flag_value or default
+    return resolved
 
 
 def _collect_save_debug_rows(root: Path) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
@@ -316,14 +401,8 @@ def _collect_save_debug_rows(root: Path) -> tuple[list[dict[str, str]], list[dic
     return folder_rows, file_rows
 
 
-@debug.command(name="saves", help="Inspect the local save tree that Bifrost scans.")
-@click.option(
-    "--config",
-    "config_path",
-    type=click.Path(path_type=Path, dir_okay=False),
-    default=None,
-    help="Override config file path (default: ~/.config/bifrost/config.toml).",
-)
+@save_group.command(name="debug", help="Inspect the local save tree that Bifrost scans.")
+@config_path_option
 @click.option(
     "--limit",
     type=click.IntRange(min=1),
@@ -331,17 +410,11 @@ def _collect_save_debug_rows(root: Path) -> tuple[list[dict[str, str]], list[dic
     show_default=True,
     help="Maximum number of file rows to print.",
 )
-def debug_saves(config_path: Path | None, limit: int) -> None:
+def save_debug(config_path: Path | None, limit: int) -> None:
     """Show the local save path, folder counts and discovered files."""
 
     console = Console()
-    resolved_path = config_path or default_config_path()
-
-    try:
-        config = load_config(resolved_path)
-    except ConfigError as exc:
-        console.print(f"[red]Configuration error:[/red] {exc}")
-        raise SystemExit(EXIT_CONFIG_ERROR) from exc
+    config, resolved_path = load_config_or_exit(console, config_path)
 
     save_root = Path(config.emudeck.saves_path).expanduser()
     folder_rows, file_rows = _collect_save_debug_rows(save_root)
@@ -382,24 +455,12 @@ def debug_saves(config_path: Path | None, limit: int) -> None:
 
 
 @config.command(name="show", help="Print current configuration values.")
-@click.option(
-    "--config",
-    "config_path",
-    type=click.Path(path_type=Path, dir_okay=False),
-    default=None,
-    help="Override config file path (default: ~/.config/bifrost/config.toml).",
-)
+@config_path_option
 def config_show(config_path: Path | None) -> None:
     """Print loaded config values in a key/value table."""
 
     console = Console()
-    resolved_path = config_path or default_config_path()
-
-    try:
-        loaded = load_config(resolved_path)
-    except ConfigError as exc:
-        console.print(f"[red]Configuration error:[/red] {exc}")
-        raise SystemExit(EXIT_CONFIG_ERROR) from exc
+    loaded, resolved_path = load_config_or_exit(console, config_path)
 
     flattened: dict[str, str] = {}
     _flatten_config("", loaded.model_dump(mode="python"), flattened)
@@ -447,24 +508,12 @@ def _leaf_field_annotation(key_path: list[str]) -> Any:
 )
 @click.argument("key", type=str)
 @click.argument("value", type=str)
-@click.option(
-    "--config",
-    "config_path",
-    type=click.Path(path_type=Path, dir_okay=False),
-    default=None,
-    help="Override config file path (default: ~/.config/bifrost/config.toml).",
-)
+@config_path_option
 def config_set(key: str, value: str, config_path: Path | None) -> None:
     """Set a config value and persist it to disk."""
 
     console = Console()
-    resolved_path = config_path or default_config_path()
-
-    try:
-        loaded = load_config(resolved_path)
-    except ConfigError as exc:
-        console.print(f"[red]Configuration error:[/red] {exc}")
-        raise SystemExit(EXIT_CONFIG_ERROR) from exc
+    loaded, resolved_path = load_config_or_exit(console, config_path)
 
     key_path = [part for part in key.strip().split(".") if part]
     if len(key_path) < 2:
@@ -510,35 +559,19 @@ def config_set(key: str, value: str, config_path: Path | None) -> None:
 
 
 @main.command(help="Check RomM API connectivity and basic library endpoints.")
-@click.option(
-    "--config",
-    "config_path",
-    type=click.Path(path_type=Path, dir_okay=False),
-    default=None,
-    help="Override config file path (default: ~/.config/bifrost/config.toml).",
-)
+@config_path_option
 def status(config_path: Path | None) -> None:
     """Validate current configuration and API reachability."""
 
     console = Console()
-    resolved_path = config_path or default_config_path()
+    config, resolved_path = load_config_or_exit(console, config_path)
 
-    try:
-        config = load_config(resolved_path)
-    except ConfigError as exc:
-        console.print(f"[red]Configuration error:[/red] {exc}")
-        raise SystemExit(EXIT_CONFIG_ERROR) from exc
-
-    try:
-        with RommApiClient(config, timeout_seconds=config.romm.timeout_seconds) as client:
-            heartbeat = client.heartbeat()
-            stats = client.stats(include_platform_stats=False)
-    except AuthenticationError as exc:
-        console.print(f"[red]Authentication error:[/red] {exc}")
-        raise SystemExit(EXIT_AUTH_ERROR) from exc
-    except (NetworkError, ApiError) as exc:
-        console.print(f"[red]API error:[/red] {exc}")
-        raise SystemExit(EXIT_API_ERROR) from exc
+    with (
+        api_errors(console),
+        RommApiClient(config, timeout_seconds=config.romm.timeout_seconds) as client,
+    ):
+        heartbeat = client.heartbeat()
+        stats = client.stats(include_platform_stats=False)
 
     table = Table(title="Bifrost Status")
     table.add_column("Check")
@@ -560,37 +593,21 @@ def status(config_path: Path | None) -> None:
 
 
 @main.command(help="Scan RomM for missing, duplicate and unmatched ROM anomalies.")
-@click.option(
-    "--config",
-    "config_path",
-    type=click.Path(path_type=Path, dir_okay=False),
-    default=None,
-    help="Override config file path (default: ~/.config/bifrost/config.toml).",
-)
+@config_path_option
 def scan(config_path: Path | None) -> None:
     """Display a lightweight RomM anomaly report."""
 
     console = Console()
-    resolved_path = config_path or default_config_path()
+    config, _resolved_path = load_config_or_exit(console, config_path)
 
-    try:
-        config = load_config(resolved_path)
-    except ConfigError as exc:
-        console.print(f"[red]Configuration error:[/red] {exc}")
-        raise SystemExit(EXIT_CONFIG_ERROR) from exc
-
-    try:
-        with RommApiClient(config, timeout_seconds=config.romm.timeout_seconds) as client:
-            stats = client.stats(include_platform_stats=False)
-            unmatched_roms = client.roms_count(matched=False)
-            missing_roms = client.roms_count(missing=True)
-            duplicate_roms = client.roms_count(duplicate=True)
-    except AuthenticationError as exc:
-        console.print(f"[red]Authentication error:[/red] {exc}")
-        raise SystemExit(EXIT_AUTH_ERROR) from exc
-    except (NetworkError, ApiError) as exc:
-        console.print(f"[red]API error:[/red] {exc}")
-        raise SystemExit(EXIT_API_ERROR) from exc
+    with (
+        api_errors(console),
+        RommApiClient(config, timeout_seconds=config.romm.timeout_seconds) as client,
+    ):
+        stats = client.stats(include_platform_stats=False)
+        unmatched_roms = client.roms_count(matched=False)
+        missing_roms = client.roms_count(missing=True)
+        duplicate_roms = client.roms_count(duplicate=True)
 
     table = Table(title="Bifrost Scan")
     table.add_column("Check")
@@ -607,73 +624,59 @@ def scan(config_path: Path | None) -> None:
 
 
 @main.command(help="Generate or preview ES-DE gamelist.xml files from RomM metadata.")
-@click.option(
-    "--config",
-    "config_path",
-    type=click.Path(path_type=Path, dir_okay=False),
-    default=None,
-    help="Override config file path (default: ~/.config/bifrost/config.toml).",
-)
+@config_path_option
 @click.option(
     "--apply",
     is_flag=True,
     help="Write gamelist.xml files to disk. Without this flag, command runs in dry-run mode.",
 )
-@click.option("--no-cache", "no_cache", is_flag=True, help="Bypass disk cache for this run.")
+@no_cache_option
 def gamelist(config_path: Path | None, apply: bool, no_cache: bool) -> None:
     """Generate merge-safe gamelist.xml plans or files."""
 
     console = Console()
-    resolved_path = config_path or default_config_path()
+    config, _resolved_path = load_config_or_exit(console, config_path)
     rows: list[dict[str, Any]] = []
-
-    try:
-        config = load_config(resolved_path)
-    except ConfigError as exc:
-        console.print(f"[red]Configuration error:[/red] {exc}")
-        raise SystemExit(EXIT_CONFIG_ERROR) from exc
 
     if apply:
         _abort_on_preflight(run_sync_preflight(config), console)
 
-    try:
-        with RommApiClient(config, timeout_seconds=config.romm.timeout_seconds, no_cache=no_cache) as client:
-            if apply:
-                apply_results = apply_gamelist_plan(config, client)
-                rows = [
-                    {
-                        "platform": result.plan.platform_slug,
-                        "path": result.plan.output_path,
-                        "roms": result.plan.total_roms,
-                        "new": result.plan.new_entries,
-                        "updated": result.plan.updated_entries,
-                        "unchanged": result.plan.unchanged_entries,
-                        "removed": result.plan.removed_entries,
-                        "written": result.written,
-                    }
-                    for result in apply_results
-                ]
-            else:
-                plans = build_gamelist_plan(config, client)
-                rows = [
-                    {
-                        "platform": plan.platform_slug,
-                        "path": plan.output_path,
-                        "roms": plan.total_roms,
-                        "new": plan.new_entries,
-                        "updated": plan.updated_entries,
-                        "unchanged": plan.unchanged_entries,
-                        "removed": plan.removed_entries,
-                        "written": False,
-                    }
-                    for plan in plans
-                ]
-    except AuthenticationError as exc:
-        console.print(f"[red]Authentication error:[/red] {exc}")
-        raise SystemExit(EXIT_AUTH_ERROR) from exc
-    except (NetworkError, ApiError) as exc:
-        console.print(f"[red]API error:[/red] {exc}")
-        raise SystemExit(EXIT_API_ERROR) from exc
+    with (
+        api_errors(console),
+        RommApiClient(
+            config, timeout_seconds=config.romm.timeout_seconds, no_cache=no_cache
+        ) as client,
+    ):
+        if apply:
+            apply_results = apply_gamelist_plan(config, client)
+            rows = [
+                {
+                    "platform": result.plan.platform_slug,
+                    "path": result.plan.output_path,
+                    "roms": result.plan.total_roms,
+                    "new": result.plan.new_entries,
+                    "updated": result.plan.updated_entries,
+                    "unchanged": result.plan.unchanged_entries,
+                    "removed": result.plan.removed_entries,
+                    "written": result.written,
+                }
+                for result in apply_results
+            ]
+        else:
+            plans = build_gamelist_plan(config, client)
+            rows = [
+                {
+                    "platform": plan.platform_slug,
+                    "path": plan.output_path,
+                    "roms": plan.total_roms,
+                    "new": plan.new_entries,
+                    "updated": plan.updated_entries,
+                    "unchanged": plan.unchanged_entries,
+                    "removed": plan.removed_entries,
+                    "written": False,
+                }
+                for plan in plans
+            ]
 
     total_platforms = len(rows)
     total_roms = sum(int(row["roms"]) for row in rows)
@@ -870,19 +873,13 @@ def _print_sync_summary(
 
 
 @main.command(help="Plan/apply ROM, BIOS and asset symlinks for ES-DE.")
-@click.option(
-    "--config",
-    "config_path",
-    type=click.Path(path_type=Path, dir_okay=False),
-    default=None,
-    help="Override config file path (default: ~/.config/bifrost/config.toml).",
-)
+@config_path_option
 @click.option(
     "--apply",
     is_flag=True,
     help="Apply filesystem changes. Without this flag, sync runs in dry-run mode.",
 )
-@click.option("--no-cache", "no_cache", is_flag=True, help="Bypass disk cache for this run.")
+@no_cache_option
 @click.option(
     "--incremental",
     is_flag=True,
@@ -930,17 +927,12 @@ def sync(
     console = Console()
     _sync_log = logging.getLogger("bifrost.cli.sync")
     is_interactive = sys.stdin.isatty() and sys.stdout.isatty()
-    resolved_path = config_path or default_config_path()
 
     if incremental and check_stale:
         console.print("[red]--incremental and --check-stale are mutually exclusive.[/red]")
         raise SystemExit(EXIT_CONFIG_ERROR)
 
-    try:
-        config = load_config(resolved_path)
-    except ConfigError as exc:
-        console.print(f"[red]Configuration error:[/red] {exc}")
-        raise SystemExit(EXIT_CONFIG_ERROR) from exc
+    config, resolved_path = load_config_or_exit(console, config_path)
 
     bifrost_cache = BifrostCache(config.cache) if config.cache.enabled else None
 
@@ -1246,14 +1238,8 @@ def sync(
     raise SystemExit(EXIT_OK)
 
 
-@main.command(name="save-sync", help="Preview RomM save sync negotiation from local save files.")
-@click.option(
-    "--config",
-    "config_path",
-    type=click.Path(path_type=Path, dir_okay=False),
-    default=None,
-    help="Override config file path (default: ~/.config/bifrost/config.toml).",
-)
+@save_group.command(name="sync", help="Preview RomM save sync negotiation from local save files.")
+@config_path_option
 @click.option(
     "--device-id",
     type=str,
@@ -1272,7 +1258,7 @@ def sync(
     type=str,
     help="Filter sync to one or more file names/path fragments.",
 )
-@click.option("--no-cache", "no_cache", is_flag=True, help="Bypass disk cache for this run.")
+@no_cache_option
 @click.option(
     "--on-event",
     "on_event",
@@ -1319,22 +1305,17 @@ def save_sync(
     """Scan local saves and preview the RomM sync negotiation."""
 
     console = Console()
-    resolved_path = config_path or default_config_path()
     setup_file_logging()
     _cli_log = logging.getLogger("bifrost.cli.save_sync")
 
-    try:
-        config = load_config(resolved_path)
-    except ConfigError as exc:
-        console.print(f"[red]Configuration error:[/red] {exc}")
-        raise SystemExit(EXIT_CONFIG_ERROR) from exc
+    config, resolved_path = load_config_or_exit(console, config_path)
 
     if apply:
         _abort_on_preflight(run_save_preflight(config), console)
 
     is_interactive = sys.stdin.isatty() and sys.stdout.isatty()
     _cli_log.info(
-        "save-sync started: apply=%s interactive=%s filters=%s on_event=%s",
+        "save sync started: apply=%s interactive=%s filters=%s on_event=%s",
         apply,
         is_interactive,
         list(only_files),
@@ -1451,7 +1432,7 @@ def save_sync(
                     except SaveSyncLockError as exc:
                         if on_event is not None:
                             _cli_log.info(
-                                "save-sync already running; skipping hook (%s)", on_event
+                                "save sync already running; skipping hook (%s)", on_event
                             )
                             raise SystemExit(EXIT_OK) from exc
                         _cli_log.error("lock error: %s", exc)
@@ -1472,7 +1453,7 @@ def save_sync(
 
     except TimeoutError:
         _cli_log.warning(
-            "save-sync timed out after %ds (on_event=%s); fail-open exit 0",
+            "save sync timed out after %ds (on_event=%s); fail-open exit 0",
             timeout_seconds,
             on_event,
         )
@@ -1571,7 +1552,7 @@ def save_sync(
                 console.print("[yellow]Showing first 25 execution rows only.[/yellow]")
 
         _cli_log.info(
-            "save-sync completed: executed=%d failed=%d skipped=%d",
+            "save sync completed: executed=%d failed=%d skipped=%d",
             execution.executed,
             execution.failed,
             execution.skipped,
@@ -1587,18 +1568,12 @@ def save_sync(
     raise SystemExit(EXIT_OK)
 
 
-@main.command(
-    name="save-untrack",
+@save_group.command(
+    name="untrack",
     help="Stop syncing a save to this device (RomM will no longer push/pull it here).",
 )
 @click.argument("save_id", type=int)
-@click.option(
-    "--config",
-    "config_path",
-    type=click.Path(path_type=Path, dir_okay=False),
-    default=None,
-    help="Override config file path (default: ~/.config/bifrost/config.toml).",
-)
+@config_path_option
 @click.option(
     "--device-id",
     type=str,
@@ -1609,13 +1584,7 @@ def save_untrack(save_id: int, config_path: Path | None, device_id: str | None) 
     """Mark a save as untracked for this device via POST /api/saves/{id}/untrack."""
 
     console = Console()
-    resolved_path = config_path or default_config_path()
-
-    try:
-        config = load_config(resolved_path)
-    except ConfigError as exc:
-        console.print(f"[red]Configuration error:[/red] {exc}")
-        raise SystemExit(EXIT_CONFIG_ERROR) from exc
+    config, _resolved_path = load_config_or_exit(console, config_path)
 
     resolved_device_id = (device_id or config.romm.device_id).strip()
     if not resolved_device_id:
@@ -1625,181 +1594,16 @@ def save_untrack(save_id: int, config_path: Path | None, device_id: str | None) 
         )
         raise SystemExit(EXIT_CONFIG_ERROR)
 
-    try:
-        with RommApiClient(config, timeout_seconds=config.romm.timeout_seconds) as client:
-            client.untrack_save(save_id, resolved_device_id)
-    except AuthenticationError as exc:
-        console.print(f"[red]Authentication error:[/red] {exc}")
-        raise SystemExit(EXIT_AUTH_ERROR) from exc
-    except (NetworkError, ApiError) as exc:
-        console.print(f"[red]API error:[/red] {exc}")
-        raise SystemExit(EXIT_API_ERROR) from exc
+    with (
+        api_errors(console),
+        RommApiClient(config, timeout_seconds=config.romm.timeout_seconds) as client,
+    ):
+        client.untrack_save(save_id, resolved_device_id)
 
     console.print(
         f"[green]Save {save_id} untracked for device {resolved_device_id}.[/green] "
         "It will no longer be synced to this device."
     )
-    raise SystemExit(EXIT_OK)
-
-
-# DISABILITATO (Fase 0 — state sync escluso, non deve essere richiamabile).
-# Comando deregistrato dalla CLI: la funzione resta definita ma non è collegata al gruppo `main`,
-# quindi `bifrost state-sync` restituisce "No such command". Per riattivarlo, decommentare la riga.
-# @main.command(name="state-sync", help="Preview/apply RomM state sync from local state files.")
-@click.option(
-    "--config",
-    "config_path",
-    type=click.Path(path_type=Path, dir_okay=False),
-    default=None,
-    help="Override config file path (default: ~/.config/bifrost/config.toml).",
-)
-@click.option(
-    "--apply",
-    is_flag=True,
-    help="Execute state upload operations. Without this flag, command runs in preview mode.",
-)
-@click.option(
-    "--only-file",
-    "only_files",
-    multiple=True,
-    type=str,
-    help="Filter sync to one or more file names/path fragments.",
-)
-@click.option("--no-cache", "no_cache", is_flag=True, help="Bypass disk cache for this run.")
-def state_sync(
-    config_path: Path | None,
-    apply: bool,
-    only_files: tuple[str, ...],
-    no_cache: bool,
-) -> None:
-    """Scan local state files and preview/apply state sync actions."""
-
-    console = Console()
-    resolved_path = config_path or default_config_path()
-    setup_file_logging()
-    _cli_log = logging.getLogger("bifrost.cli.state_sync")
-    _cli_log.info("state-sync started: apply=%s filters=%s", apply, list(only_files))
-
-    try:
-        config = load_config(resolved_path)
-    except ConfigError as exc:
-        console.print(f"[red]Configuration error:[/red] {exc}")
-        raise SystemExit(EXIT_CONFIG_ERROR) from exc
-
-    if apply:
-        _abort_on_preflight(run_save_preflight(config), console)
-
-    try:
-        with RommApiClient(config, timeout_seconds=config.romm.timeout_seconds, no_cache=no_cache) as client:
-            preview = build_state_sync_preview(
-                config,
-                client,
-                file_filters=list(only_files),
-            )
-            execution = None
-            if apply:
-                execution = execute_state_sync_preview(
-                    config,
-                    client,
-                    preview,
-                    file_filters=list(only_files),
-                )
-    except AuthenticationError as exc:
-        _cli_log.error("authentication error: %s", exc)
-        console.print(f"[red]Authentication error:[/red] {exc}")
-        raise SystemExit(EXIT_AUTH_ERROR) from exc
-    except ConfigError as exc:
-        _cli_log.error("config error: %s", exc)
-        console.print(f"[red]Configuration error:[/red] {exc}")
-        raise SystemExit(EXIT_CONFIG_ERROR) from exc
-    except (NetworkError, ApiError) as exc:
-        _cli_log.error("api/network error: %s", exc)
-        console.print(f"[red]API error:[/red] {exc}")
-        raise SystemExit(EXIT_API_ERROR) from exc
-
-    selected_operations = preview.operations
-    if only_files:
-        lowered_filters = [item.lower() for item in only_files]
-        selected_operations = [
-            op
-            for op in preview.operations
-            if any(fragment in op.file_name.lower() for fragment in lowered_filters)
-        ]
-
-    summary = Table(title="Bifrost State Sync (preview)")
-    summary.add_column("Metric")
-    summary.add_column("Value")
-    summary.add_row("Config file", str(resolved_path))
-    summary.add_row("Files scanned", str(preview.scanned_files))
-    summary.add_row("Files mapped", str(preview.mapped_files))
-    summary.add_row("Files skipped", str(preview.skipped_files))
-    summary.add_row("Operations", str(len(selected_operations)))
-    if only_files:
-        summary.add_row("File filter", ", ".join(only_files))
-    console.print(summary)
-
-    operations = Table(title="State Sync Operations")
-    operations.add_column("Action")
-    operations.add_column("ROM")
-    operations.add_column("State")
-    operations.add_column("Reason")
-    _STATE_ACTION_PRIORITY = {"conflict": 0, "download": 1, "upload": 2, "skip": 3}
-    for operation in sorted(selected_operations, key=lambda o: _STATE_ACTION_PRIORITY.get(o.action, 9))[:25]:
-        operations.add_row(
-            operation.action,
-            str(operation.rom_id),
-            operation.file_name,
-            operation.reason,
-        )
-
-    if selected_operations:
-        console.print(operations)
-        if len(selected_operations) > 25:
-            console.print("[yellow]Showing first 25 operations only.[/yellow]")
-
-    if preview.skipped_paths:
-        skipped = Table(title="Unmapped Local States")
-        skipped.add_column("Path")
-        for path in preview.skipped_paths[:25]:
-            skipped.add_row(str(path))
-        console.print(skipped)
-        if len(preview.skipped_paths) > 25:
-            console.print("[yellow]Showing first 25 unmapped states only.[/yellow]")
-
-    if apply and execution is not None:
-        result_table = Table(title="State Sync Execution")
-        result_table.add_column("Metric")
-        result_table.add_column("Value")
-        result_table.add_row("Executed", str(execution.executed))
-        result_table.add_row("Failed", str(execution.failed))
-        result_table.add_row("Skipped", str(execution.skipped))
-        console.print(result_table)
-
-        details = Table(title="Execution Details")
-        details.add_column("Action")
-        details.add_column("State")
-        details.add_column("Result")
-        for action, file_name, result in execution.details[:25]:
-            details.add_row(action, file_name, result)
-        if execution.details:
-            console.print(details)
-            if len(execution.details) > 25:
-                console.print("[yellow]Showing first 25 execution rows only.[/yellow]")
-
-        _cli_log.info(
-            "state-sync completed: executed=%d failed=%d skipped=%d",
-            execution.executed,
-            execution.failed,
-            execution.skipped,
-        )
-    else:
-        console.print(
-            "[cyan]Preview only: no state files were uploaded in this tranche.[/cyan]"
-        )
-
-    if apply and execution is not None and execution.failed > 0:
-        raise SystemExit(EXIT_API_ERROR)
-
     raise SystemExit(EXIT_OK)
 
 
@@ -1904,13 +1708,7 @@ def _enroll_device(
 
 
 @main.command(name="device-enroll", help="Register this machine in RomM and store its device_id.")
-@click.option(
-    "--config",
-    "config_path",
-    type=click.Path(path_type=Path, dir_okay=False),
-    default=None,
-    help="Override config file path (default: ~/.config/bifrost/config.toml).",
-)
+@config_path_option
 @click.option(
     "--name",
     type=str,
@@ -1977,13 +1775,7 @@ def device_enroll(
     """Register this machine in RomM and persist the returned device ID."""
 
     console = Console()
-    resolved_path = config_path or default_config_path()
-
-    try:
-        config = load_config(resolved_path)
-    except ConfigError as exc:
-        console.print(f"[red]Configuration error:[/red] {exc}")
-        raise SystemExit(EXIT_CONFIG_ERROR) from exc
+    config, resolved_path = load_config_or_exit(console, config_path)
 
     _enroll_device(
         console,
@@ -2028,13 +1820,7 @@ def device_enroll(
     default=None,
     help="8-digit Device Pairing code from RomM UI.",
 )
-@click.option(
-    "--config",
-    "config_path",
-    type=click.Path(path_type=Path, dir_okay=False),
-    default=None,
-    help="Override config file path (default: ~/.config/bifrost/config.toml).",
-)
+@config_path_option
 @click.option(
     "--skip-verify",
     is_flag=True,
@@ -2158,48 +1944,9 @@ def setup(
             "Update NAS/ES-DE/EmuDeck paths",
             default=existing_config is None,
         )
-        if should_prompt_paths:
-            nas_library_value = Prompt.ask(
-                "NAS library path",
-                default=base_config.nas.library_path,
-            )
-            nas_resources_value = Prompt.ask(
-                "NAS resources path",
-                default=base_config.nas.resources_path,
-            )
-            esde_roms_value = Prompt.ask(
-                "ES-DE ROMs path",
-                default=base_config.esde.roms_path,
-            )
-            esde_gamelists_value = Prompt.ask(
-                "ES-DE gamelists path",
-                default=base_config.esde.gamelists_path,
-            )
-            esde_custom_systems_value = Prompt.ask(
-                "ES-DE custom_systems path",
-                default=base_config.esde.custom_systems_path,
-            )
-            emudeck_bios_value = Prompt.ask(
-                "EmuDeck BIOS path",
-                default=base_config.emudeck.bios_path,
-            )
-            emudeck_media_value = Prompt.ask(
-                "EmuDeck media path",
-                default=base_config.emudeck.media_path,
-            )
-            emudeck_saves_value = Prompt.ask(
-                "EmuDeck saves path",
-                default=base_config.emudeck.saves_path,
-            )
-        else:
-            nas_library_value = base_config.nas.library_path
-            nas_resources_value = base_config.nas.resources_path
-            esde_roms_value = base_config.esde.roms_path
-            esde_gamelists_value = base_config.esde.gamelists_path
-            esde_custom_systems_value = base_config.esde.custom_systems_path
-            emudeck_bios_value = base_config.emudeck.bios_path
-            emudeck_media_value = base_config.emudeck.media_path
-            emudeck_saves_value = base_config.emudeck.saves_path
+        resolved_paths = _resolve_setup_paths(
+            base_config, prompt=should_prompt_paths, flag_values={}
+        )
 
         save_sync_enabled_value = Confirm.ask(
             "Configure save sync with RomM",
@@ -2240,61 +1987,20 @@ def setup(
                 )
             ).strip()
 
-        if configure_paths:
-            nas_library_value = (
-                nas_library_path
-                if nas_library_path is not None
-                else Prompt.ask("NAS library path", default=base_config.nas.library_path)
-            )
-            nas_resources_value = (
-                nas_resources_path
-                if nas_resources_path is not None
-                else Prompt.ask("NAS resources path", default=base_config.nas.resources_path)
-            )
-            esde_roms_value = (
-                esde_roms_path
-                if esde_roms_path is not None
-                else Prompt.ask("ES-DE ROMs path", default=base_config.esde.roms_path)
-            )
-            esde_gamelists_value = (
-                esde_gamelists_path
-                if esde_gamelists_path is not None
-                else Prompt.ask("ES-DE gamelists path", default=base_config.esde.gamelists_path)
-            )
-            esde_custom_systems_value = (
-                esde_custom_systems_path
-                if esde_custom_systems_path is not None
-                else Prompt.ask(
-                    "ES-DE custom_systems path",
-                    default=base_config.esde.custom_systems_path,
-                )
-            )
-            emudeck_bios_value = (
-                emudeck_bios_path
-                if emudeck_bios_path is not None
-                else Prompt.ask("EmuDeck BIOS path", default=base_config.emudeck.bios_path)
-            )
-            emudeck_media_value = (
-                emudeck_media_path
-                if emudeck_media_path is not None
-                else Prompt.ask("EmuDeck media path", default=base_config.emudeck.media_path)
-            )
-            emudeck_saves_value = (
-                emudeck_saves_path
-                if emudeck_saves_path is not None
-                else Prompt.ask("EmuDeck saves path", default=base_config.emudeck.saves_path)
-            )
-        else:
-            nas_library_value = nas_library_path or base_config.nas.library_path
-            nas_resources_value = nas_resources_path or base_config.nas.resources_path
-            esde_roms_value = esde_roms_path or base_config.esde.roms_path
-            esde_gamelists_value = esde_gamelists_path or base_config.esde.gamelists_path
-            esde_custom_systems_value = (
-                esde_custom_systems_path or base_config.esde.custom_systems_path
-            )
-            emudeck_bios_value = emudeck_bios_path or base_config.emudeck.bios_path
-            emudeck_media_value = emudeck_media_path or base_config.emudeck.media_path
-            emudeck_saves_value = emudeck_saves_path or base_config.emudeck.saves_path
+        resolved_paths = _resolve_setup_paths(
+            base_config,
+            prompt=configure_paths,
+            flag_values={
+                "nas_library": nas_library_path,
+                "nas_resources": nas_resources_path,
+                "esde_roms": esde_roms_path,
+                "esde_gamelists": esde_gamelists_path,
+                "esde_custom_systems": esde_custom_systems_path,
+                "emudeck_bios": emudeck_bios_path,
+                "emudeck_media": emudeck_media_path,
+                "emudeck_saves": emudeck_saves_path,
+            },
+        )
         save_sync_enabled_value = base_config.sync.save_sync_enabled
 
     if not url_value:
@@ -2312,20 +2018,20 @@ def setup(
             device_id=base_config.romm.device_id,
         ),
         nas=NasConfig(
-            library_path=nas_library_value,
-            resources_path=nas_resources_value,
+            library_path=resolved_paths["nas_library"],
+            resources_path=resolved_paths["nas_resources"],
             roms_subpath=base_config.nas.roms_subpath,
             bios_subpath=base_config.nas.bios_subpath,
         ),
         esde=EsdeConfig(
-            roms_path=esde_roms_value,
-            gamelists_path=esde_gamelists_value,
-            custom_systems_path=esde_custom_systems_value,
+            roms_path=resolved_paths["esde_roms"],
+            gamelists_path=resolved_paths["esde_gamelists"],
+            custom_systems_path=resolved_paths["esde_custom_systems"],
         ),
         emudeck=EmudeckConfig(
-            bios_path=emudeck_bios_value,
-            media_path=emudeck_media_value,
-            saves_path=emudeck_saves_value,
+            bios_path=resolved_paths["emudeck_bios"],
+            media_path=resolved_paths["emudeck_media"],
+            saves_path=resolved_paths["emudeck_saves"],
         ),
         assets=base_config.assets,
         sync=SyncConfig(
@@ -2383,7 +2089,7 @@ def setup(
 
 
 # ---------------------------------------------------------------------------
-# watch-saves
+# save watch
 # ---------------------------------------------------------------------------
 
 
@@ -2393,13 +2099,7 @@ def setup(
 
 
 @main.command(help="Run diagnostics: check paths, connectivity, and service health.")
-@click.option(
-    "--config",
-    "config_path",
-    type=click.Path(path_type=Path, dir_okay=False),
-    default=None,
-    help="Override config file path.",
-)
+@config_path_option
 @click.option("--log", "write_log", is_flag=True, help="Also write the report to the log file.")
 def doctor(config_path: Path | None, write_log: bool) -> None:
     import subprocess
@@ -2546,17 +2246,11 @@ def doctor(config_path: Path | None, write_log: bool) -> None:
     raise SystemExit(EXIT_OK)
 
 
-@main.command(
-    name="watch-saves",
-    help="Watch the local save directory and trigger save/state sync on changes (for systemd).",
+@save_group.command(
+    name="watch",
+    help="Watch the local save directory and trigger save sync on changes (for systemd).",
 )
-@click.option(
-    "--config",
-    "config_path",
-    type=click.Path(path_type=Path, dir_okay=False),
-    default=None,
-    help="Override config file path.",
-)
+@config_path_option
 def watch_saves(config_path: Path | None) -> None:
     import shutil
 
@@ -2565,13 +2259,7 @@ def watch_saves(config_path: Path | None) -> None:
 
     setup_file_logging()
     console = Console()
-    resolved_path = config_path or default_config_path()
-
-    try:
-        cfg = load_config(resolved_path)
-    except ConfigError as exc:
-        console.print(f"[red]Configuration error:[/red] {exc}")
-        raise SystemExit(EXIT_CONFIG_ERROR) from exc
+    cfg, _resolved_path = load_config_or_exit(console, config_path)
 
     saves_path = Path(cfg.emudeck.saves_path).expanduser()
     found_bin = shutil.which("bifrost")
@@ -2940,7 +2628,7 @@ def _esde_script_content(event: str, bifrost_bin: str) -> str:
             "# Managed by bifrost esde-hooks install — do not edit manually.\n"
             f'timeout 15 "{b}" sync --apply --incremental --quiet >/dev/null 2>&1 || true\n'
             f'setsid "{b}" sync --check-stale --quiet >/dev/null 2>&1 &\n'
-            f'setsid "{b}" save-sync --apply \\\n'
+            f'setsid "{b}" save sync --apply \\\n'
             "    --on-event startup >/dev/null 2>&1 &\n"
             "exit 0\n"
         )
@@ -2949,7 +2637,7 @@ def _esde_script_content(event: str, bifrost_bin: str) -> str:
             "#!/bin/sh\n"
             "# Bifrost save sync — pull save before game launch.\n"
             "# Managed by bifrost esde-hooks install — do not edit manually.\n"
-            f'exec "{b}" save-sync --apply \\\n'
+            f'exec "{b}" save sync --apply \\\n'
             '    --rom-path "$1" --on-event game-start --timeout 8 >/dev/null 2>&1 || exit 0\n'
         )
     if event == "game-end":
@@ -2957,7 +2645,7 @@ def _esde_script_content(event: str, bifrost_bin: str) -> str:
             "#!/bin/sh\n"
             "# Bifrost save sync — push save after game exits.\n"
             "# Managed by bifrost esde-hooks install — do not edit manually.\n"
-            f'setsid "{b}" save-sync --apply \\\n'
+            f'setsid "{b}" save sync --apply \\\n'
             '    --rom-path "$1" --on-event game-end >/dev/null 2>&1 &\n'
             "exit 0\n"
         )
@@ -2966,7 +2654,7 @@ def _esde_script_content(event: str, bifrost_bin: str) -> str:
             "#!/bin/sh\n"
             f"# Bifrost save sync — flush saves on {event}.\n"
             "# Managed by bifrost esde-hooks install — do not edit manually.\n"
-            f'"{b}" save-sync --apply \\\n'
+            f'"{b}" save sync --apply \\\n'
             f"    --on-event {event} --timeout 30 >/dev/null 2>&1 || exit 0\n"
         )
     if event == "suspend":
@@ -2974,7 +2662,7 @@ def _esde_script_content(event: str, bifrost_bin: str) -> str:
             "#!/bin/sh\n"
             "# Bifrost save sync — best-effort push on suspend.\n"
             "# Managed by bifrost esde-hooks install — do not edit manually.\n"
-            f'setsid "{b}" save-sync --apply \\\n'
+            f'setsid "{b}" save sync --apply \\\n'
             "    --on-event suspend >/dev/null 2>&1 &\n"
             "exit 0\n"
         )

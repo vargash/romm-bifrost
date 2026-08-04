@@ -107,7 +107,7 @@ The watcher and systemd commands can be exercised without a real Steam Deck:
 
 ```bash
 # Test the save watcher (Ctrl+C to stop)
-python -m bifrost.cli watch-saves
+python -m bifrost.cli save watch
 
 # Dry-run systemd install (prints what would be written, no changes)
 python -m bifrost.cli systemd install --dry-run

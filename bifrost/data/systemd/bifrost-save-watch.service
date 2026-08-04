@@ -6,7 +6,7 @@ After=bifrost-save-sync.service
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/bifrost watch-saves
+ExecStart=%h/.local/bin/bifrost save watch
 # Restart on crash; don't hammer if something is persistently broken
 Restart=on-failure
 RestartSec=10

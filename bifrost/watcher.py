@@ -27,7 +27,7 @@ _SKIP_SUFFIXES = frozenset({".part", ".bak"})
 
 
 def _run_sync(bifrost_cmd: Sequence[str]) -> None:
-    """Run save-sync --apply, log outcome.
+    """Run save sync --apply, log outcome.
 
     bifrost_cmd is an argv prefix (e.g. ["bifrost"] or [sys.executable, "-m",
     "bifrost.cli"]), not a single string — a resolved interpreter path plus
@@ -41,31 +41,27 @@ def _run_sync(bifrost_cmd: Sequence[str]) -> None:
         log.debug("watcher: sync cooldown (%ds remaining)", int(_COOLDOWN_SECONDS - elapsed))
         return
 
-    for extra_args in (
-        ["save-sync", "--apply"],
-        # DISABILITATO (Fase 0 — state sync escluso): il watcher non invoca più state-sync.
-        # ["state-sync", "--apply"],
-    ):
-        cmd_args = [*bifrost_cmd, *extra_args]
-        label = " ".join(extra_args)
-        log.info("watcher: triggering %s", label)
-        try:
-            result = subprocess.run(cmd_args, capture_output=True, text=True, timeout=300)
-            if result.returncode == 0:
-                log.info("watcher: %s completed (exit 0)", label)
-            else:
-                log.warning(
-                    "watcher: %s exited %d\nstdout: %s\nstderr: %s",
-                    label,
-                    result.returncode,
-                    result.stdout.strip(),
-                    result.stderr.strip(),
-                )
-        except subprocess.TimeoutExpired:
-            log.error("watcher: %s timed out after 300s", label)
-        except FileNotFoundError:
-            log.error("watcher: bifrost command not found: %s", cmd_args)
-            return
+    extra_args = ["save", "sync", "--apply"]
+    cmd_args = [*bifrost_cmd, *extra_args]
+    label = " ".join(extra_args)
+    log.info("watcher: triggering %s", label)
+    try:
+        result = subprocess.run(cmd_args, capture_output=True, text=True, timeout=300)
+        if result.returncode == 0:
+            log.info("watcher: %s completed (exit 0)", label)
+        else:
+            log.warning(
+                "watcher: %s exited %d\nstdout: %s\nstderr: %s",
+                label,
+                result.returncode,
+                result.stdout.strip(),
+                result.stderr.strip(),
+            )
+    except subprocess.TimeoutExpired:
+        log.error("watcher: %s timed out after 300s", label)
+    except FileNotFoundError:
+        log.error("watcher: bifrost command not found: %s", cmd_args)
+        return
 
     _last_sync_time = time.monotonic()
 

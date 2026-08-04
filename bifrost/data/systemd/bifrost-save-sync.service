@@ -1,13 +1,12 @@
 [Unit]
-Description=Bifrost save/state sync — local ↔ RomM
+Description=Bifrost save sync — local ↔ RomM
 Documentation=https://github.com/rommapp/romm-bifrost
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=%h/.local/bin/bifrost save-sync --apply
-ExecStart=%h/.local/bin/bifrost state-sync --apply
+ExecStart=%h/.local/bin/bifrost save sync --apply
 StandardOutput=journal
 StandardError=journal
 RemainAfterExit=no

@@ -121,7 +121,7 @@ def run_sync_preflight(config: AppConfig) -> PreflightResult:
 
 
 def run_save_preflight(config: AppConfig) -> PreflightResult:
-    """Pre-flight for `bifrost save-sync --apply` and `bifrost state-sync --apply`."""
+    """Pre-flight for `bifrost save sync --apply`."""
     result = PreflightResult()
 
     saves = Path(config.emudeck.saves_path).expanduser()
@@ -133,7 +133,7 @@ def run_save_preflight(config: AppConfig) -> PreflightResult:
 
 
 def run_save_api_preflight(config: AppConfig, client: "RommApiClient") -> PreflightResult:
-    """API-level pre-flight for save-sync --apply (requires an open RommApiClient).
+    """API-level pre-flight for save sync --apply (requires an open RommApiClient).
 
     Checks:
     (b) device_id configured + device exists in RomM

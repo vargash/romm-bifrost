@@ -24,7 +24,7 @@ def test_run_sync_invokes_multi_token_command_as_separate_argv(monkeypatch) -> N
 
     watcher._run_sync([sys.executable, "-m", "bifrost.cli"])
 
-    assert captured["cmd_args"] == [sys.executable, "-m", "bifrost.cli", "save-sync", "--apply"]
+    assert captured["cmd_args"] == [sys.executable, "-m", "bifrost.cli", "save", "sync", "--apply"]
 
 
 def test_run_sync_single_token_command(monkeypatch) -> None:
@@ -39,7 +39,7 @@ def test_run_sync_single_token_command(monkeypatch) -> None:
 
     watcher._run_sync(["bifrost"])
 
-    assert captured["cmd_args"] == ["bifrost", "save-sync", "--apply"]
+    assert captured["cmd_args"] == ["bifrost", "save", "sync", "--apply"]
 
 
 def test_run_sync_respects_cooldown(monkeypatch) -> None:
