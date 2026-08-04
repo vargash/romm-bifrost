@@ -403,7 +403,10 @@ def test_setup_wizard_reuses_existing_defaults(
 
     monkeypatch.setattr(httpx.Client, "__init__", patched_init)
 
-    confirm_answers = iter([False, True, False])
+    # Wizard confirm order for an existing config with a device_id already set:
+    # use pairing? -> keep existing token? -> update paths? -> configure save sync?
+    # (the enroll-device confirm is skipped since device_id is already populated).
+    confirm_answers = iter([False, True, False, True])
 
     def fake_confirm(*_: Any, **__: Any) -> bool:
         return next(confirm_answers)
@@ -424,6 +427,8 @@ def test_setup_wizard_reuses_existing_defaults(
     assert cfg.romm.device_id == "device-1"
     assert cfg.nas.library_path == "/data/library"
     assert cfg.emudeck.media_path == "~/Emulation/tools/downloaded_media"
+    # Accepting the default at the save-sync prompt should reuse the existing setting.
+    assert cfg.sync.save_sync_enabled is True
 
 
 def test_setup_wizard_can_change_selected_values(
@@ -454,7 +459,11 @@ def test_setup_wizard_can_change_selected_values(
 
     monkeypatch.setattr(httpx.Client, "__init__", patched_init)
 
-    confirm_answers = iter([False, True, True])
+    # Wizard confirm order here: use pairing? -> keep existing token? -> update
+    # paths? -> configure save sync? -> enroll device now? (this config has no
+    # device_id yet, so the enroll-device confirm fires too; answer it "no" since
+    # the mocked transport doesn't stub POST /api/devices).
+    confirm_answers = iter([False, True, True, False, False])
 
     def fake_confirm(*_: Any, **__: Any) -> bool:
         return next(confirm_answers)
@@ -475,6 +484,10 @@ def test_setup_wizard_can_change_selected_values(
     assert cfg.nas.library_path == "/new/library"
     assert cfg.nas.resources_path == "/data/resources"
     assert cfg.romm.client_token == "rmm_old"
+    # save-sync prompt was declined, changing it from the config default of True.
+    assert cfg.sync.save_sync_enabled is False
+    # enroll-device prompt was declined, so no device_id gets set.
+    assert cfg.romm.device_id == ""
 
 
 def test_setup_wizard_enrolls_device_when_confirmed(
