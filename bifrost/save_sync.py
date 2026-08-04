@@ -471,6 +471,8 @@ def _legacy_negotiate(
                         rom_id=remote.rom_id,
                         save_id=remote.id,
                         file_name=remote.file_name,
+                        emulator=remote.emulator,
+                        slot=remote.slot,
                         reason="Save exists on server but not on client",
                     )
                 )

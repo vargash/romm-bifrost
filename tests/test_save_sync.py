@@ -1475,3 +1475,59 @@ def test_build_save_sync_preview_resync_bypasses_server_negotiate(tmp_path: Path
     assert op.action == "download"
     assert op.rom_id == 10
     assert op.file_name == "Klonoa.srm"
+
+
+def test_build_save_sync_preview_resync_still_warns_on_unrouted_remote_emulator(
+    tmp_path: Path,
+) -> None:
+    """_legacy_negotiate (the path --resync forces) must propagate SaveSummary.emulator
+    onto the download operations it builds — otherwise both the cross-core warning and
+    the opt-in cross-core routing in execute_save_sync_preview silently stop working
+    whenever resync (or the old-server 404/405 fallback) is used instead of the real
+    /api/sync/negotiate.
+    """
+    config = make_config(tmp_path)
+    saves_root = Path(config.emudeck.saves_path).expanduser()
+    (saves_root / "duckstation/saves").mkdir(parents=True, exist_ok=True)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/roms":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {"id": 10, "name": "Crash Bandicoot", "fs_name": "Crash Bandicoot.zip"}
+                    ],
+                    "total": 1,
+                },
+            )
+        if request.url.path == "/api/saves" and request.method == "GET":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 99,
+                        "rom_id": 10,
+                        "file_name": "Crash Bandicoot.srm",
+                        "updated_at": "2026-01-01T00:00:00Z",
+                        "emulator": "mednafen_psx_hw",
+                        "device_syncs": [],
+                    }
+                ],
+            )
+        return httpx.Response(404, json={})
+
+    client = RommApiClient(config, transport=httpx.MockTransport(handler))
+    preview = build_save_sync_preview(config, client, force_resync=True)
+    client.close()
+
+    assert len(preview.operations) == 1
+    op = preview.operations[0]
+    assert op.action == "download"
+    assert op.emulator == "mednafen_psx_hw"
+
+    assert len(preview.cross_core_warnings) == 1
+    notice = preview.cross_core_warnings[0]
+    assert "Crash Bandicoot" in notice
+    assert "mednafen_psx_hw" in notice
+    assert "duckstation" in notice
