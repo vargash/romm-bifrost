@@ -1483,7 +1483,7 @@ def test_execute_download_applies_unverified_custom_core_mapping(tmp_path: Path,
     assert result.executed == 1
     destination = saves_root / "duckstation/saves/Crash Bandicoot_1.mcd"
     assert destination.exists()
-    assert any("not verified by Bifrost" in record.message for record in caplog.records)
+    assert any("Bifrost has no data on" in record.message for record in caplog.records)
 
 
 def test_execute_download_falls_back_when_core_mapping_platform_mismatched(tmp_path: Path) -> None:

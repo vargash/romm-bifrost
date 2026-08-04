@@ -657,9 +657,11 @@ def config_add_core_mapping(
     if resolution.verified:
         console.print(f"[green]Verified mapping:[/green] {resolution.note}")
     else:
+        label = "Likely mismatch" if resolution.known_compatible_with else "Unknown core"
+        console.print(f"[yellow]Warning ({label}):[/yellow] {resolution.note}")
         console.print(
-            f"[yellow]Warning:[/yellow] {resolution.note}. You are responsible for "
-            "confirming these save formats are truly compatible before it overwrites real saves."
+            "You are responsible for confirming these save formats are truly "
+            "compatible before it overwrites real saves."
         )
         if not yes and not Confirm.ask("Add this unverified mapping anyway?", default=False):
             console.print("Aborted — no changes made.")
@@ -769,8 +771,10 @@ def config_list_core_mappings(config_path: Path | None) -> None:
             status = f"[red]invalid ({resolution.rejected_reason})[/red]"
         elif resolution.verified:
             status = "[green]verified[/green]"
+        elif resolution.known_compatible_with:
+            status = f"[yellow]mismatch (curated for {resolution.known_compatible_with})[/yellow]"
         else:
-            status = "[yellow]unverified[/yellow]"
+            status = "[yellow]unverified (unknown core)[/yellow]"
         table.add_row(
             "configured",
             mapping.platform,

@@ -70,14 +70,31 @@ def test_resolve_core_mapping_caller_size_overrides_curated_default() -> None:
     assert resolution.expected_size_bytes == 999
 
 
-def test_resolve_core_mapping_unverified_for_custom_pair() -> None:
+def test_resolve_core_mapping_unverified_unknown_core() -> None:
+    """remote_core matches no curated alias on ANY profile: entirely unknown to
+    Bifrost, distinct from "known but linked to the wrong target"."""
     resolution = resolve_core_mapping(
         platform="psx", remote_core="some_other_psx_core", local_emulator="duckstation"
     )
     assert resolution.ok is True
     assert resolution.verified is False
-    assert "not verified by Bifrost" in resolution.note
+    assert resolution.known_compatible_with is None
+    assert "Bifrost has no data on" in resolution.note
     assert resolution.expected_size_bytes is None
+
+
+def test_resolve_core_mapping_unverified_mismatched_target() -> None:
+    """mednafen_psx_hw is curated for duckstation. Requesting it against a
+    different (if platform-compatible) target surfaces the real curated target
+    via known_compatible_with rather than a generic "unknown core" note."""
+    resolution = resolve_core_mapping(
+        platform="psx", remote_core="mednafen_psx_hw", local_emulator="retroarch"
+    )
+    assert resolution.ok is True
+    assert resolution.verified is False
+    assert resolution.known_compatible_with == "duckstation"
+    assert "duckstation" in resolution.note
+    assert "retroarch" in resolution.note
 
 
 def test_resolve_core_mapping_accepts_multi_platform_target_for_any_platform() -> None:

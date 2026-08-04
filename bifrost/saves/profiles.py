@@ -182,6 +182,12 @@ class CoreMappingResolution:
     expected_size_bytes: int | None
     verified: bool
     rejected_reason: str | None = None
+    # Set only when verified is False and remote_core is curated (compatible_remote_cores)
+    # on a DIFFERENT profile than the requested target — i.e. Bifrost has data on this
+    # core, just not for the target the caller asked for. None means remote_core is
+    # entirely unknown to Bifrost (no profile lists it at all). Lets callers word the
+    # unverified warning differently: a likely target mismatch vs a wholly unverified core.
+    known_compatible_with: str | None = None
 
 
 def resolve_core_mapping(
@@ -201,7 +207,9 @@ def resolve_core_mapping(
     expected_size_bytes default to the curated alias's; otherwise it's applied
     as an unverified custom mapping (matching size/extension alone doesn't
     guarantee true byte-compatibility, so this is surfaced distinctly by
-    callers).
+    callers). An unverified result further distinguishes, via
+    known_compatible_with, whether remote_core is curated for some OTHER
+    profile (likely a mismatched target) or entirely unknown to Bifrost.
     """
     target_profile = next(
         (p for p in PROFILES if p.romm_emulator == local_emulator), None
@@ -251,10 +259,29 @@ def resolve_core_mapping(
             expected_size_bytes=resolved_size,
             verified=True,
         )
+    elsewhere = find_compatible_profile(remote_core)
+    if elsewhere is not None:
+        other_profile, other_alias = elsewhere
+        return CoreMappingResolution(
+            ok=True,
+            target_profile=target_profile,
+            note=(
+                f"{remote_core!r} is Bifrost-verified compatible with "
+                f"{other_profile.romm_emulator!r} ({other_alias.note}), not "
+                f"{target_profile.romm_emulator!r} — you are linking it to a different "
+                "local emulator than the one Bifrost has verified for this core."
+            ),
+            expected_size_bytes=expected_size_bytes,
+            verified=False,
+            known_compatible_with=other_profile.romm_emulator,
+        )
     return CoreMappingResolution(
         ok=True,
         target_profile=target_profile,
-        note="custom mapping, not verified by Bifrost — confirm save formats truly match",
+        note=(
+            f"Bifrost has no data on {remote_core!r} at all — proceeding purely on "
+            "the core slug reported by RomM's API; confirm save formats truly match."
+        ),
         expected_size_bytes=expected_size_bytes,
         verified=False,
     )

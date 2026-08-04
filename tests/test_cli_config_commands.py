@@ -313,10 +313,49 @@ def test_config_add_core_mapping_unverified_with_yes_saves(tmp_path: Path) -> No
     )
 
     assert result.exit_code == EXIT_OK, result.output
-    assert "not verified" in result.output
+    assert "Unknown core" in result.output
+    assert "no data on" in result.output
     cfg = load_config(config_path)
     assert len(cfg.sync.core_mappings) == 1
     assert cfg.sync.core_mappings[0].remote_core == "some_other_psx_core"
+
+
+def test_config_add_core_mapping_warns_mismatch_when_core_curated_elsewhere(
+    tmp_path: Path,
+) -> None:
+    """mednafen_psx_hw is curated for duckstation. Linking it to retroarch instead
+    (a different, if platform-wildcard-compatible, local profile) should warn about
+    the specific known target rather than a generic "unknown core" message.
+    """
+    config_path = tmp_path / "config.toml"
+    save_config(
+        AppConfig(romm=RommConfig(url="http://romm.local", client_token="rmm_token")),
+        config_path,
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "config",
+            "add-core-mapping",
+            "--remote-core",
+            "mednafen_psx_hw",
+            "--local-emulator",
+            "retroarch",
+            "--platform",
+            "psx",
+            "--yes",
+            "--config",
+            str(config_path),
+        ],
+    )
+
+    assert result.exit_code == EXIT_OK, result.output
+    assert "Likely mismatch" in result.output
+    assert "duckstation" in result.output
+    cfg = load_config(config_path)
+    assert cfg.sync.core_mappings[0].local_emulator == "retroarch"
 
 
 def test_config_remove_core_mapping_round_trip(tmp_path: Path) -> None:
@@ -382,6 +421,39 @@ def test_config_list_core_mappings_shows_curated_and_configured(tmp_path: Path) 
     assert "built-in" in result.output
     assert "configured" in result.output
     assert "mednafen_ps" in result.output
+
+
+def test_config_list_core_mappings_flags_mismatched_target(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    save_config(
+        AppConfig(romm=RommConfig(url="http://romm.local", client_token="rmm_token")),
+        config_path,
+    )
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        [
+            "config",
+            "add-core-mapping",
+            "--remote-core",
+            "mednafen_psx_hw",
+            "--local-emulator",
+            "retroarch",
+            "--platform",
+            "psx",
+            "--yes",
+            "--config",
+            str(config_path),
+        ],
+    )
+
+    result = runner.invoke(
+        main, ["config", "list-core-mappings", "--config", str(config_path)]
+    )
+
+    assert result.exit_code == EXIT_OK, result.output
+    assert "mismatch" in result.output
+    assert "duckstation" in result.output
 
 
 def test_config_set_rejects_unknown_key(tmp_path: Path) -> None:

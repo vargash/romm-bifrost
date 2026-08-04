@@ -1057,18 +1057,12 @@ def execute_save_sync_preview(
                             mapping_resolution = resolution
                             target_profile = resolution.target_profile
                             dest_dir = save_root / target_profile.save_subpath
-                            verified_text = (
-                                resolution.note
-                                if resolution.verified
-                                else "custom mapping, not verified by Bifrost — "
-                                "confirm save formats truly match"
-                            )
                             _log.warning(
                                 "cross-core compat: %s save %r treated as %s-compatible (%s)",
                                 operation.emulator,
                                 operation.file_name,
                                 target_profile.romm_emulator,
-                                verified_text,
+                                resolution.note,
                             )
                         else:
                             _log.warning(
