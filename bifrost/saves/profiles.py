@@ -144,14 +144,6 @@ class CrossCoreCompat:
     # truncated on download so the target emulator doesn't reject the file
     # for having the wrong size.
     expected_size_bytes: int | None = None
-    # Reverse direction (upload fan-out): the file extension source_emulator's
-    # own core natively expects. When this device uploads a save produced by
-    # target_emulator, and the user has opted source_emulator into
-    # sync.cross_core_compat, a companion copy is uploaded tagged as
-    # source_emulator with this extension instead of target_emulator's own —
-    # so other RomM clients reporting source_emulator find a ready-made,
-    # correctly-named save without needing their own opt-in conversion.
-    source_extension: str | None = None
 
 
 CROSS_CORE_COMPAT: tuple[CrossCoreCompat, ...] = (
@@ -163,7 +155,6 @@ CROSS_CORE_COMPAT: tuple[CrossCoreCompat, ...] = (
         target_emulator="duckstation",
         note="both use the standard 128KB PS1 per-game memory card image",
         expected_size_bytes=131072,
-        source_extension=".srm",
     ),
 )
 
@@ -195,24 +186,3 @@ def find_cross_core_target(
     if not source_emulator or source_emulator not in enabled:
         return None
     return find_cross_core_rule(source_emulator)
-
-
-def find_cross_core_source(
-    local_emulator: str | None, enabled: list[str]
-) -> CrossCoreCompat | None:
-    """Return the opt-in CrossCoreCompat rule targeting local_emulator, if any.
-
-    Reverse of find_cross_core_target: used on upload to find a rule whose
-    target_emulator matches the profile that produced the local save, so a
-    companion copy can be fanned out under rule.source_emulator using
-    rule.source_extension. enabled is config.sync.cross_core_compat — the
-    same opt-in list used for the download direction, since opting a foreign
-    tag in implies the user has verified the pair is save-compatible both
-    ways.
-    """
-    if not local_emulator:
-        return None
-    for rule in CROSS_CORE_COMPAT:
-        if rule.target_emulator == local_emulator and rule.source_emulator in enabled:
-            return rule
-    return None

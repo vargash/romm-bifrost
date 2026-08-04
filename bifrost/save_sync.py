@@ -30,7 +30,6 @@ from bifrost.saves.profiles import (
     CrossCoreCompat,
     SaveProfile,
     find_cross_core_rule,
-    find_cross_core_source,
     find_cross_core_target,
 )
 
@@ -962,45 +961,6 @@ def execute_save_sync_preview(
                     client.track_save_for_device(int(uploaded_save_id), preview.device_id)
                 completed += 1
                 details.append(("upload", operation.file_name, "ok"))
-
-                # Opt-in reverse fan-out (see find_cross_core_source): also upload a
-                # companion copy tagged as the foreign emulator, renamed to its native
-                # extension, so clients reporting that emulator find a ready-made save.
-                # Deliberately NOT tracked for this device (no track_save_for_device
-                # call): this device has no local file in that naming/extension, so
-                # linking it as "current" here would make every future negotiate see
-                # a mismatch against the local scan and re-upload it forever.
-                _fanout_rule = find_cross_core_source(_emulator, config.sync.cross_core_compat)
-                if _fanout_rule is not None and _fanout_rule.source_extension:
-                    _fanout_name = Path(_upload_name).stem + _fanout_rule.source_extension
-                    try:
-                        client.upload_save_file(
-                            rom_id=operation.rom_id,
-                            save_path=local_file.path,
-                            device_id=preview.device_id,
-                            session_id=preview.session_id,
-                            save_id=None,
-                            overwrite=False,
-                            autocleanup=_do_autocleanup,
-                            autocleanup_limit=_autocleanup_limit,
-                            emulator=_fanout_rule.source_emulator,
-                            slot=_slot,
-                            upload_file_name=_fanout_name,
-                        )
-                        _log.info(
-                            "cross-core compat: fanned out %s upload as %s-compatible %s (%s)",
-                            operation.file_name,
-                            _fanout_rule.source_emulator,
-                            _fanout_name,
-                            _fanout_rule.note,
-                        )
-                    except ApiError:
-                        _log.warning(
-                            "cross-core compat: fan-out upload of %s as %s failed",
-                            operation.file_name,
-                            _fanout_rule.source_emulator,
-                            exc_info=True,
-                        )
                 continue
 
             # download

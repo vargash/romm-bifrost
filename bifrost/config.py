@@ -108,12 +108,9 @@ class SyncConfig(BaseModel):
     # Foreign "emulator" tags (as reported by other RomM clients, e.g. a mobile
     # RetroArch app sending its libretro core id) this device accepts as
     # save-compatible with one of its local profiles — see
-    # bifrost.saves.profiles.CROSS_CORE_COMPAT. Applies both ways: on download,
-    # a foreign-tagged save is converted to the local profile's naming; on
-    # upload, a local save is also fanned out as a companion copy tagged and
-    # named for the foreign core. Empty by default: cross-core save
-    # compatibility must be verified manually before enabling, since a wrong
-    # assumption can corrupt a save file.
+    # bifrost.saves.profiles.CROSS_CORE_COMPAT. Empty by default: cross-core
+    # save compatibility must be verified manually before enabling, since a
+    # wrong assumption here can corrupt a save file.
     cross_core_compat: list[str] = Field(default_factory=list)
 
 
