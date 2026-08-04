@@ -115,6 +115,12 @@ if ! command -v pipx &>/dev/null; then
 fi
 success "pipx — OK"
 
+# Ensure ~/.local/bin is on PATH for future shells, even if pipx was
+# already installed (e.g. via the system package manager), in which
+# case the branch above never runs.
+pipx ensurepath 2>/dev/null || true
+export PATH="$HOME/.local/bin:$PATH"
+
 # ── fetch release wheel ────────────────────────────────────────────────────
 info "Fetching latest Bifrost release from GitHub..."
 WHEEL_URL=$(python3 - <<PYEOF
