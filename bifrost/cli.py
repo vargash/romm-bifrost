@@ -2537,6 +2537,9 @@ def watch_saves(config_path: Path | None) -> None:
     from bifrost.watcher import run_save_watcher
 
     setup_file_logging()
+    logging.getLogger("bifrost.cli.save_watch").info(
+        "bifrost save-watch starting, version=%s", _bifrost_version
+    )
     console = Console()
     cfg, _resolved_path = load_config_or_exit(console, config_path)
 
@@ -2768,28 +2771,80 @@ def systemd_install(
             dst.write_text(content, encoding="utf-8")
             console.print(f"[green]written[/green]  {dst}")
 
-    if dry_run:
-        for unit in active_timers + active_services:
-            console.print(f"[cyan]would enable + start[/cyan]  {unit}")
-        console.print("\n[cyan]Dry run — no changes made.[/cyan]")
-        raise SystemExit(EXIT_OK)
-
-    # ── reload + enable ───────────────────────────────────────────────────
     def _ctl(*args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["systemctl", "--user", *args], capture_output=True, text=True
         )
 
+    # Persistent services (Type=simple, long-running) hold old code in memory
+    # once started — unlike timers/oneshots, which spawn a fresh process per
+    # run and always pick up updates automatically. Decide per-service now
+    # (read-only: is-active + a non-blocking lock probe) so --dry-run can
+    # report the real action and the live pass below can just execute it.
+    service_actions: dict[str, str] = {}
+    for unit in active_services:
+        is_active = _ctl("is-active", unit).stdout.strip() == "active"
+        if not is_active:
+            service_actions[unit] = "start"
+        else:
+            try:
+                with save_sync_lock():
+                    pass
+                service_actions[unit] = "restart"
+            except SaveSyncLockError:
+                service_actions[unit] = "skip"
+
+    if dry_run:
+        for unit in active_timers:
+            console.print(f"[cyan]would enable + start[/cyan]  {unit}")
+        for unit, action in service_actions.items():
+            if action == "start":
+                console.print(f"[cyan]would enable + start[/cyan]  {unit}")
+            elif action == "restart":
+                console.print(
+                    f"[cyan]would restart[/cyan]  {unit} (picking up updated code)"
+                )
+            else:
+                console.print(
+                    f"[cyan]would skip restart[/cyan]  {unit} (save sync in progress)"
+                )
+        console.print("\n[cyan]Dry run — no changes made.[/cyan]")
+        raise SystemExit(EXIT_OK)
+
+    # ── reload + enable ───────────────────────────────────────────────────
     reload = _ctl("daemon-reload")
     if reload.returncode != 0:
         console.print(f"[yellow]daemon-reload warning:[/yellow] {reload.stderr.strip()}")
 
-    for unit in active_timers + active_services:
+    for unit in active_timers:
         enable = _ctl("enable", "--now", unit)
         if enable.returncode == 0:
             console.print(f"[green]enabled + started[/green]  {unit}")
         else:
             console.print(f"[yellow]enable failed[/yellow]  {unit}: {enable.stderr.strip()}")
+
+    for unit, action in service_actions.items():
+        if action == "start":
+            enable = _ctl("enable", "--now", unit)
+            if enable.returncode == 0:
+                console.print(f"[green]enabled + started[/green]  {unit}")
+            else:
+                console.print(f"[yellow]enable failed[/yellow]  {unit}: {enable.stderr.strip()}")
+        elif action == "restart":
+            # Already active — enable --now can't restart it, so ensure the
+            # enabled symlink is correct, then explicitly restart to pick up
+            # the code/config the reinstall just brought in.
+            _ctl("enable", "--now", unit)
+            restart = _ctl("restart", unit)
+            if restart.returncode == 0:
+                console.print(f"[green]restarted[/green]  {unit} (picking up updated code)")
+            else:
+                console.print(f"[yellow]restart failed[/yellow]  {unit}: {restart.stderr.strip()}")
+        else:
+            console.print(
+                f"[yellow]skipped restart[/yellow]  {unit}: a save sync is in progress — "
+                f"restart it manually once idle with: systemctl --user restart {unit}"
+            )
 
     # Enable linger so user services survive logout (important on Steam Deck game mode)
     username = os.environ.get("USER") or os.environ.get("LOGNAME") or ""

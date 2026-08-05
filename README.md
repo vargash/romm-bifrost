@@ -97,6 +97,12 @@ pip install -e .[dev]
 
 For a full, reproducible setup from fresh clone to passing checks, see [`docs/development_setup.md`](docs/development_setup.md).
 
+**After `git pull`:** if `bifrost-save-watch.service` is already running
+(`systemctl --user is-active bifrost-save-watch.service`), it keeps executing
+the code from before your pull — `pip install -e .` alone doesn't restart it.
+Re-run `bifrost systemd install`: it restarts the watcher if idle, or warns
+and leaves it alone if a save sync is in progress.
+
 
 ---
 
