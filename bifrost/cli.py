@@ -1583,6 +1583,13 @@ def save_sync(
 ) -> None:
     """Scan local saves and preview the RomM sync negotiation."""
 
+    # ES-DE backslash-escapes shell-special characters (spaces, parens, ...) in the
+    # $1 it hands to custom event scripts, expecting an unquoted shell context. Our
+    # hook scripts pass "$1" quoted, so those backslashes survive literally and break
+    # every downstream stem/filename match (rom_id resolution, file filters).
+    if rom_path:
+        rom_path = re.sub(r"\\(.)", r"\1", rom_path)
+
     console = Console()
     setup_file_logging()
     _cli_log = logging.getLogger("bifrost.cli.save_sync")

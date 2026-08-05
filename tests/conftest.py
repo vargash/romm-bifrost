@@ -16,3 +16,4 @@ def isolate_cache_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     of another test.
     """
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg_cache"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg_data"))
