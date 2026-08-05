@@ -88,6 +88,10 @@ class SaveSyncPreview:
     # them as unrelated save families. See resolve_core_mapping for opting
     # specific pairs into automatic cross-core matching.
     cross_core_warnings: list[str] = None  # type: ignore[assignment]
+    # rom_id(s) that file_filters resolved to via the remote ROM catalog (e.g.
+    # --rom-path). None when file_filters was empty or matched no known ROM —
+    # execute_save_sync_preview falls back to filename matching in that case.
+    target_rom_ids: frozenset[int] | None = None
 
     def __post_init__(self) -> None:
         if self.profile_destinations is None:
@@ -253,6 +257,37 @@ def _build_remote_rom_index(remote_roms: list[RomSummary]) -> dict[str, RomSumma
                 index.setdefault(normalized, rom)
 
     return index
+
+
+def _resolve_target_rom_ids(
+    file_filters: list[str] | None,
+    remote_roms: list[RomSummary],
+) -> frozenset[int] | None:
+    """Resolve file_filters (e.g. --rom-path stem) to rom_id(s) via the remote
+    ROM catalog, independent of the save's own file_name — which may differ
+    from the ROM's local filename (stripped slot suffix, cross-core naming,
+    server-side canonicalization). Returns None when file_filters is empty or
+    matches no known ROM, so callers can fall back to filename matching.
+    """
+    if not file_filters:
+        return None
+    matched: set[int] = set()
+    for rom in remote_roms:
+        candidates: list[str] = []
+        if rom.name:
+            candidates.append(rom.name)
+        if rom.fs_name:
+            candidates.append(Path(rom.fs_name).stem)
+            candidates.append(rom.fs_name)
+        if rom.fs_path:
+            candidates.append(Path(rom.fs_path).stem)
+            candidates.append(Path(rom.fs_path).name)
+        if rom.full_path:
+            candidates.append(Path(rom.full_path).stem)
+            candidates.append(Path(rom.full_path).name)
+        if any(_matches_file_filter(candidate, file_filters) for candidate in candidates):
+            matched.add(rom.id)
+    return frozenset(matched) if matched else None
 
 
 def _build_local_save_state(
@@ -697,6 +732,7 @@ def build_save_sync_preview(
 
     remote_roms = client.list_roms()
     remote_rom_index = _build_remote_rom_index(remote_roms)
+    target_rom_ids = _resolve_target_rom_ids(file_filters, remote_roms)
 
     # Detect orphan saves: this device uploaded them (origin_device_id matches) but
     # DeviceSyncSchema was never created, so GET /api/saves?device_id=X excludes them.
@@ -839,6 +875,7 @@ def build_save_sync_preview(
         profile_destinations=profile_destinations,
         rom_index={rom.id: rom for rom in remote_roms},
         cross_core_warnings=cross_core_warnings,
+        target_rom_ids=target_rom_ids,
     )
 
 
@@ -880,11 +917,18 @@ def execute_save_sync_preview(
         (s.rom_id, s.slot): (s.emulator, s.slot) for s in preview.local_saves
     }
 
-    selected_ops = [
-        op
-        for op in preview.operations
-        if _matches_file_filter(op.file_name, file_filters)
-    ]
+    if preview.target_rom_ids is not None:
+        # file_filters resolved to known rom_id(s) via the ROM catalog — match on
+        # that instead of op.file_name, which may not textually contain the local
+        # ROM stem (server-side canonical naming, stripped slot suffix, cross-core
+        # naming). See _resolve_target_rom_ids.
+        selected_ops = [op for op in preview.operations if op.rom_id in preview.target_rom_ids]
+    else:
+        selected_ops = [
+            op
+            for op in preview.operations
+            if _matches_file_filter(op.file_name, file_filters)
+        ]
 
     remote_save_index: dict[tuple[int, str], SaveSummary] | None = None
 

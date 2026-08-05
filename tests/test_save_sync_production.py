@@ -555,6 +555,93 @@ def test_execute_download_skipped_when_hash_matches(tmp_path: Path) -> None:
     assert result.executed == 0
 
 
+def test_execute_rom_scoped_filter_matches_by_rom_id_not_filename(tmp_path: Path) -> None:
+    """--rom-path (ES-DE hooks) scopes file_filters to a ROM's stem. The negotiated
+    operation's file_name may not textually contain that stem — e.g. server-side
+    canonical naming, or a stripped emulator slot suffix restored only after
+    filtering. The op must still be selected by matching rom_id, not dropped
+    silently. Regression test for the game-start hook missing downloads that
+    negotiate correctly identified (ops=0 despite download=1 in negotiate).
+    """
+    config = make_config(tmp_path)
+    saves_root = Path(config.emudeck.saves_path)
+    (saves_root / "retroarch/saves").mkdir(parents=True, exist_ok=True)
+    content = b"fresh-server-save"
+
+    calls: dict[str, int] = {"download": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/roms":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [{"id": 10, "name": "Mario", "fs_name": "Mario.zip"}],
+                    "total": 1,
+                },
+            )
+        if request.url.path == "/api/saves" and request.method == "GET":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/api/sync/negotiate":
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": 60,
+                    "operations": [
+                        {
+                            "action": "download",
+                            "rom_id": 10,
+                            "save_id": 99,
+                            # Deliberately does NOT contain "Mario" — simulates
+                            # server-side canonical naming that differs from the
+                            # local ROM's filename stem.
+                            "file_name": "save_slot_A.sav",
+                            "reason": "Server version is newer",
+                        }
+                    ],
+                    "total_upload": 0,
+                    "total_download": 1,
+                    "total_conflict": 0,
+                    "total_no_op": 0,
+                },
+            )
+        if request.url.path == "/api/saves/99/content":
+            calls["download"] += 1
+            return httpx.Response(200, content=content)
+        if "/api/sync/sessions/" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "session": {
+                        "id": 60,
+                        "device_id": "device-1",
+                        "user_id": 1,
+                        "status": "completed",
+                        "initiated_at": "2026-06-22T00:00:00Z",
+                        "completed_at": "2026-06-22T00:00:01Z",
+                        "operations_planned": 1,
+                        "operations_completed": 1,
+                        "operations_failed": 0,
+                        "error_message": None,
+                        "created_at": "2026-06-22T00:00:00Z",
+                        "updated_at": "2026-06-22T00:00:01Z",
+                    }
+                },
+            )
+        return httpx.Response(404, json={})
+
+    client = RommApiClient(config, transport=httpx.MockTransport(handler))
+    # --rom-path scoping: cli.py merges the ROM file's stem into file_filters.
+    preview = build_save_sync_preview(config, client, file_filters=["Mario"])
+    result = execute_save_sync_preview(
+        config, client, preview, file_filters=["Mario"], is_interactive=False
+    )
+    client.close()
+
+    assert calls["download"] == 1
+    assert result.executed == 1
+    assert result.skipped == 0
+
+
 # ---------------------------------------------------------------------------
 # Integration: backup created before download overwrites local file
 # ---------------------------------------------------------------------------
