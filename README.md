@@ -228,7 +228,7 @@ Every automatic trigger that can run `save-sync` on its own, in one place — us
 
 So: play on mobile, close it, launch the same game from ES-DE on the console — the `game-start` hook pulls the latest save from RomM *before* the emulator reads it (up to an 8 s wait). No manual `bifrost save-sync` needed once `bifrost esde-hooks install` has been run and ES-DE's custom event scripts setting is enabled. The other triggers (watcher, 2 h timer, `game-end`/`suspend`/`quit` pushes) exist as a safety net in case a save changes outside of a tracked game session, or the 8 s pull times out.
 
-**Savestates** (`bifrost state-sync`) are *not* covered by any of the above except the 2 h timer — the file watcher explicitly skips them, and no ES-DE hook calls `state-sync`. If you rely on savestates across devices, run `bifrost state-sync --apply` manually or add your own trigger.
+**Savestates** are *not* covered by any of the above, including the 2 h timer — `bifrost-save-sync.timer` only runs `bifrost save sync`, never a savestate sync. The file watcher explicitly skips them, and no ES-DE hook syncs them either. Savestate sync isn't currently wired up to a CLI command at all (see [How it works](#how-it-works) below) — there's no automatic *or* manual trigger yet.
 
 ### Library sync timing at a glance
 
