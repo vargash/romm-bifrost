@@ -915,6 +915,112 @@ def test_cli_save_sync_conflict_server_wins(
     assert "Save Sync Execution" in result.output
 
 
+def test_cli_save_sync_game_start_unescapes_esde_rom_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    r"""ES-DE backslash-escapes shell-special characters (spaces, parens, ...) in the
+    $1 it hands to custom event scripts, for use in an unquoted shell context. Our
+    generated hook scripts pass "$1" quoted, so the escaped path — e.g.
+    "Mario\ Party\ \(USA\).zip" — arrives at --rom-path with the backslashes still
+    literally in it. Regression test for the game-start hook never downloading
+    anything (negotiate correctly found the op; rom_id/filename matching against
+    the un-unescaped stem always missed).
+    """
+    cfg = config_path_for(tmp_path)
+
+    calls: dict[str, int] = {"download": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/devices/device-1":
+            return httpx.Response(200, json={"device_id": "device-1"})
+        if request.url.path == "/api/roms":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [{"id": 10, "name": "Mario Party (USA)", "fs_name": "Mario Party (USA).zip"}],
+                    "total": 1,
+                },
+            )
+        if request.url.path == "/api/saves" and request.method == "GET":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/api/sync/negotiate":
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": 70,
+                    "operations": [
+                        {
+                            "action": "download",
+                            "rom_id": 10,
+                            "save_id": 99,
+                            "file_name": "Mario Party (USA).sav",
+                            "reason": "Server save is newer",
+                        }
+                    ],
+                    "total_upload": 0,
+                    "total_download": 1,
+                    "total_conflict": 0,
+                    "total_no_op": 0,
+                },
+            )
+        if request.url.path == "/api/saves/99/content":
+            calls["download"] += 1
+            return httpx.Response(200, content=b"server-save")
+        if "/api/sync/sessions/" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "session": {
+                        "id": 70,
+                        "device_id": "device-1",
+                        "user_id": 1,
+                        "status": "completed",
+                        "initiated_at": "2026-06-22T00:00:00Z",
+                        "completed_at": "2026-06-22T00:00:01Z",
+                        "operations_planned": 1,
+                        "operations_completed": 1,
+                        "operations_failed": 0,
+                        "error_message": None,
+                        "created_at": "2026-06-22T00:00:00Z",
+                        "updated_at": "2026-06-22T00:00:01Z",
+                    }
+                },
+            )
+        return httpx.Response(404, json={})
+
+    original_init = httpx.Client.__init__
+
+    def patched_init(self: httpx.Client, *args: Any, **kwargs: Any) -> None:
+        kwargs["transport"] = httpx.MockTransport(handler)
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "__init__", patched_init)
+
+    # Same escaping style ES-DE bakes into $1 for a path containing spaces/parens.
+    escaped_rom_path = r"/roms/psx/Mario\ Party\ \(USA\).zip"
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "save",
+            "sync",
+            "--config",
+            str(cfg),
+            "--apply",
+            "--rom-path",
+            escaped_rom_path,
+            "--on-event",
+            "game-start",
+            "--timeout",
+            "8",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls["download"] == 1
+
+
 # ---------------------------------------------------------------------------
 # F2: complete_sync_session resilience (404/409/410 → ALREADY_FINALIZED)
 # ---------------------------------------------------------------------------
