@@ -135,7 +135,11 @@ class BifrostCache:
         return self._read_data(key)
 
     def get_stale(self, key: str) -> list[dict[str, Any]] | None:
-        """Return cached data regardless of TTL. Returns None only if no data on disk."""
+        """Return cached data regardless of TTL. Returns None only if no data on disk
+        or the cache format version doesn't match."""
+        meta = self._load_meta()
+        if meta.get("cache_format_version") != _FORMAT_VERSION:
+            return None
         return self._read_data(key)
 
     def last_fetched_at(self, key: str) -> datetime | None:

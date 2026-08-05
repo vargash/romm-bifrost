@@ -140,6 +140,17 @@ def test_get_stale_returns_none_on_miss(tmp_path: Path) -> None:
     assert cache.get_stale("firmware") is None
 
 
+def test_get_stale_returns_none_on_format_version_mismatch(tmp_path: Path) -> None:
+    cache = make_cache(tmp_path, ttl_roms_hours=24)
+    cache.set("roms", [{"id": 1}])
+    # Corrupt the format version in metadata
+    meta_path = tmp_path / "cache_meta.json"
+    meta = json.loads(meta_path.read_text())
+    meta["cache_format_version"] = 999
+    meta_path.write_text(json.dumps(meta))
+    assert cache.get_stale("roms") is None
+
+
 # ---------------------------------------------------------------------------
 # last_fetched_at
 # ---------------------------------------------------------------------------
