@@ -32,7 +32,7 @@ def test_resolve_core_mapping_rejects_unknown_local_emulator() -> None:
 
 def test_resolve_core_mapping_rejects_unsupported_profile() -> None:
     resolution = resolve_core_mapping(
-        platform="ps2", remote_core="some_core", local_emulator="pcsx2"
+        platform="gc", remote_core="some_core", local_emulator="dolphin"
     )
     assert resolution.ok is False
     assert "unsupported" in resolution.rejected_reason

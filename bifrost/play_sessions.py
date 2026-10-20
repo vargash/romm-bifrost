@@ -26,6 +26,15 @@ def record_game_start(rom_path: str) -> None:
     )
 
 
+def session_start_time(rom_path: str) -> datetime | None:
+    """Start time recorded by record_game_start for rom_path, if a session is open."""
+    try:
+        data = json.loads(_start_marker(rom_path).read_text(encoding="utf-8"))
+        return datetime.fromisoformat(data["start_time"])
+    except (OSError, KeyError, ValueError):
+        return None
+
+
 def record_game_end(rom_path: str) -> None:
     """Complete the session for rom_path and append to the pending queue."""
     marker = _start_marker(rom_path)
