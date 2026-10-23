@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import errno
 import os
 import shutil
 from concurrent.futures import ThreadPoolExecutor
@@ -11,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from bifrost.api.client import RommApiClient
-from bifrost.api.models import PlatformSummary, RomSummary, SsMetadata
+from bifrost.api.models import PlatformSummary, RomSummary
 from bifrost.config import AppConfig
 
 # Maps folder_map keys to the corresponding field name in SsMetadata.
@@ -367,7 +366,8 @@ def plan_stale_removals(
                 remove_ops.append(RemoveSymlinkOperation(category="bios", destination=item))
 
     # Old asset-dir directory symlinks (legacy flat NAS structure).
-    # These are directory-level symlinks like downloaded_media/psx/covers → NAS/resources/roms/<id>/covers.
+    # These are directory-level symlinks like downloaded_media/psx/covers
+    # → NAS/resources/roms/<id>/covers.
     # They point under resources_root, not nas_root, so we check against resources_root.
     # The new per-game approach creates file symlinks inside real directories, so these must go.
     media_root = _normalize_path(config.emudeck.media_path)
@@ -381,7 +381,9 @@ def plan_stale_removals(
         for item in slug_dir.iterdir():
             if item.is_symlink() and item not in planned_asset_parents:
                 if not item.exists() or _is_bifrost_symlink(item, resources_root):
-                    remove_ops.append(RemoveSymlinkOperation(category="asset-dir", destination=item))
+                    remove_ops.append(
+                        RemoveSymlinkOperation(category="asset-dir", destination=item)
+                    )
 
     return remove_ops
 

@@ -132,7 +132,7 @@ def run_save_preflight(config: AppConfig) -> PreflightResult:
     return result
 
 
-def run_save_api_preflight(config: AppConfig, client: "RommApiClient") -> PreflightResult:
+def run_save_api_preflight(config: AppConfig, client: RommApiClient) -> PreflightResult:
     """API-level pre-flight for save sync --apply (requires an open RommApiClient).
 
     Checks:
