@@ -117,6 +117,13 @@ class SyncProfilesConfig(BaseModel):
         default_factory=list,
         description="Emulator ids to scan for saves. Empty = all supported profiles.",
     )
+    pcsx2_memcard: str = Field(
+        default="Mcd001.ps2",
+        description=(
+            "Name of the PCSX2 folder memory card (directory under pcsx2/saves) whose "
+            "game folders are synced."
+        ),
+    )
 
 
 class CoreMapping(BaseModel):

@@ -1609,13 +1609,19 @@ def save_sync(
     )
 
     # Record ES-DE play session timestamps (fail-open: never block game launch)
+    session_start = None
     if on_event in {"game-start", "game-end"} and rom_path:
         try:
-            from bifrost.play_sessions import record_game_end, record_game_start
+            from bifrost.play_sessions import (
+                record_game_end,
+                record_game_start,
+                session_start_time,
+            )
 
             if on_event == "game-start":
                 record_game_start(rom_path)
             else:
+                session_start = session_start_time(rom_path)
                 record_game_end(rom_path)
         except Exception as _ps_exc:  # noqa: BLE001
             _cli_log.debug("play session record failed (ignored): %s", _ps_exc)
@@ -1652,6 +1658,7 @@ def save_sync(
                     device_id=device_id,
                     file_filters=effective_filters if effective_filters else None,
                     force_resync=resync,
+                    session_start=session_start,
                 )
 
                 # Event-based direction filtering

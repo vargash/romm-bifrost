@@ -1520,11 +1520,11 @@ def test_execute_download_falls_back_when_core_mapping_targets_unsupported_profi
     tmp_path: Path,
 ) -> None:
     """local_emulator pointing at a recognised-but-unsupported profile (e.g.
-    pcsx2) is rejected by resolve_core_mapping and falls back to the bare root.
+    dolphin) is rejected by resolve_core_mapping and falls back to the bare root.
     """
     config = make_config(tmp_path)
     config.sync.core_mappings = [
-        CoreMapping(platform="psx", remote_core="mednafen_psx_hw", local_emulator="pcsx2")
+        CoreMapping(platform="psx", remote_core="mednafen_psx_hw", local_emulator="dolphin")
     ]
     saves_root = Path(config.emudeck.saves_path)
     (saves_root / "duckstation/saves").mkdir(parents=True, exist_ok=True)

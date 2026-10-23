@@ -116,13 +116,13 @@ def test_scan_does_not_recurse_into_subdirectories(tmp_path: Path) -> None:
 def test_unsupported_profile_dir_logged_as_warning(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    _make_saves(tmp_path, "pcsx2/saves", ["memcard.ps2"])
+    _make_saves(tmp_path, "dolphin/saves", ["memcard.raw"])
     layout = EmudeckEsdeLayout()
     with caplog.at_level(logging.WARNING, logger="bifrost.saves.layout"):
         results = layout.scan_saves(tmp_path)
     # Unsupported profile produces no ScannedFile entries
-    assert not any(sf.profile.emulator == "pcsx2" for sf in results)
-    assert any("pcsx2" in record.message for record in caplog.records)
+    assert not any(sf.profile.emulator == "dolphin" for sf in results)
+    assert any("dolphin" in record.message for record in caplog.records)
 
 
 def test_scan_empty_saves_root_returns_no_results(tmp_path: Path) -> None:

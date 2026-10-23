@@ -7,7 +7,8 @@ not yet handled.
 
 Supported mappings:
   per_rom_basename  — one save file per ROM, named after the ROM basename
-  per_rom_dir       — one subdirectory per ROM (e.g. PPSSPP)
+  per_rom_dir       — one subdirectory per game inside a card directory (e.g. PCSX2 folder
+                      memory card); each subdirectory is synced as one zipped save
   shared_memcard    — a single memory card file shared across games (PSX, PS2, GC)
   custom            — emulator-specific logic not covered by the above
 
@@ -126,17 +127,19 @@ PROFILES: tuple[SaveProfile, ...] = (
             ),
         ),
     ),
-    # PCSX2 (PS2) — shared memory card
+    # PCSX2 (PS2) — folder memory card: <saves>/pcsx2/saves/<card>/<game dir>/...
+    # Each game directory is packed as one zip (see bifrost.saves.folder_pack).
+    # Which <card> is scanned comes from sync.profiles.pcsx2_memcard. File-based
+    # (*.ps2) memory cards are not supported.
     SaveProfile(
         platform="ps2",
         emulator="pcsx2",
         save_subpath="pcsx2/saves",
-        include_globs=("*.ps2",),
-        exclude_globs=(),
-        mapping="shared_memcard",
+        include_globs=("*",),
+        exclude_globs=("*.bak", "*.part"),
+        mapping="per_rom_dir",
         screenshot_sidecar=False,
         romm_emulator="pcsx2",
-        supported=False,
     ),
     # Dolphin (GC/Wii) — mixed/shared memory card
     SaveProfile(

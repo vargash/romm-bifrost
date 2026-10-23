@@ -58,6 +58,9 @@ orphan_platform_strategy = "ask" # ask | remove | skip
 # Emulator ids to scan for saves. Empty (default) = all supported profiles.
 [sync.profiles]
 enabled = []
+# PCSX2 folder memory card (directory under <saves_path>/pcsx2/saves) whose game
+# folders are synced. Each game folder is uploaded as one zip.
+pcsx2_memcard = "Mcd001.ps2"
 
 # Cross-core save compatibility: lets Bifrost route a save uploaded by a
 # foreign emulator/core (e.g. a mobile RetroArch client) into a local
