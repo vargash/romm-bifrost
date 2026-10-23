@@ -415,8 +415,8 @@ Emulator savestate sync (`.state`, `.state1`, …) is implemented at the module 
 
 PCSX2 saves are synced when the memory card is a **folder** card (`<saves_path>/pcsx2/saves/<card>/`, one subfolder per game, named after the game serial). Set the card name with `[sync.profiles].pcsx2_memcard` (default `Mcd001.ps2`, the name PCSX2 gives a converted card). File-based `.ps2` cards are not supported.
 
-- Each game folder is uploaded to RomM as a single deterministic zip, so an unchanged folder produces the same hash on every device.
-- **Downloads** run in the normal sync (startup, `game-start`, manual): the server save is already tied to its ROM and the zip carries the folder name, so the folder is restored into the configured card (previous folder kept as `<name>.bak`).
+- All the game folders of one ROM (a game can create one folder per in-game save slot) are uploaded to RomM together as a single deterministic zip, so RomM keeps one save per game and an unchanged card produces the same hash on every device.
+- **Downloads** run in the normal sync (startup, `game-start`, manual): the server save is already tied to its ROM and the zip carries the folder names, so every folder in it is restored into the configured card (previous folder kept as `<name>.bak`).
 - **Uploads** only happen at `game-end`: the folder modified during the play session is attributed to the ROM that was launched and remembered in `~/.local/state/bifrost/dir_saves.json`. Folders with no known ROM are never uploaded outside a session, so play each game once through ES-DE before relying on a manual `save sync`.
 - Savestates (`.p2s`) are not synced.
 

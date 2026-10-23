@@ -1,9 +1,10 @@
 """Deterministic zip packing for directory-based saves (e.g. PCSX2 folder memory cards).
 
-RomM stores one file per save, so a per-game save directory is shipped as a
-single zip whose only top-level entry is the directory itself. The archive is
-byte-for-byte reproducible for identical directory contents (sorted entries,
-fixed timestamps and permissions) so the content hash is stable and RomM's
+RomM stores one file per save, so a game's save directories are shipped as a
+single zip whose top-level entries are the directories themselves (a game can
+own several, e.g. one per in-game save slot). The archive is byte-for-byte
+reproducible for identical directory contents (sorted entries, fixed
+timestamps and permissions) so the content hash is stable and RomM's
 hash-based dedup keeps working.
 """
 
@@ -13,6 +14,7 @@ import io
 import os
 import shutil
 import zipfile
+from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 
 _FIXED_DATE_TIME = (1980, 1, 1, 0, 0, 0)
@@ -36,11 +38,18 @@ def _entries(root: Path) -> list[tuple[str, Path]]:
     return sorted(items, key=lambda item: item[0])
 
 
-def pack_dir(root: Path) -> bytes:
-    """Zip root (including the directory itself as the sole top-level entry)."""
+def pack_dirs(roots: Sequence[Path]) -> bytes:
+    """Zip the given directories, each kept as its own top-level entry.
+
+    All roots must share a parent. A single root yields the same bytes as the
+    historical one-directory archive, so saves already on the server stay valid.
+    """
+    entries = sorted(
+        (entry for root in roots for entry in _entries(root)), key=lambda item: item[0]
+    )
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
-        for arcname, path in _entries(root):
+        for arcname, path in entries:
             if path.is_dir():
                 info = zipfile.ZipInfo(arcname + "/", date_time=_FIXED_DATE_TIME)
                 info.external_attr = _DIR_MODE
@@ -53,32 +62,37 @@ def pack_dir(root: Path) -> bytes:
     return buffer.getvalue()
 
 
-def archive_dir_name(data: bytes) -> str:
-    """Name of the single top-level directory inside a packed archive."""
+def pack_dir(root: Path) -> bytes:
+    """Zip a single directory (the directory itself is the sole top-level entry)."""
+    return pack_dirs([root])
+
+
+def archive_dir_names(data: bytes) -> list[str]:
+    """Sorted names of the top-level directories inside a packed archive."""
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         tops = {PurePosixPath(n).parts[0] for n in archive.namelist() if n.strip("/")}
-    if len(tops) != 1:
-        raise UnsafeArchiveError(f"expected one top-level directory, found {sorted(tops)}")
-    return tops.pop()
+    return sorted(tops)
 
 
-def unpack_to_dir(data: bytes, dest_parent: Path) -> Path:
-    """Extract a packed archive under dest_parent, replacing any existing directory.
+def unpack_to_dirs(data: bytes, dest_parent: Path) -> list[Path]:
+    """Extract a packed archive under dest_parent, replacing any existing directories.
 
-    The new tree is extracted next to the target first; the previous directory (if
-    any) is kept as <name>.bak (replacing an older backup) before the swap.
-    Returns the final directory path.
+    The new trees are extracted into a staging directory first; each previous
+    directory (if any) is kept as <name>.bak (replacing an older backup) before
+    the swap. Returns the final directory paths.
     """
-    name = archive_dir_name(data)
-    if name in {"", ".", ".."} or "/" in name or "\\" in name:
-        raise UnsafeArchiveError(f"unsafe top-level name: {name!r}")
+    names = archive_dir_names(data)
+    if not names:
+        raise UnsafeArchiveError("archive has no top-level directory")
+    for name in names:
+        if name in {"", ".", ".."} or "/" in name or "\\" in name:
+            raise UnsafeArchiveError(f"unsafe top-level name: {name!r}")
 
     dest_parent.mkdir(parents=True, exist_ok=True)
-    target = dest_parent / name
-    staging = dest_parent / f"{name}.part"
-    backup = dest_parent / f"{name}.bak"
+    staging = dest_parent / ".bifrost-unpack.part"
     shutil.rmtree(staging, ignore_errors=True)
     staging.mkdir()
+    targets: list[Path] = []
     try:
         staging_root = staging.resolve()
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
@@ -94,13 +108,17 @@ def unpack_to_dir(data: bytes, dest_parent: Path) -> Path:
                 else:
                     out.parent.mkdir(parents=True, exist_ok=True)
                     out.write_bytes(archive.read(member))
-        extracted = staging / name
-        if not extracted.is_dir():
-            raise UnsafeArchiveError(f"archive has no directory {name!r}")
-        if target.exists():
-            shutil.rmtree(backup, ignore_errors=True)
-            os.replace(target, backup)
-        os.replace(extracted, target)
+        for name in names:
+            if not (staging / name).is_dir():
+                raise UnsafeArchiveError(f"archive has no directory {name!r}")
+        for name in names:
+            target = dest_parent / name
+            backup = dest_parent / f"{name}.bak"
+            if target.exists():
+                shutil.rmtree(backup, ignore_errors=True)
+                os.replace(target, backup)
+            os.replace(staging / name, target)
+            targets.append(target)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
-    return target
+    return targets
