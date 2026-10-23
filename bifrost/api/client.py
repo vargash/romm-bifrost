@@ -277,6 +277,7 @@ class RommApiClient:
                     "updated_after": since_str,
                     "limit": limit,
                     "offset": offset,
+                    "with_total": False,
                     "with_char_index": False,
                     "with_filter_values": False,
                     "with_rom_id_index": False,
@@ -284,27 +285,24 @@ class RommApiClient:
                 },
             )
             items_payload: list[Any] | None = None
-            total: int | None = None
 
             if isinstance(payload, dict):
                 candidate = payload.get("items")
-                total_candidate = payload.get("total")
-                if isinstance(candidate, list) and isinstance(total_candidate, int):
+                if isinstance(candidate, list):
                     items_payload = candidate
-                    total = total_candidate
                 else:
                     items_payload = _extract_list_payload(payload) or []
-                    total = len(raw_items) + len(items_payload)
             elif isinstance(payload, list):
                 items_payload = payload
-                total = len(raw_items) + len(payload)
 
             if not items_payload:
                 break
 
             raw_items.extend(items_payload)
 
-            if total is not None and len(raw_items) >= total:
+            # Totals are not requested (with_total=False), so a short page
+            # marks the end of the result set.
+            if len(items_payload) < limit:
                 break
             offset += limit
 
@@ -882,7 +880,16 @@ class RommApiClient:
             "negotiate_sync response: session=%s ops=%d reasons=%s",
             resp.session_id,
             len(resp.operations),
-            [{"action": op.action, "file_name": op.file_name, "reason": op.reason, "save_id": op.save_id, "server_content_hash": op.server_content_hash} for op in resp.operations],
+            [
+                {
+                    "action": op.action,
+                    "file_name": op.file_name,
+                    "reason": op.reason,
+                    "save_id": op.save_id,
+                    "server_content_hash": op.server_content_hash,
+                }
+                for op in resp.operations
+            ],
         )
         return resp
 

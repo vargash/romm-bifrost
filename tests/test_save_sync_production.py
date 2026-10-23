@@ -217,6 +217,8 @@ def test_is_redundant_download_false_when_file_missing(tmp_path: Path) -> None:
 
 def test_execute_conflict_server_wins_triggers_download(tmp_path: Path) -> None:
     config = make_config(tmp_path, conflict_strategy="server_wins")
+    # Optimistic downloads (the default) skip the explicit /downloaded confirmation.
+    config.sync.optimistic_downloads = False
     saves_root = Path(config.emudeck.saves_path)
     profile_dir = saves_root / "retroarch/saves"
     profile_dir.mkdir(parents=True, exist_ok=True)
@@ -340,7 +342,7 @@ def test_execute_conflict_local_wins_triggers_upload(tmp_path: Path) -> None:
                     "total_no_op": 0,
                 },
             )
-        if request.url.path == "/api/saves/99" and request.method == "PUT":
+        if request.url.path == "/api/saves" and request.method == "POST":
             calls["upload"] += 1
             return httpx.Response(
                 200,
@@ -431,7 +433,7 @@ def test_execute_conflict_ask_headless_resolves_as_upload(tmp_path: Path) -> Non
                     "total_no_op": 0,
                 },
             )
-        if request.url.path == "/api/saves/99" and request.method == "PUT":
+        if request.url.path == "/api/saves" and request.method == "POST":
             calls["upload"] += 1
             return httpx.Response(
                 200,

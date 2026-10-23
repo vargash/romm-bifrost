@@ -897,12 +897,14 @@ def build_save_sync_preview(
             session_id = negotiate_response.session_id
             raw_operations = negotiate_response.operations
             _log.info(
-                "negotiate complete: session=%d upload=%d download=%d conflict=%d no_op=%d",
+                "negotiate complete: session=%d upload=%d download=%d "
+                "conflict=%d no_op=%d delete=%d",
                 session_id,
                 negotiate_response.total_upload,
                 negotiate_response.total_download,
                 negotiate_response.total_conflict,
                 negotiate_response.total_no_op,
+                negotiate_response.total_delete,
             )
         except ApiError as exc:
             if exc.http_status in {404, 405}:

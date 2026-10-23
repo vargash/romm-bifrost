@@ -1138,7 +1138,9 @@ def _print_sync_summary(
     if results:
         console.print(details)
         if len(results) > max_rows:
-            console.print(f"[yellow]Showing first {max_rows} operations out of {len(results)}.[/yellow]")
+            console.print(
+                f"[yellow]Showing first {max_rows} operations out of {len(results)}.[/yellow]"
+            )
 
     if error_by_category:
         error_table = Table(title="Sync Errors by Category")
@@ -1222,7 +1224,8 @@ def sync(
         if bifrost_cache is None:
             if not quiet:
                 console.print(
-                    "[yellow]Cache disabled — cannot determine deleted ROMs without full sync.[/yellow]"
+                    "[yellow]Cache disabled — cannot determine deleted ROMs "
+                    "without full sync.[/yellow]"
                 )
             raise SystemExit(EXIT_OK)
 
@@ -1387,7 +1390,9 @@ def sync(
         _abort_on_preflight(run_sync_preflight(config), console)
 
     try:
-        with RommApiClient(config, timeout_seconds=config.romm.timeout_seconds, no_cache=no_cache) as client:
+        with RommApiClient(
+            config, timeout_seconds=config.romm.timeout_seconds, no_cache=no_cache
+        ) as client:
             ops = plan_symlink_operations(config, client)
             m3u_ops = plan_m3u_operations(config, client)
             platforms = client.list_platforms()
@@ -1720,7 +1725,7 @@ def save_sync(
                                 preview,
                                 file_filters=effective_filters if effective_filters else None,
                                 is_interactive=is_interactive,
-                                conflict_overrides=conflict_overrides if conflict_overrides else None,
+                                conflict_overrides=conflict_overrides or None,
                             )
                     except SaveSyncLockError as exc:
                         if on_event is not None:
@@ -1750,7 +1755,7 @@ def save_sync(
             timeout_seconds,
             on_event,
         )
-        raise SystemExit(EXIT_OK)
+        raise SystemExit(EXIT_OK) from None
 
     finally:
         if _timeout_active:
