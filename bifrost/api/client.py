@@ -880,7 +880,16 @@ class RommApiClient:
             "negotiate_sync response: session=%s ops=%d reasons=%s",
             resp.session_id,
             len(resp.operations),
-            [{"action": op.action, "file_name": op.file_name, "reason": op.reason, "save_id": op.save_id, "server_content_hash": op.server_content_hash} for op in resp.operations],
+            [
+                {
+                    "action": op.action,
+                    "file_name": op.file_name,
+                    "reason": op.reason,
+                    "save_id": op.save_id,
+                    "server_content_hash": op.server_content_hash,
+                }
+                for op in resp.operations
+            ],
         )
         return resp
 
