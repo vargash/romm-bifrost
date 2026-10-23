@@ -196,6 +196,8 @@ class SyncNegotiateResponse(BaseModel):
     total_download: int
     total_conflict: int
     total_no_op: int
+    # Added in RomM 5.4; absent on older servers.
+    total_delete: int = 0
 
 
 class SyncSessionSchema(BaseModel):
