@@ -13,6 +13,7 @@ from bifrost.api.client import RommApiClient
 from bifrost.api.models import RomSummary, StateSummary
 from bifrost.config import AppConfig
 from bifrost.errors import ApiError
+from bifrost.launch_targets import with_game_files
 
 _STATE_FILE_RE = re.compile(r"\.state\d*$", re.IGNORECASE)
 _MULTISPACE_RE = re.compile(r"\s+")
@@ -134,20 +135,7 @@ def scan_local_state_files(root: Path) -> list[LocalStateFile]:
 def _build_rom_index(remote_roms: list[RomSummary]) -> dict[str, RomSummary]:
     index: dict[str, RomSummary] = {}
     for rom in remote_roms:
-        candidates: list[str] = []
-        if rom.name:
-            candidates.append(rom.name)
-        if rom.fs_name:
-            candidates.append(Path(rom.fs_name).stem)
-            candidates.append(rom.fs_name)
-        if rom.fs_path:
-            candidates.append(Path(rom.fs_path).stem)
-            candidates.append(Path(rom.fs_path).name)
-        if rom.full_path:
-            candidates.append(Path(rom.full_path).stem)
-            candidates.append(Path(rom.full_path).name)
-
-        for candidate in candidates:
+        for candidate in rom.name_candidates:
             normalized = _normalize_name(candidate)
             if normalized:
                 index.setdefault(normalized, rom)
@@ -192,7 +180,7 @@ def build_state_sync_preview(
         or _matches_filter(str(item.path), file_filters)
     ]
 
-    rom_index = _build_rom_index(client.list_roms())
+    rom_index = _build_rom_index(with_game_files(config, client, client.list_roms()))
     remote_states = client.list_states()
     remote_index: dict[tuple[int, str], StateSummary] = {
         _build_state_lookup_key(state.rom_id, state.file_name): state for state in remote_states

@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from bifrost.api.models import RomSummary
 from bifrost.config import AppConfig
 from bifrost.multidisc import extract_disc_number
 
@@ -127,7 +128,7 @@ def scan_inner_folders(
             or not isinstance(platform_id, int)
             or not fs_name
             or not path_hint
-            or rom.get("fs_extension")
+            or rom.get("fs_extension") != ""
         ):
             continue
         slug = platform_slug_by_id.get(platform_id)
@@ -143,3 +144,30 @@ def scan_inner_folders(
         elif entries[0].target != folder:
             launch_names[rom_id] = entries[0].name
     return InnerFolderScan(launch_names, disc_links, frozenset(handled))
+
+
+_SCAN_FIELDS = {"id", "platform_id", "fs_name", "fs_extension", "full_path", "fs_path"}
+
+
+def with_game_files(
+    config: AppConfig,
+    client: Any,
+    roms: list[RomSummary],
+) -> list[RomSummary]:
+    """Copies of roms where folder ROMs carry the names of their game files.
+
+    Saves and states are named after the file the emulator launched, which for a
+    folder ROM is not the folder name. Platforms are only fetched when the library
+    has folder ROMs at all.
+    """
+    if not any(rom.fs_name and rom.fs_extension == "" for rom in roms):
+        return roms
+    platform_slug_by_id = {p.id: p.fs_slug for p in client.list_platforms() if p.fs_slug}
+    scan = scan_inner_folders(
+        config, [rom.model_dump(include=_SCAN_FIELDS) for rom in roms], platform_slug_by_id
+    )
+    names = {**{rom_id: [name] for rom_id, name in scan.launch_names.items()}, **scan.disc_links}
+    return [
+        rom.model_copy(update={"game_files": names[rom.id]}) if rom.id in names else rom
+        for rom in roms
+    ]

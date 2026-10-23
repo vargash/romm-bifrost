@@ -11,6 +11,7 @@ from bifrost.launch_targets import (
     DEFAULT_INNER_FILE_PLATFORMS,
     launch_entries,
     scan_inner_folders,
+    with_game_files,
 )
 from bifrost.multidisc import plan_m3u_operations
 from bifrost.symlink_manager import (
@@ -277,6 +278,65 @@ def test_gamelist_path_follows_the_inner_game_file(tmp_path: Path):
     assert _rom_path_value(tagged[0]) == "./Disc.iso"
     assert disc_ids == set()
     assert "_bifrost_launch_name" not in cached[0]
+
+
+# --- saves and states -----------------------------------------------------
+
+
+class _PlatformsClient:
+    def __init__(self) -> None:
+        self.platform_calls = 0
+
+    def list_platforms(self):
+        self.platform_calls += 1
+        return [PlatformSummary(id=2, name="PS2", fs_slug="ps2")]
+
+
+def test_game_files_name_the_save_of_a_folder_rom(tmp_path: Path):
+    """The folder is named differently from the file the emulator launches."""
+    _folder_rom(tmp_path, ["Disc.iso"], name="FFXII v1.2")
+    rom = _summary("FFXII v1.2")
+
+    [tagged] = with_game_files(_config(tmp_path), _PlatformsClient(), [rom])
+
+    assert tagged.game_files == ["Disc.iso"]
+    assert tagged.launch_stem == "Disc"
+    assert "Disc" in tagged.name_candidates
+    assert rom.game_files == []
+
+
+def test_save_and_state_files_match_the_folder_rom_by_its_game_file(tmp_path: Path):
+    from bifrost.save_sync import _build_remote_rom_index, _normalize_name
+    from bifrost.state_sync import _build_rom_index
+
+    _folder_rom(tmp_path, ["Disc.iso"], name="FFXII v1.2")
+    [tagged] = with_game_files(_config(tmp_path), _PlatformsClient(), [_summary("FFXII v1.2")])
+
+    assert _build_remote_rom_index([tagged])[_normalize_name("Disc")] is tagged
+    assert _build_rom_index([tagged])[_normalize_name("Disc")] is tagged
+
+
+def test_folder_name_with_dots_is_not_cut_at_a_fake_extension():
+    assert _summary("FFXII v1.2").launch_stem == "FFXII v1.2"
+    assert _summary("Game.chd", fs_extension="chd").launch_stem == "Game"
+
+
+def test_game_files_name_each_disc_as_a_candidate(tmp_path: Path):
+    _folder_rom(tmp_path, ["Game (Disc 1).chd", "Game (Disc 2).chd"])
+
+    [tagged] = with_game_files(_config(tmp_path), _PlatformsClient(), [_summary()])
+
+    assert tagged.launch_stem == GAME  # several files: the folder name stays the stem
+    assert {"Game (Disc 1)", "Game (Disc 2)"} <= set(tagged.name_candidates)
+
+
+def test_platforms_are_only_fetched_when_the_library_has_folder_roms(tmp_path: Path):
+    client = _PlatformsClient()
+    file_rom = _summary("Game.chd", fs_extension="chd")
+    unknown = _summary("Game.chd", fs_extension=None)
+
+    assert with_game_files(_config(tmp_path), client, [file_rom, unknown]) == [file_rom, unknown]
+    assert client.platform_calls == 0
 
 
 def test_scan_ignores_file_roms_and_unlisted_platforms(tmp_path: Path):

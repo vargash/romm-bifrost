@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from pathlib import Path
 
 from pydantic import BaseModel, Field
 
@@ -75,7 +76,8 @@ class RomSummary(BaseModel):
     full_path: str | None = None
     platform_id: int | None = None
     name: str | None = None
-    fs_extension: str = ""
+    # "" means a folder ROM; None means the API did not say.
+    fs_extension: str | None = None
     # Cover (URL-style path, e.g. /assets/romm/resources/roms/<pid>/<rid>/cover/big.png?ts=...)
     path_cover_large: str | None = None
     # Manual PDF
@@ -85,6 +87,37 @@ class RomSummary(BaseModel):
     merged_screenshots: list[str] = Field(default_factory=list)
     # Per-type asset paths scraped from ScreenScraper
     ss_metadata: SsMetadata | None = None
+    # Link names of the game files inside a folder ROM. Filled in by bifrost from the NAS
+    # (see launch_targets.with_game_files), never by RomM.
+    game_files: list[str] = Field(default_factory=list, exclude=True)
+
+    @property
+    def name_candidates(self) -> list[str]:
+        """Names a local save or state file may carry for this ROM."""
+        candidates: list[str] = []
+        if self.name:
+            candidates.append(self.name)
+        if self.fs_name:
+            candidates.append(Path(self.fs_name).stem)
+            candidates.append(self.fs_name)
+        candidates.extend(Path(game_file).stem for game_file in self.game_files)
+        if self.fs_path:
+            candidates.append(Path(self.fs_path).stem)
+            candidates.append(Path(self.fs_path).name)
+        if self.full_path:
+            candidates.append(Path(self.full_path).stem)
+            candidates.append(Path(self.full_path).name)
+        return candidates
+
+    @property
+    def launch_stem(self) -> str | None:
+        """Stem emulators name their save files after, when it can be told from fs_name."""
+        if len(self.game_files) == 1:
+            return Path(self.game_files[0]).stem
+        if not self.fs_name:
+            return None
+        # A folder's name is not a filename: its dots are not an extension.
+        return self.fs_name if self.fs_extension == "" else Path(self.fs_name).stem
 
 
 class StatsReturn(BaseModel):

@@ -24,6 +24,7 @@ from bifrost.api.models import (
 )
 from bifrost.config import AppConfig, CoreMapping
 from bifrost.errors import ApiError, ConfigError
+from bifrost.launch_targets import with_game_files
 from bifrost.play_sessions import consume_pending_sessions
 from bifrost.saves.dir_map import load_dir_map, remember_dir
 from bifrost.saves.folder_pack import pack_dirs, unpack_to_dirs
@@ -232,11 +233,7 @@ def _local_filename_for_operation(
     if p.stem.strip().isdigit():
         rom = rom_index.get(operation.rom_id)
         if rom:
-            stem = (
-                Path(rom.fs_name).stem if rom.fs_name
-                else rom.name or p.stem
-            )
-            return stem + p.suffix
+            return (rom.launch_stem or rom.name or p.stem) + p.suffix
     return ts_stripped
 
 
@@ -282,21 +279,7 @@ def _matches_file_filter(value: str, file_filters: list[str] | None) -> bool:
 def _build_remote_rom_index(remote_roms: list[RomSummary]) -> dict[str, RomSummary]:
     index: dict[str, RomSummary] = {}
     for rom in remote_roms:
-        candidates: list[str] = []
-
-        if rom.name:
-            candidates.append(rom.name)
-        if rom.fs_name:
-            candidates.append(Path(rom.fs_name).stem)
-            candidates.append(rom.fs_name)
-        if rom.fs_path:
-            candidates.append(Path(rom.fs_path).stem)
-            candidates.append(Path(rom.fs_path).name)
-        if rom.full_path:
-            candidates.append(Path(rom.full_path).stem)
-            candidates.append(Path(rom.full_path).name)
-
-        for candidate in candidates:
+        for candidate in rom.name_candidates:
             normalized = _normalize_name(candidate)
             if normalized:
                 index.setdefault(normalized, rom)
@@ -318,19 +301,7 @@ def _resolve_target_rom_ids(
         return None
     matched: set[int] = set()
     for rom in remote_roms:
-        candidates: list[str] = []
-        if rom.name:
-            candidates.append(rom.name)
-        if rom.fs_name:
-            candidates.append(Path(rom.fs_name).stem)
-            candidates.append(rom.fs_name)
-        if rom.fs_path:
-            candidates.append(Path(rom.fs_path).stem)
-            candidates.append(Path(rom.fs_path).name)
-        if rom.full_path:
-            candidates.append(Path(rom.full_path).stem)
-            candidates.append(Path(rom.full_path).name)
-        if any(_matches_file_filter(candidate, file_filters) for candidate in candidates):
+        if any(_matches_file_filter(candidate, file_filters) for candidate in rom.name_candidates):
             matched.add(rom.id)
     return frozenset(matched) if matched else None
 
@@ -675,7 +646,7 @@ def _upload_file_name(
     """
     if source_profile is None or not source_profile.strip_slot_suffix or rom is None:
         return local_file.file_name
-    stem = Path(rom.fs_name).stem if rom.fs_name else (rom.name or local_file.path.stem)
+    stem = rom.launch_stem or rom.name or local_file.path.stem
     return f"{stem}{local_file.path.suffix}"
 
 
@@ -784,7 +755,7 @@ def build_save_sync_preview(
         sf.path.name: sf.path.parent for sf in all_scanned
     }
 
-    remote_roms = client.list_roms()
+    remote_roms = with_game_files(config, client, client.list_roms())
     remote_rom_index = _build_remote_rom_index(remote_roms)
     target_rom_ids = _resolve_target_rom_ids(file_filters, remote_roms)
 
@@ -1254,7 +1225,7 @@ def execute_save_sync_preview(
                             local_emulator=configured.local_emulator,
                             expected_size_bytes=configured.expected_size_bytes,
                         )
-                        if resolution.ok:
+                        if resolution.ok and resolution.target_profile is not None:
                             mapping_resolution = resolution
                             target_profile = resolution.target_profile
                             dest_dir = save_root / target_profile.save_subpath
@@ -1358,7 +1329,7 @@ def execute_save_sync_preview(
                     len(content),
                     mapping_resolution.expected_size_bytes,
                     stripped,
-                    target_profile.romm_emulator,
+                    target_profile.romm_emulator if target_profile else operation.emulator,
                 )
                 content = content[: mapping_resolution.expected_size_bytes]
             destination.parent.mkdir(parents=True, exist_ok=True)
