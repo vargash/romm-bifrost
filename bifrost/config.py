@@ -64,6 +64,14 @@ class EsdeConfig(BaseModel):
     custom_systems_path: str = Field(
         default="~/ES-DE/custom_systems", description="Local ES-DE custom_systems directory."
     )
+    inner_file_platforms: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Extra platform slugs whose folder ROMs (games with extras) are linked through "
+            "the game file inside the folder. Adds to the built-in single-image systems "
+            "(ps2, gc, wii, psp, dreamcast)."
+        ),
+    )
 
 
 class EmudeckConfig(BaseModel):

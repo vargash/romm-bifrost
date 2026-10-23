@@ -71,6 +71,7 @@ from bifrost.symlink_manager import (
     evaluate_remove_operation,
     find_orphan_platform_folders,
     list_orphan_folder_contents,
+    plan_broken_link_cleanup,
     plan_incremental_symlink_ops,
     plan_stale_removals,
     plan_stale_removals_from_deleted_ids,
@@ -1331,6 +1332,9 @@ def sync(
 
                     delta_roms = [RomSummary.model_validate(item) for item in delta_raw]
                     ops = plan_incremental_symlink_ops(config, client, delta_roms)
+                    # ROMs whose link names changed (e.g. promoted to a folder) leave dead links.
+                    ops_with_cleanup: list[Any] = [*ops, *plan_broken_link_cleanup(config, ops)]
+                    ops = ops_with_cleanup
 
             except AuthenticationError as exc:
                 console.print(f"[red]Authentication error:[/red] {exc}")

@@ -18,6 +18,9 @@ bios_subpath = "bios"
 roms_path = "~/ROMs"
 gamelists_path = "~/.emulationstation/gamelists"
 custom_systems_path = "~/.emulationstation/custom_systems"
+# Extra platforms whose folder ROMs (games with extras) are linked through the game file
+# inside the folder. Built in: ps2, gc, wii, psp, dreamcast.
+# inner_file_platforms = ["saturn"]
 
 [emudeck]
 bios_path = "~/BIOS"
