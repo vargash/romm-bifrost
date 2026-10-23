@@ -125,6 +125,11 @@ PROFILES: tuple[SaveProfile, ...] = (
                 note="both use the standard 128KB PS1 per-game memory card image",
                 expected_size_bytes=131072,
             ),
+            RemoteCoreAlias(
+                core_slug="swanstation",
+                note="both use the standard 128KB PS1 per-game memory card image",
+                expected_size_bytes=131072,
+            ),
         ),
     ),
     # PCSX2 (PS2) — folder memory card: <saves>/pcsx2/saves/<card>/<game dir>/...
