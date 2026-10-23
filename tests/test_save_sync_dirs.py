@@ -15,7 +15,7 @@ from bifrost.api.client import RommApiClient
 from bifrost.config import AppConfig, EmudeckConfig, RommConfig
 from bifrost.save_sync import build_save_sync_preview, execute_save_sync_preview
 from bifrost.saves import dir_map
-from bifrost.saves.folder_pack import pack_dir
+from bifrost.saves.folder_pack import pack_dir, pack_dirs
 from bifrost.saves.layout import EmudeckEsdeLayout
 
 SERIAL = "BASLUS-20000"
@@ -244,3 +244,87 @@ def test_download_replaces_existing_dir_keeping_backup(tmp_path: Path) -> None:
 
     assert (game / "save.bin").read_bytes() == b"newer"
     assert (game.parent / f"{SERIAL}.bak" / "save.bin").read_bytes() == b"progress-1"
+
+
+def make_extra_slots(game: Path, *names: str) -> list[Path]:
+    """Add further game directories (e.g. one per in-game save slot) to the card."""
+    extra = []
+    for name in names:
+        slot = game.parent / name
+        slot.mkdir()
+        (slot / "save.bin").write_bytes(name.encode())
+        extra.append(slot)
+    return extra
+
+
+def test_all_dirs_of_a_rom_are_bundled_into_one_save(tmp_path: Path) -> None:
+    game = make_card(tmp_path)
+    slots = [game, *make_extra_slots(game, "BASLUS-20000-1", "BASLUS-20000-2")]
+    for slot in slots:
+        dir_map.remember_dir("pcsx2", slot.name, 5)
+    config = make_config(tmp_path)
+    server = Server([upload_op()])
+    client = RommApiClient(config, transport=httpx.MockTransport(server))
+
+    preview = build_save_sync_preview(
+        config,
+        client,
+        file_filters=["Some PS2 Game"],
+        session_start=datetime.now(UTC) - timedelta(minutes=5),
+    )
+
+    assert preview.mapped_files == 1
+    assert len(server.negotiated) == 1
+    assert server.negotiated[0]["file_name"] == f"{SERIAL}.zip"
+    assert server.negotiated[0]["content_hash"] == hashlib.md5(pack_dirs(slots)).hexdigest()
+
+    result = execute_save_sync_preview(config, client, preview, file_filters=["Some PS2 Game"])
+
+    assert result.executed == 1 and result.failed == 0
+    assert len(server.uploads) == 1
+    assert pack_dirs(slots) in server.uploads[0].content
+
+
+def test_dirs_of_different_roms_stay_separate_saves(tmp_path: Path) -> None:
+    game = make_card(tmp_path)
+    (other,) = make_extra_slots(game, "BASLUS-99999")
+    dir_map.remember_dir("pcsx2", game.name, 5)
+    dir_map.remember_dir("pcsx2", other.name, 6)
+    config = make_config(tmp_path)
+    client = RommApiClient(config, transport=httpx.MockTransport(Server([])))
+
+    preview = build_save_sync_preview(config, client)
+
+    assert preview.mapped_files == 2
+    assert {s.rom_id for s in preview.local_saves} == {5, 6}
+
+
+def test_download_unpacks_every_dir_of_a_bundle_and_maps_them(tmp_path: Path) -> None:
+    src = tmp_path / "other"
+    slots = []
+    for name in (SERIAL, "BASLUS-20000-1"):
+        (src / name).mkdir(parents=True)
+        (src / name / "save.bin").write_bytes(name.encode())
+        slots.append(src / name)
+    config = make_config(tmp_path)
+    op = {
+        "action": "download",
+        "rom_id": 5,
+        "save_id": 88,
+        "file_name": f"{SERIAL}.zip",
+        "emulator": "pcsx2",
+        "slot": "autosave",
+        "reason": "server newer",
+    }
+    client = RommApiClient(
+        config, transport=httpx.MockTransport(Server([op], pack_dirs(slots)))
+    )
+
+    preview = build_save_sync_preview(config, client)
+    result = execute_save_sync_preview(config, client, preview)
+
+    card = tmp_path / "saves" / "pcsx2" / "saves" / "Mcd001.ps2"
+    assert result.executed == 1, result.details
+    assert (card / SERIAL / "save.bin").read_bytes() == SERIAL.encode()
+    assert (card / "BASLUS-20000-1" / "save.bin").read_bytes() == b"BASLUS-20000-1"
+    assert dir_map.load_dir_map("pcsx2") == {SERIAL: 5, "BASLUS-20000-1": 5}

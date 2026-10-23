@@ -26,7 +26,7 @@ from bifrost.config import AppConfig, CoreMapping
 from bifrost.errors import ApiError, ConfigError
 from bifrost.play_sessions import consume_pending_sessions
 from bifrost.saves.dir_map import load_dir_map, remember_dir
-from bifrost.saves.folder_pack import pack_dir, unpack_to_dir
+from bifrost.saves.folder_pack import pack_dirs, unpack_to_dirs
 from bifrost.saves.layout import EmudeckEsdeLayout, ScannedFile
 from bifrost.saves.profiles import (
     PROFILES,
@@ -95,9 +95,10 @@ class SaveSyncPreview:
     # --rom-path). None when file_filters was empty or matched no known ROM —
     # execute_save_sync_preview falls back to filename matching in that case.
     target_rom_ids: frozenset[int] | None = None
-    # Maps lowercase file_name ("<dir>.zip") -> game directory for per_rom_dir
-    # saves, which are packed on demand when uploaded (see _scanned_dir_to_local).
-    dir_saves: dict[str, Path] = None  # type: ignore[assignment]
+    # Maps lowercase file_name ("<first dir>.zip") -> the game directories of one
+    # ROM for per_rom_dir saves, which are packed into one zip on demand when
+    # uploaded (see _dirs_to_local).
+    dir_saves: dict[str, list[Path]] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         if self.dir_saves is None:
@@ -153,14 +154,23 @@ def _dir_max_mtime(path: Path) -> float:
     return latest
 
 
-def _scanned_dir_to_local(sf: ScannedFile) -> LocalSaveFile:
-    """Convert a per_rom_dir game directory into a LocalSaveFile describing its zip."""
-    blob = pack_dir(sf.path)
+def _dirs_to_local(dirs: list[Path]) -> LocalSaveFile:
+    """Describe the single zip that bundles a ROM's per_rom_dir game directories.
+
+    A game can own several directories (e.g. PCSX2 creates one per in-game save
+    slot) but RomM keeps one save per (ROM, slot), so they travel together. The
+    bundle is named after its first directory, which for a single-directory game
+    matches the name used before bundling existed.
+    """
+    dirs = sorted(dirs, key=lambda d: d.name)
+    blob = pack_dirs(dirs)
     return LocalSaveFile(
-        path=sf.path,
-        file_name=f"{sf.path.name}.zip",
+        path=dirs[0],
+        file_name=f"{dirs[0].name}.zip",
         file_size_bytes=len(blob),
-        updated_at=datetime.fromtimestamp(_dir_max_mtime(sf.path), tz=UTC).isoformat(),
+        updated_at=datetime.fromtimestamp(
+            max(_dir_max_mtime(d) for d in dirs), tz=UTC
+        ).isoformat(),
         content_hash=hashlib.md5(blob).hexdigest(),
     )
 
@@ -819,40 +829,29 @@ def build_save_sync_preview(
     skipped_paths: list[Path] = []
     rom_names: dict[int, str] = {}
 
-    dir_saves: dict[str, Path] = {}
+    dir_saves: dict[str, list[Path]] = {}
     dir_rom_ids: dict[str, dict[str, int]] = {}
+    dirs_by_rom: dict[tuple[int, str | None], list[Path]] = {}
 
     for sf in scanned_files:
         if sf.profile.mapping == "per_rom_dir":
             emulator_id = sf.profile.emulator
             if emulator_id not in dir_rom_ids:
                 dir_rom_ids[emulator_id] = load_dir_map(emulator_id)
-            local_save = _scanned_dir_to_local(sf)
             rom_id = dir_rom_ids[emulator_id].get(sf.path.name)
             if (
                 rom_id is None
                 and session_start is not None
                 and target_rom_ids is not None
                 and len(target_rom_ids) == 1
-                and datetime.fromisoformat(local_save.updated_at) >= session_start
+                and datetime.fromtimestamp(_dir_max_mtime(sf.path), tz=UTC) >= session_start
             ):
                 rom_id = next(iter(target_rom_ids))
                 remember_dir(emulator_id, sf.path.name, rom_id)
             if rom_id is None:
                 skipped_paths.append(sf.path)
                 continue
-            dir_saves[local_save.file_name.lower()] = sf.path
-            state = ClientSaveState(
-                rom_id=rom_id,
-                file_name=local_save.file_name,
-                slot=config.sync.slot,
-                emulator=sf.profile.romm_emulator,
-                content_hash=local_save.content_hash,
-                updated_at=local_save.updated_at,
-                file_size_bytes=local_save.file_size_bytes,
-            )
-            local_states.append(state)
-            local_state_index[_save_lookup_key(state.rom_id, state.file_name)] = state
+            dirs_by_rom.setdefault((rom_id, sf.profile.romm_emulator), []).append(sf.path)
             continue
 
         local_save = _scanned_to_local(sf)
@@ -870,6 +869,23 @@ def build_save_sync_preview(
         local_state_index[_save_lookup_key(state.rom_id, state.file_name)] = state
         if rom_name:
             rom_names[state.rom_id] = rom_name
+
+    # A ROM's game directories (one per in-game save slot for PCSX2) are bundled
+    # into a single zip: RomM keeps one save per (ROM, slot).
+    for (rom_id, romm_emulator), dirs in dirs_by_rom.items():
+        bundle = _dirs_to_local(dirs)
+        dir_saves[bundle.file_name.lower()] = sorted(dirs, key=lambda d: d.name)
+        state = ClientSaveState(
+            rom_id=rom_id,
+            file_name=bundle.file_name,
+            slot=config.sync.slot,
+            emulator=romm_emulator,
+            content_hash=bundle.content_hash,
+            updated_at=bundle.updated_at,
+            file_size_bytes=bundle.file_size_bytes,
+        )
+        local_states.append(state)
+        local_state_index[_save_lookup_key(state.rom_id, state.file_name)] = state
 
     cross_core_warnings = _detect_unlinked_cross_core_saves(local_states, rom_names)
     for warning in cross_core_warnings:
@@ -968,10 +984,12 @@ def build_save_sync_preview(
     )
 
 
-def _lookup_dir_save(operation: SyncOperationSchema, preview: SaveSyncPreview) -> Path | None:
-    path = preview.dir_saves.get(operation.file_name.lower())
-    if path is not None:
-        return path
+def _lookup_dir_save(
+    operation: SyncOperationSchema, preview: SaveSyncPreview
+) -> list[Path] | None:
+    dirs = preview.dir_saves.get(operation.file_name.lower())
+    if dirs is not None:
+        return dirs
     for state in preview.local_saves:
         if (
             state.rom_id == operation.rom_id
@@ -1086,11 +1104,11 @@ def execute_save_sync_preview(
 
         try:
             if operation.action == "upload":
-                dir_path = _lookup_dir_save(operation, preview)
-                if dir_path is not None:
-                    blob = pack_dir(dir_path)
+                dir_paths = _lookup_dir_save(operation, preview)
+                if dir_paths is not None:
+                    blob = pack_dirs(dir_paths)
                     with tempfile.TemporaryDirectory(prefix="bifrost-dirsave-") as tmp_dir:
-                        packed = Path(tmp_dir) / f"{dir_path.name}.zip"
+                        packed = Path(tmp_dir) / f"{dir_paths[0].name}.zip"
                         packed.write_bytes(blob)
                         packed_hash = hashlib.md5(blob).hexdigest()
                         existing = _find_save_by_content_hash(
@@ -1270,15 +1288,24 @@ def execute_save_sync_preview(
                 card_dir = save_root / target_profile.save_subpath / _card_dirs(config).get(
                     target_profile.emulator, ""
                 )
-                dir_name = Path(canonical_name).stem
-                existing_dir = card_dir / dir_name
-                if (
-                    operation.server_content_hash
-                    and existing_dir.is_dir()
-                    and hashlib.md5(pack_dir(existing_dir)).hexdigest()
+                # The server save is either a bundle of every directory this ROM owns,
+                # or (saves uploaded before bundling) a single directory.
+                legacy_dir = card_dir / Path(canonical_name).stem
+                rom_dirs = sorted(
+                    card_dir / name
+                    for name, mapped_rom_id in load_dir_map(target_profile.emulator).items()
+                    if mapped_rom_id == operation.rom_id and (card_dir / name).is_dir()
+                )
+                in_sync_candidates = [rom_dirs] if rom_dirs else []
+                if legacy_dir.is_dir():
+                    in_sync_candidates.append([legacy_dir])
+                if operation.server_content_hash and any(
+                    hashlib.md5(pack_dirs(dirs)).hexdigest()
                     == operation.server_content_hash.lower()
+                    for dirs in in_sync_candidates
                 ):
-                    remember_dir(target_profile.emulator, dir_name, operation.rom_id)
+                    for held in in_sync_candidates[0]:
+                        remember_dir(target_profile.emulator, held.name, operation.rom_id)
                     skipped += 1
                     details.append(("download", operation.file_name, "skipped (already in sync)"))
                     continue
@@ -1289,14 +1316,17 @@ def execute_save_sync_preview(
                     session_id=preview.session_id,
                     optimistic=use_optimistic,
                 )
-                extracted = unpack_to_dir(content, card_dir)
-                remember_dir(target_profile.emulator, extracted.name, operation.rom_id)
+                extracted = unpack_to_dirs(content, card_dir)
+                for directory in extracted:
+                    remember_dir(target_profile.emulator, directory.name, operation.rom_id)
                 if not use_optimistic:
                     client.confirm_save_download(
                         save_id=operation.save_id, device_id=preview.device_id
                     )
                 completed += 1
-                details.append(("download", operation.file_name, f"ok -> {extracted}"))
+                details.append(
+                    ("download", operation.file_name, f"ok -> {', '.join(map(str, extracted))}")
+                )
                 continue
             if dest_dir is None:
                 dest_dir = save_root
