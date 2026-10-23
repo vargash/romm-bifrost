@@ -17,6 +17,14 @@ def test_find_compatible_profile_returns_curated_alias() -> None:
     assert alias.expected_size_bytes == 131072
 
 
+def test_find_compatible_profile_returns_swanstation_alias() -> None:
+    found = find_compatible_profile("swanstation")
+    assert found is not None
+    profile, alias = found
+    assert profile.romm_emulator == "duckstation"
+    assert alias.expected_size_bytes == 131072
+
+
 def test_find_compatible_profile_returns_none_for_unknown_slug() -> None:
     assert find_compatible_profile("totally_unknown_core") is None
     assert find_compatible_profile(None) is None
