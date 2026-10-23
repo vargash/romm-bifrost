@@ -532,3 +532,10 @@ def test_apply_gamelist_plan_preserves_platform_level_alternative_emulator(tmp_p
     assert "<lastplayed>20260622T173611</lastplayed>" in xml
     # gameList must still be present and well-formed
     assert "<gameList>" in xml
+
+
+def test_rom_path_value_adds_ps3_extension_for_folder_rom():
+    from bifrost.gamelist import _rom_path_value
+
+    rom = {"fs_name": "Battle Fantasia (E)", "platform_fs_slug": "ps3", "fs_extension": ""}
+    assert _rom_path_value(rom) == "./Battle Fantasia (E).ps3"
