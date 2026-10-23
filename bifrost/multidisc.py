@@ -83,6 +83,7 @@ def _disc_filenames_for_folder_rom(client: Any, rom_id: int) -> list[str]:
 def detect_folder_multidisc_from_api(
     roms_raw: list[dict[str, Any]],
     client: Any,
+    skip_ids: frozenset[int] = frozenset(),
 ) -> dict[int, list[str]]:
     """Return ``{rom_id: [sorted disc filenames]}`` for folder-based multi-disc ROMs.
 
@@ -95,7 +96,7 @@ def detect_folder_multidisc_from_api(
         if not rom.get("has_multiple_files"):
             continue
         rom_id = rom.get("id")
-        if not isinstance(rom_id, int):
+        if not isinstance(rom_id, int) or rom_id in skip_ids:
             continue
         disc_files = _disc_filenames_for_folder_rom(client, rom_id)
         if len(disc_files) >= 2:
@@ -147,7 +148,13 @@ def plan_m3u_operations(config: AppConfig, client: Any) -> list[M3uOperation]:
       Disc files are discovered via ``GET /api/roms/<id>``; M3U lists
       ``<folder>/<file>`` relative paths so emulators can resolve them through
       the folder symlink created by ``bifrost sync``.
+
+    * **Folder-based on inner-file platforms**: bifrost links each disc file
+      straight into the platform directory (see ``launch_targets``), so the
+      folder is read from the NAS and the M3U lists the bare link names.
     """
+    from bifrost.launch_targets import scan_inner_folders  # circular at import time
+
     platforms = client.list_platforms()
     roms_raw: list[dict[str, Any]] = client.list_roms_raw()
 
@@ -187,10 +194,14 @@ def plan_m3u_operations(config: AppConfig, client: Any) -> list[M3uOperation]:
         )
 
     # ── Folder-based multi-disc ──────────────────────────────────────────────
-    folder_discs = detect_folder_multidisc_from_api(roms_raw, client)
+    inner = scan_inner_folders(config, roms_raw, platform_slug_by_id)
+    folder_discs = detect_folder_multidisc_from_api(roms_raw, client, inner.handled_ids)
     for rom in roms_raw:
         rom_id = rom.get("id")
-        if not isinstance(rom_id, int) or rom_id not in folder_discs:
+        if not isinstance(rom_id, int):
+            continue
+        inner_discs = inner.disc_links.get(rom_id)
+        if inner_discs is None and rom_id not in folder_discs:
             continue
         fs_name = rom.get("fs_name")
         platform_id = rom.get("platform_id")
@@ -199,9 +210,13 @@ def plan_m3u_operations(config: AppConfig, client: Any) -> list[M3uOperation]:
         slug = platform_slug_by_id.get(platform_id)
         if not slug:
             continue
-        # Paths relative to the M3U file; disc files sit one level below via
-        # the folder symlink that bifrost sync creates.
-        disc_filenames = tuple(f"{fs_name}/{f}" for f in folder_discs[rom_id])
+        if inner_discs is not None:
+            # Each disc is linked directly in the platform directory.
+            disc_filenames = tuple(inner_discs)
+        else:
+            # Paths relative to the M3U file; disc files sit one level below via
+            # the folder symlink that bifrost sync creates.
+            disc_filenames = tuple(f"{fs_name}/{f}" for f in folder_discs[rom_id])
         ops.append(
             M3uOperation(
                 category="m3u",

@@ -13,12 +13,12 @@ from xml.etree import ElementTree as ET
 from bifrost.api.client import RommApiClient
 from bifrost.api.models import PlatformSummary
 from bifrost.config import AppConfig
+from bifrost.launch_targets import esde_rom_name, scan_inner_folders
 from bifrost.multidisc import (
     detect_folder_multidisc_from_api,
     group_multidisc_roms_raw,
     strip_disc_marker,
 )
-from bifrost.symlink_manager import esde_rom_name
 
 ESDE_PRESERVED_TAGS = {
     "playcount",
@@ -227,7 +227,35 @@ def _normalize_rating(value: Any) -> str | None:
     return f"{number:.2f}"
 
 
+_LAUNCH_NAME_KEY = "_bifrost_launch_name"
+
+
+def _with_launch_names(
+    config: AppConfig,
+    client: RommApiClient,
+    roms: list[dict[str, Any]],
+    platform_slug_by_id: dict[int, str],
+) -> tuple[list[dict[str, Any]], set[int]]:
+    """Tag folder ROMs launched through an inner game file; also return folder multi-disc ids.
+
+    Returns copies of the tagged ROMs, so the cached ROM dicts stay untouched.
+    """
+    inner = scan_inner_folders(config, roms, platform_slug_by_id)
+    api_discs = detect_folder_multidisc_from_api(roms, client, inner.handled_ids)
+    tagged = [
+        {**rom, _LAUNCH_NAME_KEY: inner.launch_names[rom["id"]]}
+        if rom.get("id") in inner.launch_names
+        else rom
+        for rom in roms
+    ]
+    return tagged, set(inner.disc_links) | set(api_discs)
+
+
 def _rom_path_value(rom: dict[str, Any]) -> str | None:
+    launch_name = rom.get(_LAUNCH_NAME_KEY)
+    if isinstance(launch_name, str) and launch_name:
+        return f"./{launch_name}"
+
     fs_name = _pick_text(rom, "fs_name")
     if fs_name:
         name = esde_rom_name(
@@ -517,6 +545,7 @@ def apply_gamelist_delta(
     """
     platforms = client.list_platforms()
     platform_slug_by_id = {p.id: p.fs_slug for p in platforms if p.fs_slug}
+    delta_roms_raw, _ = _with_launch_names(config, client, delta_roms_raw, platform_slug_by_id)
     grouped = _roms_by_platform(delta_roms_raw)
     gamelists_root = Path(config.esde.gamelists_path).expanduser()
     results: list[GamelistApplyResult] = []
@@ -590,10 +619,9 @@ def apply_gamelist_delta(
 def build_gamelist_plan(config: AppConfig, client: RommApiClient) -> list[GamelistPlan]:
     platforms = client.list_platforms()
     roms = client.list_roms_raw()
+    slug_by_id = {p.id: p.fs_slug for p in platforms if p.fs_slug}
+    roms, folder_multidisc_ids = _with_launch_names(config, client, roms, slug_by_id)
     grouped = _roms_by_platform(roms)
-
-    folder_multidisc_data = detect_folder_multidisc_from_api(roms, client)
-    folder_multidisc_ids = set(folder_multidisc_data.keys())
 
     plans: list[GamelistPlan] = []
     gamelists_root = Path(config.esde.gamelists_path).expanduser()
@@ -712,10 +740,9 @@ def _build_platform_plan(
 def apply_gamelist_plan(config: AppConfig, client: RommApiClient) -> list[GamelistApplyResult]:
     platforms = client.list_platforms()
     roms = client.list_roms_raw()
+    slug_by_id = {p.id: p.fs_slug for p in platforms if p.fs_slug}
+    roms, folder_multidisc_ids = _with_launch_names(config, client, roms, slug_by_id)
     grouped = _roms_by_platform(roms)
-
-    folder_multidisc_data = detect_folder_multidisc_from_api(roms, client)
-    folder_multidisc_ids = set(folder_multidisc_data.keys())
 
     results: list[GamelistApplyResult] = []
     gamelists_root = Path(config.esde.gamelists_path).expanduser()

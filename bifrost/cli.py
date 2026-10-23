@@ -71,6 +71,7 @@ from bifrost.symlink_manager import (
     evaluate_remove_operation,
     find_orphan_platform_folders,
     list_orphan_folder_contents,
+    plan_broken_link_cleanup,
     plan_incremental_symlink_ops,
     plan_stale_removals,
     plan_stale_removals_from_deleted_ids,
@@ -153,6 +154,11 @@ def no_cache_option(f: _F) -> _F:
     return click.option(
         "--no-cache", "no_cache", is_flag=True, help="Bypass disk cache for this run."
     )(f)
+
+
+def _ask_text(prompt: str, default: str) -> str:
+    """Prompt for text; rich types the answer as optional, an empty answer keeps the default."""
+    return Prompt.ask(prompt, default=default) or default
 
 
 def load_config_or_exit(console: Console, config_path: Path | None) -> tuple[AppConfig, Path]:
@@ -692,6 +698,10 @@ def config_add_core_mapping(
         profile, _alias = curated
         local_emulator = local_emulator or profile.romm_emulator
         platform_ = platform_ or profile.platform
+
+    if not local_emulator:
+        console.print("[red]Configuration error:[/red] a local emulator is required.")
+        raise SystemExit(EXIT_CONFIG_ERROR)
 
     resolution = resolve_core_mapping(
         platform=platform_,
@@ -1331,6 +1341,9 @@ def sync(
 
                     delta_roms = [RomSummary.model_validate(item) for item in delta_raw]
                     ops = plan_incremental_symlink_ops(config, client, delta_roms)
+                    # ROMs whose link names changed (e.g. promoted to a folder) leave dead links.
+                    ops_with_cleanup: list[Any] = [*ops, *plan_broken_link_cleanup(config, ops)]
+                    ops = ops_with_cleanup
 
             except AuthenticationError as exc:
                 console.print(f"[red]Authentication error:[/red] {exc}")
@@ -1341,6 +1354,7 @@ def sync(
                 raise SystemExit(EXIT_API_ERROR) from exc
 
             workers = config.sync.parallel_workers
+            results: list[Any]
             if apply:
                 results = _sync_apply_ops(ops, workers, console, quiet)
                 if bifrost_cache:
@@ -1364,8 +1378,13 @@ def sync(
                         "incremental gamelist update failed: %s", exc
                     )
             else:
-                sym_results = evaluate_operations(ops, workers=workers)
-                results = sym_results
+                link_ops = [op for op in ops if not isinstance(op, RemoveSymlinkOperation)]
+                results = evaluate_operations(link_ops, workers=workers)
+                results += [
+                    evaluate_remove_operation(op)
+                    for op in ops
+                    if isinstance(op, RemoveSymlinkOperation)
+                ]
 
             if not quiet:
                 counts = _print_sync_summary(results, "incremental", console)
@@ -1469,7 +1488,6 @@ def sync(
     all_ops: list[Any] = list(ops) + list(m3u_ops) + list(remove_ops) + list(to_remove)
 
     workers = config.sync.parallel_workers
-    results: list[Any]
     if apply:
         results = _sync_apply_ops(all_ops, workers, console, quiet, nas_root=nas_root)
         if bifrost_cache:
@@ -1932,16 +1950,16 @@ def _enroll_device(
 
     hostname_value = (hostname or sys_platform.node() or "bifrost").strip()
     device_name_value = (
-        name or Prompt.ask("Device name", default=f"Bifrost on {hostname_value}")
+        name or _ask_text("Device name", f"Bifrost on {hostname_value}")
     ).strip()
     platform_value = (
-        platform or Prompt.ask("Device platform", default=sys_platform.system().lower())
+        platform or _ask_text("Device platform", sys_platform.system().lower())
     ).strip()
-    client_value = (client_name or Prompt.ask("Client name", default="bifrost")).strip()
+    client_value = (client_name or _ask_text("Client name", "bifrost")).strip()
     client_version_value = (
-        client_version or Prompt.ask("Client version", default=_bifrost_version)
+        client_version or _ask_text("Client version", _bifrost_version)
     ).strip()
-    hostname_reported = (hostname or Prompt.ask("Hostname", default=hostname_value)).strip()
+    hostname_reported = (hostname or _ask_text("Hostname", hostname_value)).strip()
 
     mac_address_value = _get_mac_address()
     existing_device_id = config.romm.device_id  # non-empty only if previously enrolled
@@ -2253,7 +2271,7 @@ def setup(
             default=base_config.sync.save_sync_enabled,
         )
     else:
-        url_value = (romm_url or Prompt.ask("RomM URL", default=default_url)).strip().rstrip("/")
+        url_value = (romm_url or _ask_text("RomM URL", default_url)).strip().rstrip("/")
 
         if pair and client_token:
             console.print("[red]Configuration error:[/red] Use either --pair or --token, not both.")

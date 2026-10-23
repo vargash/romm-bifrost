@@ -12,6 +12,13 @@ from typing import Any
 from bifrost.api.client import RommApiClient
 from bifrost.api.models import PlatformSummary, RomSummary
 from bifrost.config import AppConfig
+from bifrost.launch_targets import (
+    LaunchEntry,
+    esde_rom_name,
+    inner_file_platforms,
+    launch_entries,
+    rom_target_path,
+)
 
 # Maps folder_map keys to the corresponding field name in SsMetadata.
 _SS_METADATA_PATH_FIELD: dict[str, str] = {
@@ -26,19 +33,6 @@ _SS_METADATA_PATH_FIELD: dict[str, str] = {
     "title_screen": "title_screen_path",
     "video_normalized": "video_normalized_path",
 }
-
-
-# ES-DE systems that only list folder ROMs carrying a specific extension
-# (e.g. ps3 accepts "Game.ps3" but ignores "Game").
-_FOLDER_ROM_EXTENSION: dict[str, str] = {"ps3": ".ps3"}
-
-
-def esde_rom_name(slug: str | None, fs_name: str, is_folder: bool) -> str:
-    """Name under which ES-DE must see a ROM: folder ROMs get the system's folder extension."""
-    ext = _FOLDER_ROM_EXTENSION.get(slug or "")
-    if ext and is_folder and not fs_name.lower().endswith((ext, ext + "dir")):
-        return fs_name + ext
-    return fs_name
 
 
 def _resource_relative_path(raw: str | None) -> str | None:
@@ -117,15 +111,35 @@ def _normalize_path(path_value: str) -> Path:
     return Path(path_value).expanduser()
 
 
-def _rom_target_path(roms_root: Path, path_value: str, fs_name: str | None) -> Path:
-    candidate = Path(path_value)
-    if candidate.is_absolute():
-        return candidate
-    if candidate.parts and candidate.parts[0] == "roms":
-        candidate = Path(*candidate.parts[1:])
-    if fs_name and candidate.name != fs_name:
-        candidate = candidate / fs_name
-    return roms_root / candidate
+_rom_target_path = rom_target_path
+
+
+def _rom_launch(
+    rom: RomSummary,
+    slug: str,
+    path_hint: str,
+    roms_root: Path,
+    inner_platforms: frozenset[str],
+    claimed: dict[tuple[str, str], int],
+) -> tuple[list[LaunchEntry], str] | None:
+    """Entries ES-DE should see for rom plus the stem used for its media; None to skip it.
+
+    claimed maps (slug, link name) to the ROM that owns it, so two folders holding a
+    game file with the same name don't fight over one link: the later one keeps its
+    folder link.
+    """
+    fs_name = rom.fs_name or ""
+    target = _rom_target_path(roms_root, path_hint, fs_name)
+    entries = launch_entries(slug, fs_name, rom.fs_extension, target, inner_platforms)
+    if entries is None:
+        return None
+    if any(claimed.get((slug, e.name), rom.id) != rom.id for e in entries):
+        entries = [LaunchEntry(esde_rom_name(slug, fs_name, True), target)]
+    for entry in entries:
+        claimed[(slug, entry.name)] = rom.id
+    # Several entries (discs) share one playlist named after the folder.
+    stem_source = entries[0].name if len(entries) == 1 else esde_rom_name(slug, fs_name, True)
+    return entries, Path(stem_source).stem
 
 
 def _bios_target_path(bios_root: Path, file_path: str, file_name: str) -> Path:
@@ -157,6 +171,8 @@ def plan_incremental_symlink_ops(
     esde_roms_root = _normalize_path(config.esde.roms_path)
     media_root = _normalize_path(config.emudeck.media_path)
 
+    inner_platforms = inner_file_platforms(config)
+    claimed: dict[tuple[str, str], int] = {}
     ops: list[SymlinkOperation] = []
     for rom in delta_roms:
         path_hint = rom.full_path or rom.fs_path
@@ -165,17 +181,19 @@ def plan_incremental_symlink_ops(
         slug = platform_slug_by_id.get(rom.platform_id)
         if not slug:
             continue
+        launch = _rom_launch(rom, slug, path_hint, roms_root, inner_platforms, claimed)
+        if launch is None:
+            continue
+        entries, rom_stem = launch
 
-        ops.append(SymlinkOperation(
-            category="rom",
-            destination=esde_roms_root
-            / slug
-            / esde_rom_name(slug, rom.fs_name, not rom.fs_extension),
-            target=_rom_target_path(roms_root, path_hint, rom.fs_name),
-            is_dir=False,
-        ))
+        for entry in entries:
+            ops.append(SymlinkOperation(
+                category="rom",
+                destination=esde_roms_root / slug / entry.name,
+                target=entry.target,
+                is_dir=False,
+            ))
 
-        rom_stem = Path(esde_rom_name(slug, rom.fs_name, not rom.fs_extension)).stem
         for romm_asset_type, esde_folder in config.assets.folder_map.items():
             rel = _asset_relative_path(rom, romm_asset_type)
             if not rel:
@@ -191,6 +209,14 @@ def plan_incremental_symlink_ops(
     return ops
 
 
+def _symlink_target(link: Path) -> Path | None:
+    try:
+        raw = Path(os.readlink(link))
+    except OSError:
+        return None
+    return raw if raw.is_absolute() else link.parent / raw
+
+
 def plan_stale_removals_from_deleted_ids(
     config: AppConfig,
     deleted_ids: set[int],
@@ -199,10 +225,13 @@ def plan_stale_removals_from_deleted_ids(
 ) -> list[RemoveSymlinkOperation]:
     """Plan removal of ROM symlinks for IDs no longer present in RomM.
 
-    Uses the disk-cache ROM data to resolve id → (fs_name, platform) without
-    a full API fetch. Only ROM symlinks are removed; asset symlinks are left
-    for the next full sync (stale assets are cosmetic, not launch-blocking).
+    Uses the disk-cache ROM data to resolve id → (library path, platform) without
+    a full API fetch. A ROM can own several links (one per disc, or one inside a
+    folder), so links are matched by where they point rather than by name. Only
+    ROM symlinks are removed; asset symlinks are left for the next full sync
+    (stale assets are cosmetic, not launch-blocking).
     """
+    roms_root = _normalize_path(config.nas.library_path) / config.nas.roms_subpath
     esde_roms_root = _normalize_path(config.esde.roms_path)
     cache_by_id: dict[int, dict[str, Any]] = {
         item["id"]: item
@@ -217,18 +246,54 @@ def plan_stale_removals_from_deleted_ids(
             continue
         fs_name = rom.get("fs_name")
         platform_id = rom.get("platform_id")
-        if not fs_name or not isinstance(platform_id, int):
+        path_hint = rom.get("full_path") or rom.get("fs_path")
+        if not fs_name or not path_hint or not isinstance(platform_id, int):
             continue
         slug = platform_slug_by_id.get(platform_id)
-        if not slug:
+        platform_dir = esde_roms_root / slug if slug else None
+        if platform_dir is None or not platform_dir.is_dir():
             continue
-        destination = esde_roms_root / slug / esde_rom_name(
-            slug, fs_name, not rom.get("fs_extension")
-        )
-        if destination.is_symlink():
-            ops.append(RemoveSymlinkOperation(category="rom", destination=destination))
+        rom_path = _rom_target_path(roms_root, path_hint, fs_name)
+        for item in platform_dir.iterdir():
+            target = _symlink_target(item) if item.is_symlink() else None
+            if target is not None and (target == rom_path or rom_path in target.parents):
+                ops.append(RemoveSymlinkOperation(category="rom", destination=item))
 
     return ops
+
+
+def plan_broken_link_cleanup(
+    config: AppConfig,
+    ops: list[SymlinkOperation],
+) -> list[RemoveSymlinkOperation]:
+    """Remove dangling bifrost links left behind by ROMs whose entry names changed.
+
+    Incremental sync only plans the changed ROMs, so unlike plan_stale_removals it
+    can't tell which healthy links are unplanned. It only touches the platform
+    directories of the plan, and only symlinks that are broken, under the NAS root
+    and not themselves planned. Skipped while the NAS is unreachable.
+    """
+    nas_root = _normalize_path(config.nas.library_path)
+    if not nas_root.is_dir():
+        return []
+    esde_roms_root = _normalize_path(config.esde.roms_path)
+    planned = {op.destination for op in ops}
+    slugs = {op.destination.parent.name for op in ops if op.category == "rom"}
+
+    remove_ops: list[RemoveSymlinkOperation] = []
+    for slug in sorted(slugs):
+        platform_dir = esde_roms_root / slug
+        if not platform_dir.is_dir():
+            continue
+        for item in platform_dir.iterdir():
+            if (
+                item.is_symlink()
+                and item not in planned
+                and not item.exists()
+                and _is_bifrost_symlink(item, nas_root)
+            ):
+                remove_ops.append(RemoveSymlinkOperation(category="rom", destination=item))
+    return remove_ops
 
 
 def plan_symlink_operations(config: AppConfig, client: RommApiClient) -> list[SymlinkOperation]:
@@ -246,6 +311,9 @@ def plan_symlink_operations(config: AppConfig, client: RommApiClient) -> list[Sy
     emudeck_bios_root = _normalize_path(config.emudeck.bios_path)
     media_root = _normalize_path(config.emudeck.media_path)
 
+    inner_platforms = inner_file_platforms(config)
+    claimed: dict[tuple[str, str], int] = {}
+    media_stems: dict[int, str] = {}
     ops: list[SymlinkOperation] = []
 
     for rom in roms:
@@ -256,16 +324,19 @@ def plan_symlink_operations(config: AppConfig, client: RommApiClient) -> list[Sy
         if not slug:
             continue
 
-        destination = esde_roms_root / slug / esde_rom_name(slug, rom.fs_name, not rom.fs_extension)
-        target = _rom_target_path(roms_root, path_hint, rom.fs_name)
-        ops.append(
-            SymlinkOperation(
-                category="rom",
-                destination=destination,
-                target=target,
-                is_dir=False,
+        launch = _rom_launch(rom, slug, path_hint, roms_root, inner_platforms, claimed)
+        if launch is None:
+            continue
+        entries, media_stems[rom.id] = launch
+        for entry in entries:
+            ops.append(
+                SymlinkOperation(
+                    category="rom",
+                    destination=esde_roms_root / slug / entry.name,
+                    target=entry.target,
+                    is_dir=False,
+                )
             )
-        )
 
     for fw in firmware_items:
         file_name = fw.get("file_name")
@@ -292,9 +363,9 @@ def plan_symlink_operations(config: AppConfig, client: RommApiClient) -> list[Sy
         if rom.platform_id is None or not rom.fs_name:
             continue
         slug = platform_slug_by_id.get(rom.platform_id)
-        if not slug:
+        rom_stem = media_stems.get(rom.id)
+        if not slug or rom_stem is None:
             continue
-        rom_stem = Path(esde_rom_name(slug, rom.fs_name, not rom.fs_extension)).stem
         for romm_asset_type, esde_folder in config.assets.folder_map.items():
             rel = _asset_relative_path(rom, romm_asset_type)
             if not rel:

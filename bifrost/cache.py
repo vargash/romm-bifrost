@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import json
 import os
 from dataclasses import dataclass
@@ -215,7 +216,7 @@ class BifrostCache:
         except ValueError:
             return None
 
-    def get_rom_id_set(self) -> set[int] | None:
+    def get_rom_id_set(self) -> builtins.set[int] | None:  # `set` is shadowed by the method
         """Return the ROM ID set stored during last full sync, or None if unavailable."""
         meta = self._load_meta()
         roms_meta = meta.get("roms")
