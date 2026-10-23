@@ -18,6 +18,7 @@ from bifrost.multidisc import (
     group_multidisc_roms_raw,
     strip_disc_marker,
 )
+from bifrost.symlink_manager import esde_rom_name
 
 ESDE_PRESERVED_TAGS = {
     "playcount",
@@ -229,7 +230,10 @@ def _normalize_rating(value: Any) -> str | None:
 def _rom_path_value(rom: dict[str, Any]) -> str | None:
     fs_name = _pick_text(rom, "fs_name")
     if fs_name:
-        return f"./{fs_name}"
+        name = esde_rom_name(
+            _pick_text(rom, "platform_fs_slug"), fs_name, not rom.get("fs_extension")
+        )
+        return f"./{name}"
 
     full_path = _pick_text(rom, "full_path")
     if full_path:

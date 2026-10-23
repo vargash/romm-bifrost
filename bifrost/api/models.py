@@ -75,6 +75,7 @@ class RomSummary(BaseModel):
     full_path: str | None = None
     platform_id: int | None = None
     name: str | None = None
+    fs_extension: str = ""
     # Cover (URL-style path, e.g. /assets/romm/resources/roms/<pid>/<rid>/cover/big.png?ts=...)
     path_cover_large: str | None = None
     # Manual PDF

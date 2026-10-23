@@ -28,6 +28,19 @@ _SS_METADATA_PATH_FIELD: dict[str, str] = {
 }
 
 
+# ES-DE systems that only list folder ROMs carrying a specific extension
+# (e.g. ps3 accepts "Game.ps3" but ignores "Game").
+_FOLDER_ROM_EXTENSION: dict[str, str] = {"ps3": ".ps3"}
+
+
+def esde_rom_name(slug: str | None, fs_name: str, is_folder: bool) -> str:
+    """Name under which ES-DE must see a ROM: folder ROMs get the system's folder extension."""
+    ext = _FOLDER_ROM_EXTENSION.get(slug or "")
+    if ext and is_folder and not fs_name.lower().endswith((ext, ext + "dir")):
+        return fs_name + ext
+    return fs_name
+
+
 def _resource_relative_path(raw: str | None) -> str | None:
     """Extract the resources-relative path ('roms/<pid>/<rid>/...') from any RomM path format.
 
@@ -155,12 +168,14 @@ def plan_incremental_symlink_ops(
 
         ops.append(SymlinkOperation(
             category="rom",
-            destination=esde_roms_root / slug / rom.fs_name,
+            destination=esde_roms_root
+            / slug
+            / esde_rom_name(slug, rom.fs_name, not rom.fs_extension),
             target=_rom_target_path(roms_root, path_hint, rom.fs_name),
             is_dir=False,
         ))
 
-        rom_stem = Path(rom.fs_name).stem
+        rom_stem = Path(esde_rom_name(slug, rom.fs_name, not rom.fs_extension)).stem
         for romm_asset_type, esde_folder in config.assets.folder_map.items():
             rel = _asset_relative_path(rom, romm_asset_type)
             if not rel:
@@ -207,7 +222,9 @@ def plan_stale_removals_from_deleted_ids(
         slug = platform_slug_by_id.get(platform_id)
         if not slug:
             continue
-        destination = esde_roms_root / slug / fs_name
+        destination = esde_roms_root / slug / esde_rom_name(
+            slug, fs_name, not rom.get("fs_extension")
+        )
         if destination.is_symlink():
             ops.append(RemoveSymlinkOperation(category="rom", destination=destination))
 
@@ -239,7 +256,7 @@ def plan_symlink_operations(config: AppConfig, client: RommApiClient) -> list[Sy
         if not slug:
             continue
 
-        destination = esde_roms_root / slug / rom.fs_name
+        destination = esde_roms_root / slug / esde_rom_name(slug, rom.fs_name, not rom.fs_extension)
         target = _rom_target_path(roms_root, path_hint, rom.fs_name)
         ops.append(
             SymlinkOperation(
@@ -277,7 +294,7 @@ def plan_symlink_operations(config: AppConfig, client: RommApiClient) -> list[Sy
         slug = platform_slug_by_id.get(rom.platform_id)
         if not slug:
             continue
-        rom_stem = Path(rom.fs_name).stem
+        rom_stem = Path(esde_rom_name(slug, rom.fs_name, not rom.fs_extension)).stem
         for romm_asset_type, esde_folder in config.assets.folder_map.items():
             rel = _asset_relative_path(rom, romm_asset_type)
             if not rel:

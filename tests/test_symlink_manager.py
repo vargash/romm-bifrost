@@ -358,3 +358,13 @@ def test_apply_operation_creates_symlink_when_nas_asset_root_absent(tmp_path: Pa
 
     assert result.action == "create"
     assert destination.is_symlink()
+
+
+def test_esde_rom_name_adds_ps3_extension_to_folder_roms():
+    from bifrost.symlink_manager import esde_rom_name
+
+    assert esde_rom_name("ps3", "Battle Fantasia (E)", True) == "Battle Fantasia (E).ps3"
+    assert esde_rom_name("ps3", "Game.ps3", True) == "Game.ps3"
+    assert esde_rom_name("ps3", "Game.ps3dir", True) == "Game.ps3dir"
+    assert esde_rom_name("ps3", "Game.iso", False) == "Game.iso"
+    assert esde_rom_name("psx", "Game", True) == "Game"

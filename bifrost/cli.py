@@ -1359,8 +1359,10 @@ def sync(
                         config, timeout_seconds=config.romm.timeout_seconds, no_cache=no_cache
                     ) as gl_client:
                         apply_gamelist_delta(config, gl_client, delta_raw)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    logging.getLogger(__name__).warning(
+                        "incremental gamelist update failed: %s", exc
+                    )
             else:
                 sym_results = evaluate_operations(ops, workers=workers)
                 results = sym_results
