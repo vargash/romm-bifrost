@@ -6,10 +6,11 @@ import os
 import stat
 import tomllib
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, get_origin
 
 import tomli_w
 from pydantic import BaseModel, Field, ValidationError
+from pydantic.fields import FieldInfo
 
 from bifrost.errors import ConfigError, ConfigPermissionError
 from bifrost.saves.profiles import find_compatible_profile
@@ -454,3 +455,64 @@ def unknown_config_keys(path: Path) -> list[str]:
     except (OSError, tomllib.TOMLDecodeError, ValueError, TypeError, KeyError):
         return []
     return find_unknown_keys(data)
+
+
+def leaf_field_info(key_path: list[str]) -> FieldInfo | None:
+    """Return the declared pydantic FieldInfo of a dotted AppConfig field, or None.
+
+    Walks nested pydantic models (AppConfig -> SyncConfig -> ...) following key_path.
+    """
+    current: Any = AppConfig
+    field_info: FieldInfo | None = None
+    for part in key_path:
+        if not (isinstance(current, type) and issubclass(current, BaseModel)):
+            return None
+        fields = current.model_fields
+        if part not in fields:
+            return None
+        field_info = fields[part]
+        current = field_info.annotation
+    return field_info
+
+
+def set_config_value(config: AppConfig, key: str, value: str) -> tuple[AppConfig, Any]:
+    """Return a validated copy of config with the dotted key set from its text form.
+
+    List fields take a comma-separated string. Raises ConfigError for unknown keys,
+    structured values that have no plain-text form, and values that fail validation.
+    Also returns the normalised value that was stored.
+    """
+    key_path = [part for part in key.strip().split(".") if part]
+    if len(key_path) < 2:
+        raise ConfigError("key must use dot notation (for example romm.url).")
+    if key == "sync.core_mappings":
+        raise ConfigError(
+            "sync.core_mappings is a list of structured entries and can't be set with a "
+            "plain comma-separated value. Use 'bifrost config add-core-mapping' / "
+            "'remove-core-mapping' instead."
+        )
+
+    dumped = config.model_dump(mode="python")
+    cursor: Any = dumped
+    for part in key_path[:-1]:
+        if not isinstance(cursor, dict) or part not in cursor:
+            raise ConfigError(f"Unknown key: {key}")
+        cursor = cursor[part]
+    leaf = key_path[-1]
+    if not isinstance(cursor, dict) or leaf not in cursor:
+        raise ConfigError(f"Unknown key: {key}")
+
+    normalized: Any = value
+    leaf_field = leaf_field_info(key_path)
+    if get_origin(leaf_field.annotation if leaf_field is not None else None) is list:
+        normalized = [item.strip() for item in value.split(",") if item.strip()]
+    if key == "romm.url":
+        normalized = value.strip().rstrip("/")
+    if key == "romm.client_token" and not value.startswith("rmm_"):
+        raise ConfigError("RomM token must start with 'rmm_'.")
+
+    cursor[leaf] = normalized
+    try:
+        return AppConfig.model_validate(dumped), normalized
+    except ValidationError as exc:
+        raise ConfigError(f"Invalid value for {key}: {exc.errors()[0]['msg']}") from exc

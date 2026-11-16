@@ -14,11 +14,9 @@ from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, TypeVar, get_origin
+from typing import Any, TypeVar
 
 import click
-from pydantic import BaseModel
-from pydantic.fields import FieldInfo
 from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 from rich.prompt import Confirm, Prompt
@@ -38,8 +36,10 @@ from bifrost.config import (
     RommConfig,
     SyncConfig,
     default_config_path,
+    leaf_field_info,
     load_config,
     save_config,
+    set_config_value,
     unknown_config_keys,
 )
 from bifrost.errors import ApiError, AuthenticationError, ConfigError, NetworkError
@@ -206,6 +206,24 @@ def save_group() -> None:
 @main.group(help="View and update Bifrost configuration values.")
 def config() -> None:
     """Configuration command group."""
+
+
+@main.command(name="gui", help="Open the settings window (mouse, keyboard or controller).")
+@click.option("--fullscreen", is_flag=True, help="Run fullscreen, e.g. when launched from ES-DE.")
+@config_path_option
+def gui(fullscreen: bool, config_path: Path | None) -> None:
+    from bifrost.gui.app import pygame_available, run
+
+    console = Console()
+    if not pygame_available():
+        console.print(
+            "[red]The GUI needs pygame.[/red] Install it with: "
+            "pipx inject romm-bifrost pygame  (or: pip install 'romm-bifrost[gui]')"
+        )
+        raise SystemExit(EXIT_CONFIG_ERROR)
+    loaded, resolved_path = load_config_or_exit(console, config_path)
+    run(loaded, resolved_path, fullscreen=fullscreen)
+    raise SystemExit(EXIT_OK)
 
 
 @main.group(name="cache", help="Manage the Bifrost API response cache.")
@@ -508,33 +526,11 @@ def config_show(config_path: Path | None) -> None:
     table.add_column("Description")
     table.add_row("config.path", str(resolved_path), "Path to the loaded config file.")
     for key in sorted(flattened):
-        field_info = _leaf_field_info(key.split("."))
+        field_info = leaf_field_info(key.split("."))
         description = field_info.description if field_info is not None else ""
         table.add_row(key, flattened[key], description or "")
     console.print(table)
     raise SystemExit(EXIT_OK)
-
-
-def _leaf_field_info(key_path: list[str]) -> FieldInfo | None:
-    """Return the declared pydantic FieldInfo of a dotted AppConfig field, or None.
-
-    Walks nested pydantic models (AppConfig -> SyncConfig -> ... ) following
-    key_path. Callers read .annotation (config set: decide how to parse a
-    plain string value, e.g. list[str] fields need comma-splitting) or
-    .description (config show: one-liner explanation of the field) off the
-    result.
-    """
-    current: Any = AppConfig
-    field_info: FieldInfo | None = None
-    for part in key_path:
-        if not (isinstance(current, type) and issubclass(current, BaseModel)):
-            return None
-        fields = current.model_fields
-        if part not in fields:
-            return None
-        field_info = fields[part]
-        current = field_info.annotation
-    return field_info
 
 
 @config.command(
@@ -561,50 +557,10 @@ def config_set(key: str, value: str, config_path: Path | None) -> None:
     console = Console()
     loaded, resolved_path = load_config_or_exit(console, config_path)
 
-    key_path = [part for part in key.strip().split(".") if part]
-    if len(key_path) < 2:
-        console.print(
-            "[red]Configuration error:[/red] key must use dot notation (for example romm.url)."
-        )
-        raise SystemExit(EXIT_CONFIG_ERROR)
-
-    if key == "sync.core_mappings":
-        console.print(
-            "[red]Configuration error:[/red] sync.core_mappings is a list of structured "
-            "entries and can't be set with a plain comma-separated value. Use "
-            "'bifrost config add-core-mapping' / 'remove-core-mapping' instead."
-        )
-        raise SystemExit(EXIT_CONFIG_ERROR)
-
-    dumped = loaded.model_dump(mode="python")
-    cursor: Any = dumped
-    for part in key_path[:-1]:
-        if not isinstance(cursor, dict) or part not in cursor:
-            console.print(f"[red]Configuration error:[/red] Unknown key: {key}")
-            raise SystemExit(EXIT_CONFIG_ERROR)
-        cursor = cursor[part]
-
-    leaf = key_path[-1]
-    if not isinstance(cursor, dict) or leaf not in cursor:
-        console.print(f"[red]Configuration error:[/red] Unknown key: {key}")
-        raise SystemExit(EXIT_CONFIG_ERROR)
-
-    normalized_value: Any = value
-    leaf_field = _leaf_field_info(key_path)
-    if get_origin(leaf_field.annotation if leaf_field is not None else None) is list:
-        normalized_value = [item.strip() for item in value.split(",") if item.strip()]
-    if key == "romm.url":
-        normalized_value = value.strip().rstrip("/")
-    if key == "romm.client_token" and not value.startswith("rmm_"):
-        console.print("[red]Configuration error:[/red] RomM token must start with 'rmm_'.")
-        raise SystemExit(EXIT_CONFIG_ERROR)
-
-    cursor[leaf] = normalized_value
-
     try:
-        updated = AppConfig.model_validate(dumped)
-    except Exception as exc:
-        console.print(f"[red]Configuration error:[/red] Invalid value for {key}: {exc}")
+        updated, normalized_value = set_config_value(loaded, key, value)
+    except ConfigError as exc:
+        console.print(f"[red]Configuration error:[/red] {exc}")
         raise SystemExit(EXIT_CONFIG_ERROR) from exc
 
     save_path = save_config(updated, resolved_path)

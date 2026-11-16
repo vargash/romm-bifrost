@@ -207,6 +207,21 @@ bifrost save debug
 
 ---
 
+## Settings window (optional)
+
+`bifrost gui` opens a window to browse and edit every config option with the mouse, keyboard or a
+controller (D-pad/stick to move, A to change, B to go back, Start to confirm). Changes are
+validated and saved as you make them. Text values use an on-screen keyboard, so no physical
+keyboard is needed on a handheld. The list of options is generated from the config models, so new
+options appear without GUI changes.
+
+It needs pygame, which is not installed by default:
+
+```bash
+pipx inject romm-bifrost pygame      # or: pip install 'romm-bifrost[gui]'
+bifrost gui                          # add --fullscreen on a handheld
+```
+
 ## Automation
 
 Bifrost ships with five systemd **user** services (no root required) that make sync fully automatic on a console-style device.
