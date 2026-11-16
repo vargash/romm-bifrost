@@ -1110,6 +1110,7 @@ def _print_sync_summary(
     summary.add_column("Value")
     summary.add_row("Total operations", str(len(results)))
     summary.add_row("ROM symlinks", str(by_category.get("rom", 0)))
+    summary.add_row("Extras symlinks", str(by_category.get("extras", 0)))
     summary.add_row("BIOS symlinks", str(by_category.get("bios", 0)))
     summary.add_row("Asset symlinks", str(by_category.get("asset", 0)))
     summary.add_row("Legacy asset dirs removed", str(by_category.get("asset-dir", 0)))

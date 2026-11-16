@@ -478,6 +478,7 @@ RomM turns a ROM into a folder (a "multi-file game") as soon as you add extras t
 - A folder with several top-level files that all carry a `(Disc N)` marker gets one link per disc plus an `.m3u` playlist.
 - Folders it can't classify (no files, cue/bin sets) and platforms outside the list keep the previous behaviour: the folder itself is linked.
 - Add other platforms with `[esde].inner_file_platforms = ["saturn"]`.
+- **Switch updates and DLC:** the `update/` and `dlc/` folders stay out of ES-DE's list. Set `[esde].extras_path` (e.g. `~/Emulation/switch-extras`) and `bifrost sync` links them as `<extras_path>/switch/<game>/update` and `.../dlc`; point the emulator's external content / add-on folder at `<extras_path>/switch`. Off by default; stale links are removed on sync while the NAS is reachable.
 - The folder is read from the NAS mount; while the NAS is unreachable the ROM is left as it is.
 - `bifrost sync --incremental` also removes the dead link left under the old name.
 

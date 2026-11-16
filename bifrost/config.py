@@ -69,7 +69,14 @@ class EsdeConfig(BaseModel):
         description=(
             "Extra platform slugs whose folder ROMs (games with extras) are linked through "
             "the game file inside the folder. Adds to the built-in single-image systems "
-            "(ps2, gc, wii, psp, dreamcast)."
+            "(ps2, gc, wii, psp, dreamcast, switch)."
+        ),
+    )
+    extras_path: str = Field(
+        default="",
+        description=(
+            "Directory where the update/ and dlc/ folders of Switch folder ROMs are linked, "
+            "outside ES-DE's ROMs directory, for an emulator to load them from. Empty = off."
         ),
     )
 
