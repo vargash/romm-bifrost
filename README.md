@@ -209,11 +209,22 @@ bifrost save debug
 
 ## Settings window (optional)
 
-`bifrost gui` opens a window with a home screen and a settings screen to browse and edit every config option with the mouse, keyboard or a
-controller (D-pad/stick to move, A to change, B to go back, Start to confirm). Changes are
-validated and saved as you make them. Text values use an on-screen keyboard, so no physical
-keyboard is needed on a handheld. The list of options is generated from the config models, so new
-options appear without GUI changes.
+`bifrost gui` opens a window you can drive with the mouse, keyboard or a controller (D-pad/stick to
+move, A to select, B to go back, Start to confirm). The home screen leads to:
+
+- **Settings:** browse and edit every config option. Changes are validated and saved as you make
+  them; text values use an on-screen keyboard (or paste with Ctrl+V). The list of options is
+  generated from the config models, so new options appear without GUI changes.
+- **Setup:** edit the RomM connection, check it, and enroll this device.
+- **Sync:** preview or apply the library sync, gamelists and save sync.
+- **Services:** install, check or remove the systemd timers and the ES-DE hooks.
+- **Maintenance:** diagnostics, cache status/clear and library scan.
+
+Actions run the same `bifrost` commands you would type in a terminal and stream their output into
+the window. Commands that change files or services ask for confirmation first, and B cancels a
+running command. Prompts cannot be answered in the window, so a command that needs a decision (for
+example a save conflict with `conflict_strategy = "ask"`) stops with an error; set a strategy in
+Settings or run it from a terminal.
 
 It needs pygame, which is not installed by default:
 

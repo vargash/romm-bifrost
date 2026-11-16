@@ -17,10 +17,10 @@ class Tile:
 
 TILES = (
     Tile("settings", "Settings", "Connection, paths, options"),
-    Tile("sync", "Sync", "Library and save sync", enabled=False),
-    Tile("saves", "Saves", "Profiles, core mappings", enabled=False),
-    Tile("services", "Services", "Timers and ES-DE hooks", enabled=False),
-    Tile("maintenance", "Maintenance", "Cache, orphans, diagnostics", enabled=False),
+    Tile("setup", "Setup", "Connect to RomM, enroll device"),
+    Tile("sync", "Sync", "Library, gamelists and saves"),
+    Tile("services", "Services", "Timers and ES-DE hooks"),
+    Tile("maintenance", "Maintenance", "Diagnostics, cache, scan"),
 )
 COLUMNS = 3
 

@@ -262,7 +262,7 @@ def test_font_falls_back_for_glyphs_the_bundled_font_lacks(sdl) -> None:  # type
 
 
 def test_home_grid_navigation_and_opening() -> None:
-    from bifrost.gui.home import HomeScreen
+    from bifrost.gui.home import HomeScreen, Tile
 
     home = HomeScreen()
     _press(home, Action.LEFT, Action.UP)  # at the top-left corner: nothing moves
@@ -274,9 +274,9 @@ def test_home_grid_navigation_and_opening() -> None:
     home.focus(0)
     _press(home, Action.DOWN)
     assert home.index == 3
-    home.focus(1)
-    _press(home, Action.ACCEPT)  # "sync" is not available yet
-    assert home.opened is None
+    unavailable = HomeScreen((Tile("later", "Later", "Not yet", enabled=False),))
+    _press(unavailable, Action.ACCEPT)
+    assert unavailable.opened is None
     home.focus(0)
     _press(home, Action.CONFIRM)
     assert home.opened == "settings"
@@ -289,7 +289,9 @@ def test_every_screen_renders_and_home_opens_settings(sdl, tmp_path: Path) -> No
     from bifrost.gui.home import HomeScreen
 
     surface = sdl.display.set_mode((1280, 720))
-    fonts = app._Fonts(app.UiFont(sdl, 38), app.UiFont(sdl, 28), app.UiFont(sdl, 22))
+    fonts = app._Fonts(
+        app.UiFont(sdl, 38), app.UiFont(sdl, 28), app.UiFont(sdl, 22), app.UiFont(sdl, 22, monospace=True)
+    )
     settings = _screen([])
     screens = [HomeScreen(), settings]
     _open(settings, "romm.client_token")
@@ -301,3 +303,35 @@ def test_every_screen_renders_and_home_opens_settings(sdl, tmp_path: Path) -> No
     layout = app._Layout()
     app._draw(sdl, surface, fonts, settings, layout)
     assert layout.keys
+
+
+def test_action_screens_render_in_every_mode(sdl) -> None:  # type: ignore[no-untyped-def]
+    from bifrost.gui import app
+    from bifrost.gui.actions_screen import ActionScreen, Command
+
+    class Done:
+        returncode: int | None = 1
+
+        def poll(self) -> list[str]:
+            return ["x" * 300, "second line", "", "tail"]
+
+        def cancel(self) -> None:
+            pass
+
+    surface = sdl.display.set_mode((1280, 720))
+    fonts = app._Fonts(
+        app.UiFont(sdl, 38), app.UiFont(sdl, 28), app.UiFont(sdl, 22), app.UiFont(sdl, 22, monospace=True)
+    )
+    screen = ActionScreen("Sync", (Command("Apply", "Writes", ("sync",), confirm=True),), lambda c: Done())
+
+    layout = app._Layout()
+    app._draw(sdl, surface, fonts, screen, layout)
+    assert layout.rows
+    screen.handle(Event(Action.ACCEPT))  # confirm
+    app._draw(sdl, surface, fonts, screen, app._Layout())
+    screen.handle(Event(Action.ACCEPT))  # running
+    app._draw(sdl, surface, fonts, screen, app._Layout())
+    screen.tick()  # done, failed
+    assert screen.mode == "done"
+    app._draw(sdl, surface, fonts, screen, app._Layout())
+    assert app._wrap(fonts.note, "x" * 300, 400)[0] != "x" * 300

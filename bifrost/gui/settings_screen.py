@@ -41,6 +41,14 @@ class SettingsScreen:
         self.shift = False
         self.done = False
 
+    def restrict(self, section: str | None) -> None:
+        """Show only one section (straight to its rows), or all of them again."""
+        names = list(dict.fromkeys(s.section for s in self.settings))
+        self.sections = [section] if section in names else names
+        self.section = self.row = 0
+        self.error = ""
+        self.mode = "rows" if len(self.sections) == 1 else "sections"
+
     # ── queries ──────────────────────────────────────────────────────────
     @property
     def rows(self) -> list[Setting]:
@@ -83,6 +91,8 @@ class SettingsScreen:
         elif action is Action.DOWN:
             self.row = (self.row + 1) % len(self.rows)
         elif action is Action.BACK or (action is Action.LEFT and setting.kind not in _STEPPED):
+            if len(self.sections) == 1:  # restricted to one section: nothing to go back to
+                self.done = True
             self.mode, self.error = "sections", ""
         elif action in (Action.LEFT, Action.RIGHT) and setting.kind in _STEPPED:
             self._step(setting, 1 if action is Action.RIGHT else -1)

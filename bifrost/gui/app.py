@@ -8,17 +8,24 @@ from typing import Any
 
 from bifrost.config import AppConfig, save_config
 from bifrost.gui import theme as t
+from bifrost.gui.actions_screen import ActionScreen, Command
+from bifrost.gui.catalog import build_screens
 from bifrost.gui.home import HomeScreen
 from bifrost.gui.inputs import Action, Event
+from bifrost.gui.runner import CommandRunner, cli_argv
 from bifrost.gui.schema import display_text
 from bifrost.gui.settings_screen import SettingsScreen
+
+Screen = HomeScreen | SettingsScreen | ActionScreen
 
 STICK_DEADZONE = 0.6
 STICK_REPEAT_MS = 180
 STICK_POLL_MS = 30
+LOG_POLL_MS = 100
 
 FONT_FILE = Path(__file__).resolve().parent.parent / "data" / "fonts" / "NotoSans-Regular.ttf"
 # Tried in order when the bundled font lacks a glyph (CJK titles and the like).
+MONO_FONTS = "dejavusansmono,liberationmono,notosansmono,freemono"
 FALLBACK_FONTS = "notosanscjksc,notosanscjk,notosanssc,wenquanyi,droidsansfallback,unifont"
 
 # Footer hints per context: (button badge, what it does). Keyboard equivalents follow the dot.
@@ -27,6 +34,10 @@ _HINTS: dict[str, list[tuple[str, str]]] = {
     "sections": [("A", "Open · Enter"), ("B", "Home · Esc")],
     "rows": [("A", "Change · Enter"), ("<  >", "Adjust"), ("B", "Back · Esc")],
     "edit": [("A", "Key · Enter"), ("Start", "Save · Enter"), ("B", "Cancel · Esc")],
+    "list": [("A", "Run · Enter"), ("B", "Back · Esc")],
+    "confirm": [("A", "Run · Enter"), ("B", "Cancel · Esc")],
+    "running": [("Up/Down", "Scroll"), ("B", "Cancel · Esc")],
+    "done": [("Up/Down", "Scroll"), ("B", "Back · Esc")],
 }
 
 
@@ -41,8 +52,9 @@ def pygame_available() -> bool:
 class UiFont:
     """The bundled font with a system fallback for glyphs it does not contain."""
 
-    def __init__(self, pygame: Any, size: int) -> None:
-        self._main = pygame.font.Font(str(FONT_FILE), size)
+    def __init__(self, pygame: Any, size: int, *, monospace: bool = False) -> None:
+        mono = pygame.font.match_font(MONO_FONTS) if monospace else None
+        self._main = pygame.font.Font(mono or str(FONT_FILE), size)
         found = pygame.font.match_font(FALLBACK_FONTS)
         self._fallback = pygame.font.Font(found, size) if found else None
         # A glyph the font lacks renders as its .notdef box, so it shares these metrics.
@@ -72,6 +84,7 @@ class _Fonts:
     title: UiFont
     body: UiFont
     note: UiFont
+    log: UiFont  # monospace when the system has one, so command tables line up
 
 
 def run(config: AppConfig, config_path: Path, *, fullscreen: bool = False) -> None:
@@ -82,9 +95,15 @@ def run(config: AppConfig, config_path: Path, *, fullscreen: bool = False) -> No
     def save(updated: AppConfig) -> None:
         save_config(updated, config_path)
 
+    def start(command: Command) -> CommandRunner:
+        args = command.args
+        return CommandRunner(cli_argv(args, config_path if command.takes_config else None))
+
     home = HomeScreen()
     settings = SettingsScreen(config, save)
-    active: HomeScreen | SettingsScreen = home
+    screens = build_screens(start)
+    active: Screen = home
+    previous: Screen = home  # where the settings screen returns to
     pygame.init()
     controller.init()
     pygame.key.set_repeat(350, 60)
@@ -97,7 +116,10 @@ def run(config: AppConfig, config_path: Path, *, fullscreen: bool = False) -> No
     except pygame.error:
         pass
     fonts = _Fonts(
-        UiFont(pygame, t.TITLE_SIZE), UiFont(pygame, t.BODY_SIZE), UiFont(pygame, t.NOTE_SIZE)
+        UiFont(pygame, t.TITLE_SIZE),
+        UiFont(pygame, t.BODY_SIZE),
+        UiFont(pygame, t.NOTE_SIZE),
+        UiFont(pygame, t.NOTE_SIZE, monospace=True),
     )
     controllers: dict[int, Any] = {}
     stick = _StickRepeater()
@@ -110,17 +132,33 @@ def run(config: AppConfig, config_path: Path, *, fullscreen: bool = False) -> No
     for index in range(controller.get_count()):
         open_controller(index)
 
+    def go(target: str, origin: Screen) -> None:
+        nonlocal active, previous
+        previous = origin
+        if target.startswith("settings"):
+            settings.restrict(target.partition(":")[2] or None)
+            active = settings
+        else:
+            active = screens[target]
+
     def dispatch(event: Event) -> None:
         nonlocal active
         active.handle(event)
-        if active is home:
-            if home.opened == "settings":
-                home.opened = None
-                active = settings
+        if isinstance(active, HomeScreen):
+            if active.opened:
+                target, active.opened = active.opened, None
+                go(target, home)
+        elif isinstance(active, ActionScreen):
+            if active.opened:
+                target, active.opened = active.opened, None
+                go(target, active)
+            elif active.done:
+                active.done = False
+                active = home
         elif settings.done:
             settings.done = False
-            settings.mode = "sections"
-            active = home
+            settings.restrict(None)
+            active = previous
 
     layout = _Layout()
     dirty = True
@@ -131,8 +169,12 @@ def run(config: AppConfig, config_path: Path, *, fullscreen: bool = False) -> No
             pygame.display.flip()
             dirty = False
         # Sleep until something happens; poll quickly only while the stick is tilted.
-        events = [pygame.event.wait(STICK_POLL_MS if stick.active else 0)]
+        busy = isinstance(active, ActionScreen) and active.busy
+        timeout = STICK_POLL_MS if stick.active else LOG_POLL_MS if busy else 0
+        events = [pygame.event.wait(timeout)]
         events += pygame.event.get()
+        if isinstance(active, ActionScreen) and active.tick():
+            dirty = True
         for raw in events:
             if raw.type == pygame.NOEVENT:
                 continue
@@ -149,6 +191,8 @@ def run(config: AppConfig, config_path: Path, *, fullscreen: bool = False) -> No
         for event in stick.due(pygame.time.get_ticks()):
             dispatch(event)
             dirty = True
+    for screen in screens.values():
+        screen.shutdown()
     pygame.quit()
 
 
@@ -205,7 +249,7 @@ def _clipboard_text(pygame: Any) -> str:
 def _translate(
     pygame: Any,
     raw: Any,
-    state: HomeScreen | SettingsScreen,
+    state: Screen,
     layout: _Layout,
     stick: _StickRepeater,
 ) -> list[Event]:
@@ -256,9 +300,7 @@ def _translate(
     return []
 
 
-def _mouse(
-    pygame: Any, raw: Any, state: HomeScreen | SettingsScreen, layout: _Layout
-) -> list[Event]:
+def _mouse(pygame: Any, raw: Any, state: Screen, layout: _Layout) -> list[Event]:
     click = raw.type == pygame.MOUSEBUTTONDOWN
     if click and raw.button != 1:
         return [Event(Action.BACK)] if raw.button == 3 else []
@@ -266,6 +308,12 @@ def _mouse(
         for index, rect in enumerate(layout.tiles):
             if rect.collidepoint(raw.pos):
                 state.focus(index)
+                return [Event(Action.ACCEPT)] if click else []
+        return []
+    if isinstance(state, ActionScreen):
+        for index, rect in layout.rows:
+            if rect.collidepoint(raw.pos):
+                state.focus_row(index)
                 return [Event(Action.ACCEPT)] if click else []
         return []
     if state.mode == "edit":
@@ -289,10 +337,13 @@ def _draw(
     pygame: Any,
     surface: Any,
     fonts: _Fonts,
-    state: HomeScreen | SettingsScreen,
+    state: Screen,
     layout: _Layout,
 ) -> None:
     surface.fill(t.BG)
+    if isinstance(state, ActionScreen):
+        _draw_actions(pygame, surface, fonts, state, layout)
+        return
     if isinstance(state, HomeScreen):
         _draw_header(pygame, surface, fonts, "Home", "", t.MUTED)
         _draw_home(pygame, surface, fonts, state, layout)
@@ -454,6 +505,127 @@ def _draw_settings(
         text = _fit_end(fonts.note, state.error, width - 2 * t.MARGIN)
         message = fonts.note.render(text, t.ERROR)
         surface.blit(message, (t.MARGIN, height - t.FOOTER_H - 34))
+
+
+def _draw_actions(
+    pygame: Any, surface: Any, fonts: _Fonts, state: ActionScreen, layout: _Layout
+) -> None:
+    width, height = surface.get_size()
+    command = state.command
+    running = state.mode in ("running", "done")
+    crumb = f"{state.title} / {command.label}" if running and command else state.title
+    status, color = "", t.MUTED
+    if state.mode == "running":
+        status, color = ("Cancelling..." if state.cancelled else "Running..."), t.MUTED
+    elif state.mode == "done":
+        ok = state.exit_code == 0
+        status = "Done" if ok else f"Failed (exit {state.exit_code})"
+        color = t.OK if ok else t.ERROR
+    _draw_header(pygame, surface, fonts, crumb, status, color)
+    _draw_footer(pygame, surface, fonts, _HINTS[state.mode])
+
+    top = t.HEADER_H + t.MARGIN
+    if running:
+        _draw_log(pygame, surface, fonts, state, pygame.Rect(
+            t.MARGIN, top, width - 2 * t.MARGIN, height - t.FOOTER_H - t.MARGIN - top
+        ))
+        return
+
+    area = pygame.Rect(t.MARGIN, top, width - 2 * t.MARGIN - 14, height - t.FOOTER_H - top - 20)
+    row_h = fonts.body.linesize + fonts.note.linesize + 22
+    visible = max(1, area.height // (row_h + 6))
+    total = len(state.entries)
+    first = max(0, min(state.index - visible // 2, total - visible))
+    for position, entry in enumerate(state.entries[first : first + visible]):
+        index = first + position
+        rect = pygame.Rect(area.x, area.y + position * (row_h + 6), area.width, row_h)
+        layout.rows.append((index, rect))
+        focused = index == state.index
+        pygame.draw.rect(
+            surface, t.SURFACE_HI if focused else t.SURFACE, rect, border_radius=t.RADIUS
+        )
+        if focused:
+            pygame.draw.rect(surface, t.ACCENT, rect, width=2, border_radius=t.RADIUS)
+        label = _fit_end(fonts.body, entry.label, rect.width - 32)
+        surface.blit(fonts.body.render(label, t.TEXT), (rect.x + 16, rect.y + 8))
+        note = _fit_end(fonts.note, entry.description, rect.width - 32)
+        note_y = rect.y + 12 + fonts.body.linesize
+        surface.blit(fonts.note.render(note, t.MUTED), (rect.x + 16, note_y))
+    if total > visible:
+        _scrollbar(pygame, surface, pygame.Rect(area.right + 6, area.y, 6, area.height),
+                   visible, total, first)
+    if state.mode == "confirm" and command is not None:
+        _draw_confirm(pygame, surface, fonts, command.label, command.description)
+
+
+def _scrollbar(pygame: Any, surface: Any, track: Any, visible: int, total: int, first: int) -> None:
+    pygame.draw.rect(surface, t.SURFACE, track, border_radius=3)
+    thumb_h = max(24, track.height * visible // total)
+    thumb_y = track.y + (track.height - thumb_h) * first // max(1, total - visible)
+    thumb = pygame.Rect(track.x, thumb_y, track.width, thumb_h)
+    pygame.draw.rect(surface, t.FAINT, thumb, border_radius=3)
+
+
+def _draw_confirm(pygame: Any, surface: Any, fonts: _Fonts, label: str, detail: str) -> None:
+    width, height = surface.get_size()
+    shade = pygame.Surface((width, height), pygame.SRCALPHA)
+    shade.fill((0, 0, 0, 150))
+    surface.blit(shade, (0, 0))
+    panel = pygame.Rect(0, 0, min(760, width - 2 * t.MARGIN), 250)
+    panel.center = (width // 2, height // 2)
+    pygame.draw.rect(surface, t.SURFACE, panel, border_radius=t.RADIUS + 2)
+    pygame.draw.rect(surface, t.ACCENT, panel, width=2, border_radius=t.RADIUS + 2)
+    surface.blit(fonts.title.render("Run this?", t.TEXT), (panel.x + 28, panel.y + 24))
+    surface.blit(fonts.body.render(_fit_end(fonts.body, label, panel.width - 56), t.TEXT),
+                 (panel.x + 28, panel.y + 92))
+    surface.blit(fonts.note.render(_fit_end(fonts.note, detail, panel.width - 56), t.MUTED),
+                 (panel.x + 28, panel.y + 134))
+    x = panel.x + 28
+    y = panel.bottom - 36
+    x += _badge(pygame, surface, fonts.note, "A", x, y) + 8
+    x += surface.blit(fonts.note.render("Run", t.TEXT), (x, y - 12)).width + 36
+    x += _badge(pygame, surface, fonts.note, "B", x, y) + 8
+    surface.blit(fonts.note.render("Cancel", t.TEXT), (x, y - 12))
+
+
+def _draw_log(pygame: Any, surface: Any, fonts: _Fonts, state: ActionScreen, area: Any) -> None:
+    pygame.draw.rect(surface, t.SURFACE, area, border_radius=t.RADIUS)
+    pygame.draw.rect(surface, t.BORDER, area, width=1, border_radius=t.RADIUS)
+    inner = area.inflate(-32, -24)
+    font = fonts.log
+    line_h = font.linesize
+    visible = max(1, inner.height // line_h)
+    wrapped: list[str] = []
+    for raw in list(state.lines)[-400:]:
+        wrapped.extend(_wrap(font, raw, inner.width - 12))
+    if not wrapped:
+        wrapped = ["Starting..."]
+    state.scroll = min(state.scroll, max(0, len(wrapped) - visible))
+    end = len(wrapped) - state.scroll
+    for position, text in enumerate(wrapped[max(0, end - visible) : end]):
+        surface.blit(font.render(text or " ", t.TEXT), (inner.x, inner.y + position * line_h))
+    if len(wrapped) > visible:
+        track = pygame.Rect(area.right - 12, inner.y, 6, inner.height)
+        _scrollbar(pygame, surface, track, visible, len(wrapped), max(0, end - visible))
+
+
+def _wrap(font: UiFont, text: str, width: int) -> list[str]:
+    """Split text into pieces that fit width, preferring to break at spaces."""
+    lines: list[str] = []
+    while text and font.size(text)[0] > width:
+        low, high = 1, len(text)
+        while low < high:  # largest prefix that fits
+            mid = (low + high + 1) // 2
+            if font.size(text[:mid])[0] <= width:
+                low = mid
+            else:
+                high = mid - 1
+        cut = text.rfind(" ", 0, low + 1)
+        cut = cut if cut > low // 2 else low
+        lines.append(text[:cut].rstrip())
+        text = text[cut:].lstrip(" ")
+    lines.append(text)
+    return lines
 
 
 def _fit(font: UiFont, text: str, max_width: int) -> str:
