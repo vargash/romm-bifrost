@@ -356,3 +356,73 @@ def test_switch_folder_links_the_game_file_and_ignores_update_and_dlc(tmp_path: 
     (folder / "dlc").mkdir()
     entries = launch_entries("switch", "Cuphead", "", folder, DEFAULT_INNER_FILE_PLATFORMS)
     assert [e.name for e in entries] == ["Cuphead [0100A5C00D162000][v0].nsp"]
+
+
+# --- switch update/dlc extras ---------------------------------------------
+
+
+def _switch_game(tmp_path: Path, subfolders: tuple[str, ...] = ("update", "dlc")) -> Path:
+    folder = _folder_rom(tmp_path, ["Cuphead.nsp"], "Cuphead", "switch")
+    for sub in subfolders:
+        (folder / sub).mkdir()
+    return folder
+
+
+def _extras_config(tmp_path: Path) -> AppConfig:
+    return _config(tmp_path, extras_path=str(tmp_path / "extras"))
+
+
+def test_switch_extras_are_linked_outside_the_es_de_tree(tmp_path: Path):
+    folder = _switch_game(tmp_path)
+    config = _extras_config(tmp_path)
+    ops = plan_symlink_operations(config, _Client([_summary("Cuphead", "switch")], "switch"))
+
+    extras = [op for op in ops if op.category == "extras"]
+    assert [(op.destination, op.target, op.is_dir) for op in extras] == [
+        (tmp_path / "extras" / "switch" / "Cuphead" / "update", folder / "update", True),
+        (tmp_path / "extras" / "switch" / "Cuphead" / "dlc", folder / "dlc", True),
+    ]
+    rom_ops = [op for op in ops if op.category == "rom"]
+    assert [op.destination for op in rom_ops] == [tmp_path / "esde" / "switch" / "Cuphead.nsp"]
+
+
+def test_extras_follow_only_existing_subfolders_and_only_when_enabled(tmp_path: Path):
+    _switch_game(tmp_path, ("update",))
+    client = _Client([_summary("Cuphead", "switch")], "switch")
+    on = plan_symlink_operations(_extras_config(tmp_path), client)
+    assert [op.destination.name for op in on if op.category == "extras"] == ["update"]
+    off = plan_symlink_operations(_config(tmp_path), client)
+    assert not [op for op in off if op.category == "extras"]
+
+
+def test_extras_incremental_plan_matches_full_plan(tmp_path: Path):
+    _switch_game(tmp_path)
+    config = _extras_config(tmp_path)
+    client = _Client([_summary("Cuphead", "switch")], "switch")
+    assert plan_incremental_symlink_ops(config, client, client.list_roms()) == (
+        plan_symlink_operations(config, client)
+    )
+
+
+def test_stale_extras_links_are_removed_only_while_the_nas_is_reachable(tmp_path: Path):
+    from bifrost.symlink_manager import plan_stale_removals
+
+    folder = _switch_game(tmp_path)
+    config = _extras_config(tmp_path)
+    game_dir = tmp_path / "extras" / "switch" / "Cuphead"
+    game_dir.mkdir(parents=True)
+    kept = game_dir / "update"
+    kept.symlink_to(folder / "update")
+    gone = game_dir / "dlc"
+    gone.symlink_to(folder / "dlc")
+    foreign = game_dir / "mine"
+    foreign.symlink_to(tmp_path)
+    (folder / "dlc").rmdir()
+
+    ops = plan_symlink_operations(config, _Client([_summary("Cuphead", "switch")], "switch"))
+    removals = plan_stale_removals(config, ops)
+    assert [r.destination for r in removals if r.category == "extras"] == [gone]
+
+    nas_down = _config(tmp_path, extras_path=str(tmp_path / "extras"))
+    nas_down.nas.library_path = str(tmp_path / "offline")
+    assert not [r for r in plan_stale_removals(nas_down, []) if r.category == "extras"]

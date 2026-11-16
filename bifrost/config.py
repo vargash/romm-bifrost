@@ -69,7 +69,14 @@ class EsdeConfig(BaseModel):
         description=(
             "Extra platform slugs whose folder ROMs (games with extras) are linked through "
             "the game file inside the folder. Adds to the built-in single-image systems "
-            "(ps2, gc, wii, psp, dreamcast)."
+            "(ps2, gc, wii, psp, dreamcast, switch)."
+        ),
+    )
+    extras_path: str = Field(
+        default="",
+        description=(
+            "Directory where the update/ and dlc/ folders of Switch folder ROMs are linked, "
+            "outside ES-DE's ROMs directory, for an emulator to load them from. Empty = off."
         ),
     )
 
@@ -358,12 +365,36 @@ def _migrate_cross_core_compat(data: dict[str, Any]) -> None:
         sync["core_mappings"] = migrated
 
 
-def _parse_config(data: dict[str, Any]) -> AppConfig:
+def find_unknown_keys(data: dict[str, Any], model: type[BaseModel] = AppConfig) -> list[str]:
+    """Return dotted paths of keys in data that model (or a nested model) does not define.
+
+    Pydantic ignores unknown keys, so a typo such as ``extra_path`` silently leaves the
+    option at its default. Only nested sections are descended into; free-form values
+    (dicts, lists) are never inspected.
+    """
+
+    unknown: list[str] = []
+    for key, value in data.items():
+        field = model.model_fields.get(key)
+        if field is None:
+            unknown.append(key)
+            continue
+        nested = field.annotation
+        if isinstance(value, dict) and isinstance(nested, type) and issubclass(nested, BaseModel):
+            unknown.extend(f"{key}.{sub}" for sub in find_unknown_keys(value, nested))
+    return unknown
+
+
+def _apply_migrations(data: dict[str, Any]) -> None:
     if "romm" in data and "url" in data["romm"]:
         data["romm"]["url"] = _normalize_url(str(data["romm"]["url"]))
     _migrate_folder_map(data)
     _migrate_sync_mode(data)
     _migrate_cross_core_compat(data)
+
+
+def _parse_config(data: dict[str, Any]) -> AppConfig:
+    _apply_migrations(data)
     try:
         return AppConfig.model_validate(data)
     except ValidationError as exc:
@@ -372,6 +403,7 @@ def _parse_config(data: dict[str, Any]) -> AppConfig:
 
 def load_config(path: Path | None = None) -> AppConfig:
     """Load and validate configuration from TOML file."""
+
 
     config_path = path or default_config_path()
     if not config_path.exists():
@@ -406,3 +438,19 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
         config_path.chmod(0o600)
 
     return config_path
+
+
+def unknown_config_keys(path: Path) -> list[str]:
+    """Dotted paths of keys in the config file that Bifrost does not recognise.
+
+    Legacy keys handled by the load-time migrations are not reported. A missing or
+    unparsable file yields an empty list; load_config reports those problems itself.
+    """
+
+    try:
+        with path.open("rb") as handle:
+            data = tomllib.load(handle)
+        _apply_migrations(data)
+    except (OSError, tomllib.TOMLDecodeError, ValueError, TypeError, KeyError):
+        return []
+    return find_unknown_keys(data)

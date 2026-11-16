@@ -15,6 +15,7 @@ from bifrost.config import AppConfig
 from bifrost.launch_targets import (
     LaunchEntry,
     esde_rom_name,
+    extras_entries,
     inner_file_platforms,
     launch_entries,
     rom_target_path,
@@ -142,6 +143,18 @@ def _rom_launch(
     return entries, Path(stem_source).stem
 
 
+def _extras_ops(
+    config: AppConfig, rom: RomSummary, slug: str, path_hint: str, roms_root: Path
+) -> list[SymlinkOperation]:
+    target = _rom_target_path(roms_root, path_hint, rom.fs_name)
+    return [
+        SymlinkOperation(
+            category="extras", destination=Path(e.name), target=e.target, is_dir=True
+        )
+        for e in extras_entries(config, slug, rom.fs_name or "", rom.fs_extension, target)
+    ]
+
+
 def _bios_target_path(bios_root: Path, file_path: str, file_name: str) -> Path:
     candidate = Path(file_path)
     if candidate.is_absolute():
@@ -193,6 +206,7 @@ def plan_incremental_symlink_ops(
                 target=entry.target,
                 is_dir=False,
             ))
+        ops.extend(_extras_ops(config, rom, slug, path_hint, roms_root))
 
         for romm_asset_type, esde_folder in config.assets.folder_map.items():
             rel = _asset_relative_path(rom, romm_asset_type)
@@ -337,6 +351,7 @@ def plan_symlink_operations(config: AppConfig, client: RommApiClient) -> list[Sy
                     is_dir=False,
                 )
             )
+        ops.extend(_extras_ops(config, rom, slug, path_hint, roms_root))
 
     for fw in firmware_items:
         file_name = fw.get("file_name")
@@ -399,6 +414,12 @@ def _is_bifrost_symlink(path: Path, nas_root: Path) -> bool:
     return str(t.resolve(strict=False)).startswith(str(nas_root.resolve()))
 
 
+def _subdirs(path: Path) -> list[Path]:
+    if not path.is_dir():
+        return []
+    return [p for p in path.iterdir() if p.is_dir() and not p.is_symlink()]
+
+
 def plan_stale_removals(
     config: AppConfig,
     ops: list[SymlinkOperation],
@@ -439,6 +460,22 @@ def plan_stale_removals(
                 continue
             if not item.exists() or _is_bifrost_symlink(item, nas_root):
                 remove_ops.append(RemoveSymlinkOperation(category="rom", destination=item))
+
+    # Extras links (update/dlc folders). Only judged while the NAS is reachable, since
+    # an unreadable NAS is also why a planned link would be missing from the plan.
+    extras_dirs = {op.destination.parent for op in ops if op.category == "extras"}
+    if nas_accessible and config.esde.extras_path:
+        extras_root = _normalize_path(config.esde.extras_path)
+        extras_dirs |= {d for slug_dir in _subdirs(extras_root) for d in _subdirs(slug_dir)}
+    for game_dir in sorted(extras_dirs):
+        for item in game_dir.iterdir() if game_dir.is_dir() else []:
+            if (
+                nas_accessible
+                and item.is_symlink()
+                and item not in planned_destinations
+                and (not item.exists() or _is_bifrost_symlink(item, nas_root))
+            ):
+                remove_ops.append(RemoveSymlinkOperation(category="extras", destination=item))
 
     # BIOS symlinks.
     if emudeck_bios_root.is_dir():
