@@ -40,6 +40,7 @@ from bifrost.config import (
     default_config_path,
     load_config,
     save_config,
+    unknown_config_keys,
 )
 from bifrost.errors import ApiError, AuthenticationError, ConfigError, NetworkError
 from bifrost.gamelist import apply_gamelist_delta, apply_gamelist_plan, build_gamelist_plan
@@ -169,10 +170,13 @@ def load_config_or_exit(console: Console, config_path: Path | None) -> tuple[App
     """
     resolved_path = config_path or default_config_path()
     try:
-        return load_config(resolved_path), resolved_path
+        config = load_config(resolved_path)
     except ConfigError as exc:
         console.print(f"[red]Configuration error:[/red] {exc}")
         raise SystemExit(EXIT_CONFIG_ERROR) from exc
+    for key in unknown_config_keys(resolved_path):
+        console.print(f"[yellow]Warning:[/yellow] unknown config key '{key}' is ignored.")
+    return config, resolved_path
 
 
 @contextmanager

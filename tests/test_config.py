@@ -4,7 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from bifrost.config import AppConfig, RommConfig, load_config, save_config
+from bifrost.config import (
+    AppConfig,
+    RommConfig,
+    find_unknown_keys,
+    load_config,
+    save_config,
+    unknown_config_keys,
+)
 from bifrost.errors import ConfigError, ConfigPermissionError
 
 
@@ -234,3 +241,27 @@ def test_save_config_sets_secure_mode(tmp_path: Path) -> None:
 
     mode = config_file.stat().st_mode & 0o777
     assert mode == 0o600
+
+
+def test_find_unknown_keys_flags_typos_in_nested_sections() -> None:
+    data = {
+        "romm": {"url": "http://x", "client_token": "rmm_1", "bogus": 1},
+        "esde": {"extra_path": "~/x", "extras_path": "~/y"},
+        "assets": {"folder_map": {"anything": "goes"}},
+        "typo_section": {"a": 1},
+    }
+
+    assert find_unknown_keys(data) == ["romm.bogus", "esde.extra_path", "typo_section"]
+
+
+def test_unknown_config_keys_reports_typo(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        '[romm]\nurl = "http://romm.local"\nclient_token = "rmm_1"\n'
+        '[esde]\nextra_path = "~/Emulation/extras"\n',
+        encoding="utf-8",
+    )
+    config_file.chmod(0o600)
+
+    assert unknown_config_keys(config_file) == ["esde.extra_path"]
+    assert unknown_config_keys(tmp_path / "missing.toml") == []
