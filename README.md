@@ -357,6 +357,7 @@ bifrost doctor
 - Config file validity
 - NAS paths (accessible, non-empty mount points)
 - Local paths (ES-DE ROMs, gamelists, BIOS, saves, media)
+- ES-DE extension filters (links such as `.nsz` files that `es_systems.xml` does not accept and ES-DE would hide)
 - Disk space on the home partition
 - RomM connectivity (live heartbeat)
 - Systemd service states

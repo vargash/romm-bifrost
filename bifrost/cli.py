@@ -2458,6 +2458,20 @@ def doctor(config_path: Path | None, write_log: bool) -> None:
         else:
             _warn(label, f"does not exist yet (will be created on first sync): {p}")
 
+    # ── 3b. ES-DE extension filters ──────────────────────────────────────
+    console.print("\n[bold]ES-DE extension filters[/bold]")
+    from bifrost.esde_check import hidden_links
+
+    hidden = hidden_links(config)
+    if not hidden:
+        _ok("All ROM links match their ES-DE system extensions")
+    for system, names in hidden.items():
+        sample = ", ".join(names[:3]) + (", ..." if len(names) > 3 else "")
+        _warn(
+            f"{system}: {len(names)} link(s) hidden by ES-DE",
+            f"{sample}. Add their extensions to the system in es_systems.xml.",
+        )
+
     # ── 4. Disk space ────────────────────────────────────────────────────
     console.print("\n[bold]Disk space[/bold]")
     try:
