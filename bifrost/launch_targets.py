@@ -23,6 +23,10 @@ DEFAULT_INNER_FILE_PLATFORMS: frozenset[str] = frozenset(
     {"ps2", "gc", "wii", "psp", "dreamcast", "switch"}
 )
 
+# Platforms whose folder ROMs carry update/dlc folders an emulator can load from a directory.
+EXTRAS_PLATFORMS: frozenset[str] = frozenset({"switch"})
+EXTRAS_SUBFOLDERS: tuple[str, ...] = ("update", "dlc")
+
 # ES-DE systems that only list folder ROMs carrying a specific extension
 # (e.g. ps3 accepts "Game.ps3" but ignores "Game").
 _FOLDER_ROM_EXTENSION: dict[str, str] = {"ps3": ".ps3"}
@@ -98,6 +102,24 @@ def launch_entries(
         discs = sorted(files, key=lambda f: (extract_disc_number(f) or 0, f))
         return [LaunchEntry(f, target / f) for f in discs]
     return as_is
+
+
+def extras_entries(
+    config: AppConfig, slug: str, fs_name: str, fs_extension: str | None, target: Path
+) -> list[LaunchEntry]:
+    """Links exposing a folder ROM's update/dlc folders under ``[esde].extras_path``.
+
+    Empty when the feature is off, the ROM is a single file, or the NAS can't be read
+    (a missing folder is then indistinguishable from an unreachable NAS).
+    """
+    if not config.esde.extras_path or slug not in EXTRAS_PLATFORMS or fs_extension:
+        return []
+    root = Path(config.esde.extras_path).expanduser() / slug / fs_name
+    return [
+        LaunchEntry(str(root / sub), target / sub)
+        for sub in EXTRAS_SUBFOLDERS
+        if (target / sub).is_dir()
+    ]
 
 
 @dataclass(frozen=True)

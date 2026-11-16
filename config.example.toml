@@ -21,6 +21,9 @@ custom_systems_path = "~/.emulationstation/custom_systems"
 # Extra platforms whose folder ROMs (games with extras) are linked through the game file
 # inside the folder. Built in: ps2, gc, wii, psp, dreamcast, switch.
 # inner_file_platforms = ["saturn"]
+# Switch games with updates/DLC: link their update/ and dlc/ folders here, outside ES-DE's
+# ROMs directory, so an emulator can load them from a directory (empty = off).
+# extras_path = "~/Emulation/switch-extras"
 
 [emudeck]
 bios_path = "~/BIOS"
