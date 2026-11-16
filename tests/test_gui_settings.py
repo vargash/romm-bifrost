@@ -187,3 +187,75 @@ def test_pygame_window_renders_and_quits(tmp_path: Path, monkeypatch: pytest.Mon
     pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_ESCAPE, unicode=""))
     pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_ESCAPE, unicode=""))
     app.run(_config(), tmp_path / "config.toml")
+
+
+@pytest.fixture
+def sdl(monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
+    pygame = pytest.importorskip("pygame")
+    monkeypatch.setenv("SDL_VIDEODRIVER", "dummy")
+    monkeypatch.setenv("SDL_AUDIODRIVER", "dummy")
+    pygame.init()
+    pygame.display.set_mode((100, 100))
+    yield pygame
+    pygame.quit()
+
+
+def test_controller_buttons_and_stick_become_events(sdl) -> None:  # type: ignore[no-untyped-def]
+    from bifrost.gui import app
+
+    state, layout, stick = _screen([]), app._Layout(), app._StickRepeater()
+
+    def press(button: int) -> list[Event]:
+        raw = sdl.event.Event(sdl.CONTROLLERBUTTONDOWN, button=button)
+        return app._translate(sdl, raw, state, layout, stick)
+
+    assert press(sdl.CONTROLLER_BUTTON_A) == [Event(Action.ACCEPT)]
+    assert press(sdl.CONTROLLER_BUTTON_B) == [Event(Action.BACK)]
+    assert press(sdl.CONTROLLER_BUTTON_START) == [Event(Action.CONFIRM)]
+    assert press(sdl.CONTROLLER_BUTTON_DPAD_UP) == [Event(Action.UP)]
+    assert press(sdl.CONTROLLER_BUTTON_X) == []
+
+    assert not stick.active
+    tilt = sdl.event.Event(sdl.CONTROLLERAXISMOTION, axis=sdl.CONTROLLER_AXIS_LEFTY, value=30000)
+    app._translate(sdl, tilt, state, layout, stick)
+    assert stick.active
+    assert stick.due(1000) == [Event(Action.DOWN)]
+    assert stick.due(1050) == []  # still inside the repeat delay
+    assert stick.due(1300) == [Event(Action.DOWN)]
+
+
+def test_ctrl_v_pastes_clipboard_only_while_editing(sdl, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from bifrost.gui import app
+
+    monkeypatch.setattr(app, "_clipboard_text", lambda _pg: "rmm_pasted_token")
+    state, layout, stick = _screen([]), app._Layout(), app._StickRepeater()
+    paste = sdl.event.Event(sdl.KEYDOWN, key=sdl.K_v, mod=sdl.KMOD_CTRL, unicode="\x16")
+
+    assert app._translate(sdl, paste, state, layout, stick) == []
+    _open(state, "romm.client_token")
+    _press(state, Action.ACCEPT)
+    events = app._translate(sdl, paste, state, layout, stick)
+    for event in events:
+        state.handle(event)
+    _press(state, Action.CONFIRM)
+
+    assert state.config.romm.client_token == "rmm_pasted_token"
+
+
+def test_clipboard_text_is_one_clean_line(sdl, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from bifrost.gui import app
+
+    monkeypatch.setattr(sdl.scrap, "get", lambda _t: b"/mnt/gaming\r\n/romm \x00")
+
+    assert app._clipboard_text(sdl) == "/mnt/gaming/romm"
+
+
+def test_font_falls_back_for_glyphs_the_bundled_font_lacks(sdl) -> None:  # type: ignore[no-untyped-def]
+    from bifrost.gui import app
+
+    font = app.UiFont(sdl, 24)
+
+    assert font._pick("Zelda é ñ") is font._main
+    if font._fallback is not None:  # system CJK font present
+        assert font._pick("日本語") is font._fallback
+    assert font.render("日本語 ok", app.TEXT).get_width() > 0

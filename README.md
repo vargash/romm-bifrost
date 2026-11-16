@@ -219,6 +219,7 @@ It needs pygame, which is not installed by default:
 
 ```bash
 pipx inject romm-bifrost pygame      # or: pip install 'romm-bifrost[gui]'
+./install-deck.sh --with-gui         # on a Steam Deck, at install or --update time
 bifrost gui                          # add --fullscreen on a handheld
 ```
 
