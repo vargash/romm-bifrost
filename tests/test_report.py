@@ -113,3 +113,18 @@ def test_real_command_emits_a_table_event(tmp_path, monkeypatch: pytest.MonkeyPa
     assert result.exit_code == 0
     event = json.loads(result.output.splitlines()[0])
     assert event["type"] in ("table", "message")
+
+
+def test_row_limit_is_a_screenful_for_people_and_unlimited_for_programs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("BIFROST_OUTPUT", raising=False)
+    monkeypatch.setattr(report, "_event_console", None)
+    assert report.row_limit() == 25
+
+    monkeypatch.setenv("BIFROST_OUTPUT", "jsonl")
+    report.make_console()
+    try:
+        assert report.row_limit() is None
+    finally:
+        report._event_console = None

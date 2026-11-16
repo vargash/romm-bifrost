@@ -13,11 +13,12 @@ from bifrost.gui.blocks import Text
 from bifrost.gui.catalog import build_screens
 from bifrost.gui.home import HomeScreen
 from bifrost.gui.inputs import Action, Event
-from bifrost.gui.logview import layout_blocks, wrap
+from bifrost.gui.logview import layout_blocks, shorten, wrap
 from bifrost.gui.osk import OnScreenKeyboard
 from bifrost.gui.runner import CommandRunner, cli_argv
 from bifrost.gui.schema import display_text
 from bifrost.gui.settings_screen import SettingsScreen
+from bifrost.gui.table_screen import TableScreen
 
 Screen = HomeScreen | SettingsScreen | ActionScreen
 
@@ -41,6 +42,12 @@ _HINTS: dict[str, list[tuple[str, str]]] = {
     "confirm": [("A", "Run · Enter"), ("B", "Cancel · Esc")],
     "running": [("Up/Down", "Scroll"), ("< >", "Pan"), ("B", "Cancel · Esc")],
     "done": [("Up/Down", "Scroll"), ("< >", "Pan"), ("B", "Back · Esc")],
+    "table": [
+        ("< >", "Filter"),
+        ("LB RB", "Page"),
+        ("X", "Search · /"),
+        ("B", "Back · Esc"),
+    ],
     "ask_confirm": [("A", "Yes · Enter"), ("B", "No · Esc")],
     "ask_choice": [("< >", "Choose"), ("A", "Select · Enter"), ("B", "Default · Esc")],
 }
@@ -251,6 +258,14 @@ def _clipboard_text(pygame: Any) -> str:
     return "".join(text.replace("\x00", "").splitlines()).strip()
 
 
+def _wants_text(state: Screen) -> bool:
+    if isinstance(state, SettingsScreen):
+        return state.mode == "edit"
+    if isinstance(state, ActionScreen):
+        return state.wants_text
+    return False
+
+
 def _translate(
     pygame: Any,
     raw: Any,
@@ -268,10 +283,14 @@ def _translate(
             pygame.K_KP_ENTER: Action.CONFIRM,
             pygame.K_ESCAPE: Action.BACK,
             pygame.K_BACKSPACE: Action.BACKSPACE,
+            pygame.K_PAGEUP: Action.PAGE_UP,
+            pygame.K_PAGEDOWN: Action.PAGE_DOWN,
         }
         if raw.key in keys:
             return [Event(keys[raw.key])]
-        if state.mode != "edit":
+        if not _wants_text(state):
+            if raw.key == pygame.K_SLASH or (raw.key == pygame.K_f and raw.mod & pygame.KMOD_CTRL):
+                return [Event(Action.FIND)]
             return []
         pasting = (raw.key == pygame.K_v and raw.mod & pygame.KMOD_CTRL) or (
             raw.key == pygame.K_INSERT and raw.mod & pygame.KMOD_SHIFT
@@ -291,6 +310,9 @@ def _translate(
             pygame.CONTROLLER_BUTTON_A: Action.ACCEPT,
             pygame.CONTROLLER_BUTTON_B: Action.BACK,
             pygame.CONTROLLER_BUTTON_START: Action.CONFIRM,
+            pygame.CONTROLLER_BUTTON_X: Action.FIND,
+            pygame.CONTROLLER_BUTTON_LEFTSHOULDER: Action.PAGE_UP,
+            pygame.CONTROLLER_BUTTON_RIGHTSHOULDER: Action.PAGE_DOWN,
         }
         return [Event(buttons[raw.button])] if raw.button in buttons else []
     if raw.type == pygame.CONTROLLERAXISMOTION:
@@ -316,6 +338,18 @@ def _mouse(pygame: Any, raw: Any, state: Screen, layout: _Layout) -> list[Event]
                 return [Event(Action.ACCEPT)] if click else []
         return []
     if isinstance(state, ActionScreen):
+        if state.table is not None:
+            table = state.table
+            if table.mode == "search":
+                if click:
+                    for row, col, rect in layout.keys:
+                        if rect.collidepoint(raw.pos):
+                            table.click_osk(row, col)
+                return []
+            for position, rect in layout.rows:
+                if rect.collidepoint(raw.pos):
+                    table.focus(position)
+            return []
         if state.pending is not None:
             if click and state.pending.kind == "text":
                 for row, col, rect in layout.keys:
@@ -532,14 +566,24 @@ def _draw_actions(
         ok = state.exit_code == 0
         status = "Done" if ok else f"Failed (exit {state.exit_code})"
         color = t.OK if ok else t.ERROR
+    if state.table is not None:
+        crumb += f" / {state.table.table.title or 'Table'}"
     _draw_header(pygame, surface, fonts, crumb, status, color)
     prompt = state.pending
     hints: str = state.mode
     if prompt is not None:
         hints = {"confirm": "ask_confirm", "choice": "ask_choice"}.get(prompt.kind, "edit")
-    _draw_footer(pygame, surface, fonts, _HINTS[hints])
+    if state.table is not None:
+        hints = "table"
+    footer = list(_HINTS[hints])
+    if running and prompt is None and state.table is None and state.browsable:
+        footer.insert(0, ("A", "Browse table"))
+    _draw_footer(pygame, surface, fonts, footer)
 
     top = t.HEADER_H + t.MARGIN
+    if state.table is not None:
+        _draw_table_view(pygame, surface, fonts, state.table, layout)
+        return
     if running:
         _draw_log(pygame, surface, fonts, state, pygame.Rect(
             t.MARGIN, top, width - 2 * t.MARGIN, height - t.FOOTER_H - t.MARGIN - top
@@ -678,12 +722,123 @@ def _draw_log(pygame: Any, surface: Any, fonts: _Fonts, state: ActionScreen, are
             surface.blit(font.render(line.text or " ", t.TEXT), (inner.x, y))
         elif line.kind == "title":
             surface.blit(font.render(line.text, t.TEXT), (inner.x - state.pan, y))
+        elif line.kind == "note":
+            surface.blit(font.render(line.text, t.MUTED), (inner.x - state.pan, y))
         elif line.kind in ("head", "row"):
             _draw_table_line(pygame, surface, font, line, inner.x - state.pan, y, line_h)
     surface.set_clip(previous_clip)
     if len(lines) > visible:
         track = pygame.Rect(area.right - 12, inner.y, 6, inner.height)
         _scrollbar(pygame, surface, track, visible, len(lines), max(0, end - visible))
+
+
+def _draw_table_view(
+    pygame: Any, surface: Any, fonts: _Fonts, view: TableScreen, layout: _Layout
+) -> None:
+    width, height = surface.get_size()
+    font, note = fonts.log, fonts.note
+    line_h = font.linesize + 6
+    x0, x1 = t.MARGIN, width - t.MARGIN
+    y = t.HEADER_H + 16
+
+    # Filter chips and counts
+    if view.filter_column is not None:
+        label = note.render(f"{view.filter_label}:", t.MUTED)
+        surface.blit(label, (x0, y + 4))
+        x = x0 + label.get_width() + 12
+        first = max(0, view.filter_index - 3)
+        for index in range(first, len(view.filter_values)):
+            value = view.filter_values[index]
+            chip = note.render(f"{value} {view.count_for(value)}", t.TEXT)
+            rect = pygame.Rect(x, y, chip.get_width() + 24, chip.get_height() + 10)
+            if rect.right > x1 - 200:
+                break
+            focused = index == view.filter_index
+            pygame.draw.rect(surface, t.ACCENT_DIM if focused else t.SURFACE, rect, border_radius=8)
+            if focused:
+                pygame.draw.rect(surface, t.ACCENT, rect, width=2, border_radius=8)
+            surface.blit(chip, (rect.x + 12, rect.y + 5))
+            x = rect.right + 8
+    count = note.render(f"{len(view.view)} of {view.total} rows", t.MUTED)
+    surface.blit(count, (x1 - count.get_width(), y + 4))
+    y += note.linesize + 16
+    if view.query:
+        surface.blit(note.render(f"Search: {view.query}   (B clears)", t.ACCENT), (x0, y))
+        y += note.linesize + 6
+    for name, prefix in zip(view.table.columns, view.prefixes, strict=False):
+        if prefix:
+            text = f"{name}: {shorten(prefix, 110)}..."
+            surface.blit(note.render(text, t.MUTED), (x0, y))
+            y += note.linesize + 2
+    y += 6
+
+    # Rows
+    detail_h = min(170, (height - y) * 3 // 10)
+    area = pygame.Rect(x0, y, x1 - x0 - 14, height - t.FOOTER_H - detail_h - y - 24)
+    visible = max(1, area.height // line_h - 1)  # one line goes to the header
+    measure = _measurer(font)
+    char_w = max(1, measure("0"))
+    sample = [view.row_cells(i) for i in range(min(len(view.view), 400))]
+    chars = [
+        max([len(name)] + [len(row[i]) for row in sample if i < len(row)])
+        for i, name in enumerate(view.table.columns)
+    ]
+    room = area.width // char_w - 2 * len(chars)
+    while sum(chars) > room and max(chars) > 8:
+        chars[chars.index(max(chars))] -= 1
+    columns = [c * char_w + 2 * char_w for c in chars]
+    right = [
+        bool(sample)
+        and all(i < len(r) and r[i].replace(",", "").replace(".", "").isdigit() for r in sample)
+        for i in range(len(chars))
+    ]
+
+    head = pygame.Rect(area.x, area.y, area.width, line_h)
+    pygame.draw.rect(surface, t.SURFACE_HI, head)
+    cx = area.x + 6
+    for name, w in zip(view.table.columns, columns, strict=True):
+        surface.blit(font.render(shorten(name, w // char_w), t.ACCENT), (cx, area.y + 3))
+        cx += w
+    top_row = max(0, min(view.cursor - visible // 2, len(view.view) - visible))
+    for offset in range(min(visible, len(view.view) - top_row)):
+        position = top_row + offset
+        rect = pygame.Rect(area.x, area.y + (offset + 1) * line_h, area.width, line_h)
+        layout.rows.append((position, rect))
+        focused = position == view.cursor
+        if focused:
+            pygame.draw.rect(surface, t.ACCENT_DIM, rect)
+        elif offset % 2:
+            pygame.draw.rect(surface, t.BG, rect)
+        cx = area.x + 6
+        for i, (cell, w) in enumerate(zip(view.row_cells(position), columns, strict=False)):
+            text = font.render(shorten(cell, w // char_w - 1), t.TEXT)
+            offset_x = w - 2 * char_w - text.get_width() if right[i] else 0
+            surface.blit(text, (cx + offset_x, rect.y + 3))
+            cx += w
+    if not view.view:
+        surface.blit(note.render("No rows match.", t.MUTED), (area.x + 6, area.y + line_h + 6))
+    if len(view.view) > visible:
+        track = pygame.Rect(area.right + 6, area.y + line_h, 6, area.height - line_h)
+        _scrollbar(pygame, surface, track, visible, len(view.view), top_row)
+
+    # Full selected row
+    panel = pygame.Rect(x0, height - t.FOOTER_H - detail_h - 8, x1 - x0, detail_h)
+    pygame.draw.rect(surface, t.SURFACE, panel, border_radius=t.RADIUS)
+    pygame.draw.rect(surface, t.BORDER, panel, width=1, border_radius=t.RADIUS)
+    row = view.current
+    if row is not None:
+        label_w = max(font.size(name)[0] for name in view.table.columns) + 20
+        py = panel.y + 10
+        for name, value in zip(view.table.columns, row, strict=False):
+            pieces = wrap(measure, value or "-", panel.width - label_w - 28)
+            if py + line_h * len(pieces) > panel.bottom - 4:
+                break
+            surface.blit(font.render(name, t.MUTED), (panel.x + 14, py))
+            for piece in pieces:
+                surface.blit(font.render(piece, t.TEXT), (panel.x + 14 + label_w, py))
+                py += line_h
+    if view.mode == "search":
+        _draw_text_editor(pygame, surface, fonts, "Search all columns", view.osk, False, "", layout)
 
 
 def _draw_table_line(

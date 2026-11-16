@@ -7,9 +7,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-from bifrost.gui.blocks import Block, Prompt, Text
+from bifrost.gui.blocks import Block, Prompt, Table, Text
 from bifrost.gui.inputs import Action, Event
+from bifrost.gui.logview import large_table
 from bifrost.gui.osk import OnScreenKeyboard
+from bifrost.gui.table_screen import TableScreen
 
 MAX_LOG_BLOCKS = 2000
 PAN_STEP = 80
@@ -66,6 +68,8 @@ class ActionScreen:
         self.choice = 0  # highlighted answer of a pending "choice" prompt
         self.osk = OnScreenKeyboard()  # answer editor of a pending "text" prompt
         self.pan = 0  # pixels the log is scrolled to the right
+        self.table: TableScreen | None = None  # the table browser, while one is open
+        self._tables_opened = 0
         self.exit_code: int | None = None
         self.opened: str | None = None  # a Link target for the app to open
         self.done = False  # leave this screen
@@ -83,12 +87,28 @@ class ActionScreen:
         return self._command
 
     @property
+    def wants_text(self) -> bool:
+        """Whether typed characters currently go into a text box."""
+        if self.table is not None:
+            return self.table.wants_text
+        return self.pending is not None and self.pending.kind == "text"
+
+    @property
+    def browsable(self) -> list[Table]:
+        """Tables in the output that are too long for the log and open in the browser."""
+        return [b for b in self.lines if isinstance(b, Table) and large_table(b)]
+
+    @property
     def busy(self) -> bool:
         return self.mode == "running"
 
     def handle(self, event: Event) -> None:
         action = event.action
-        if self.mode == "list":
+        if self.table is not None:
+            self.table.handle(event)
+            if self.table.done:
+                self.table = None
+        elif self.mode == "list":
             self._handle_list(action)
         elif self.mode == "confirm":
             if action in (Action.ACCEPT, Action.CONFIRM) and self._command is not None:
@@ -108,8 +128,15 @@ class ActionScreen:
                 self.pan += PAN_STEP
             elif action is Action.BACK:
                 self._leave_log()
+            elif action in (Action.ACCEPT, Action.CONFIRM) and self.browsable:
+                self._open_table()
             elif action in (Action.ACCEPT, Action.CONFIRM) and self.mode == "done":
                 self.mode = "list"
+
+    def _open_table(self) -> None:
+        tables = self.browsable
+        self.table = TableScreen(tables[self._tables_opened % len(tables)])
+        self._tables_opened += 1
 
     def _handle_list(self, action: Action) -> None:
         if action is Action.UP:
@@ -135,6 +162,8 @@ class ActionScreen:
         self.cancelled = False
         self.pending = None
         self.pan = 0
+        self.table = None
+        self._tables_opened = 0
         self._runner = self._start(command)
         self.mode = "running"
 

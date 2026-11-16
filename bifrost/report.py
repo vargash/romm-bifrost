@@ -60,6 +60,8 @@ class ReportTable:
 
 def plain(value: Any) -> str:
     """Text of a rich-markup string without its styling tags."""
+    if "[" not in str(value):  # nothing to strip; this is the common, hot path
+        return str(value)
     try:
         return Text.from_markup(str(value)).plain
     except Exception:  # malformed markup: show it as written
@@ -169,3 +171,8 @@ def confirm(question: str, *, default: bool = False) -> bool:
         )
         return answer.strip().lower() in ("y", "yes", "true", "1")
     return Confirm.ask(question, default=default)
+
+
+def row_limit(default: int = 25) -> int | None:
+    """How many rows of a long listing to print: a screenful for a terminal, all for a program."""
+    return None if _event_console is not None else default

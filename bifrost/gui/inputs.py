@@ -15,6 +15,9 @@ class Action(Enum):
     CONFIRM = auto()  # Enter key, Start button: accept, or commit while typing
     BACK = auto()  # B button, Escape
     BACKSPACE = auto()
+    PAGE_UP = auto()
+    PAGE_DOWN = auto()
+    FIND = auto()  # start a search
     TEXT = auto()  # a typed character, carried in Event.text
 
 

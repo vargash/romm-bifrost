@@ -221,7 +221,10 @@ move, A to select, B to go back, Start to confirm). The home screen leads to:
 - **Maintenance:** diagnostics, cache status/clear and library scan.
 
 Actions run the same `bifrost` commands you would type in a terminal. Their tables are drawn
-natively (aligned columns, long paths shortened in the middle, Left/Right to pan) and their questions
+natively (aligned columns, Left/Right to pan). Long tables (such as the sync preview, which lists
+every operation rather than the first 25) open in a browser with a filter on the status column,
+search across all columns, paging, the directory prefix shared by long paths factored out, and the
+full selected row shown below. Their questions
 (confirmations, conflict choices, text such as a token) appear as dialogs, with the on-screen
 keyboard for text. Commands that change files or services ask for confirmation first, and B cancels
 a running command.

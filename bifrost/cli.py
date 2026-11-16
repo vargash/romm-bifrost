@@ -58,7 +58,7 @@ from bifrost.preflight import (
     run_save_preflight,
     run_sync_preflight,
 )
-from bifrost.report import ReportTable, ask, confirm, is_interactive, make_console
+from bifrost.report import ReportTable, ask, confirm, is_interactive, make_console, row_limit
 from bifrost.save_sync import build_save_sync_preview, execute_save_sync_preview
 from bifrost.saves.profiles import PROFILES, find_compatible_profile, resolve_core_mapping
 from bifrost.symlink_manager import (
@@ -960,7 +960,7 @@ def gamelist(config_path: Path | None, apply: bool, no_cache: bool) -> None:
     if apply:
         details.add_column("Written")
 
-    max_rows = 25
+    max_rows = row_limit()
     for row in rows[:max_rows]:
         detail_values = [
             str(row["platform"]),
@@ -977,7 +977,7 @@ def gamelist(config_path: Path | None, apply: bool, no_cache: bool) -> None:
 
     if rows:
         console.print(details)
-        if len(rows) > max_rows:
+        if max_rows is not None and len(rows) > max_rows:
             console.print(
                 f"[yellow]Showing first {max_rows} platforms out of {len(rows)}.[/yellow]"
             )
@@ -1091,7 +1091,7 @@ def _print_sync_summary(
         "broken": 5, "missing-target": 6, "ok": 7, "skip": 8,
     }
     preview_results = sorted(results, key=lambda r: _SYNC_ACTION_PRIORITY.get(r.action, 9))
-    max_rows = 25
+    max_rows = row_limit()
     details = ReportTable(title="Sync Operation Preview")
     details.add_column("Category")
     details.add_column("Action")
@@ -1108,7 +1108,7 @@ def _print_sync_summary(
         )
     if results:
         console.print(details)
-        if len(results) > max_rows:
+        if max_rows is not None and len(results) > max_rows:
             console.print(
                 f"[yellow]Showing first {max_rows} operations out of {len(results)}.[/yellow]"
             )
@@ -1781,7 +1781,7 @@ def save_sync(
     _SAVE_ACTION_PRIORITY = {"conflict": 0, "download": 1, "upload": 2, "skip": 3}
     for operation in sorted(
         selected_operations, key=lambda o: _SAVE_ACTION_PRIORITY.get(o.action, 9)
-    )[:25]:
+    )[:row_limit()]:
         operations_table.add_row(
             operation.action,
             str(operation.rom_id),
@@ -1791,23 +1791,23 @@ def save_sync(
 
     if selected_operations:
         console.print(operations_table)
-        if len(selected_operations) > 25:
+        if row_limit() is not None and len(selected_operations) > 25:
             console.print("[yellow]Showing first 25 operations only.[/yellow]")
 
     if preview.skipped_paths:
         skipped = ReportTable(title="Unmapped Local Saves")
         skipped.add_column("Path")
-        for path in preview.skipped_paths[:25]:
+        for path in preview.skipped_paths[:row_limit()]:
             skipped.add_row(escape(str(path)))
         console.print(skipped)
-        if len(preview.skipped_paths) > 25:
+        if row_limit() is not None and len(preview.skipped_paths) > 25:
             console.print("[yellow]Showing first 25 unmapped saves only.[/yellow]")
 
     if preview.cross_core_warnings:
         console.print("[yellow]Cross-core save notices:[/yellow]")
-        for notice in preview.cross_core_warnings[:25]:
+        for notice in preview.cross_core_warnings[:row_limit()]:
             console.print(f"  [yellow]![/yellow] {notice}")
-        if len(preview.cross_core_warnings) > 25:
+        if row_limit() is not None and len(preview.cross_core_warnings) > 25:
             console.print("[yellow]Showing first 25 notices only.[/yellow]")
 
     if apply and execution is not None:
@@ -1823,11 +1823,11 @@ def save_sync(
         details.add_column("Action")
         details.add_column("Save")
         details.add_column("Result")
-        for action, file_name, result in execution.details[:25]:
+        for action, file_name, result in execution.details[:row_limit()]:
             details.add_row(action, escape(file_name), escape(result))
         if execution.details:
             console.print(details)
-            if len(execution.details) > 25:
+            if row_limit() is not None and len(execution.details) > 25:
                 console.print("[yellow]Showing first 25 execution rows only.[/yellow]")
 
         _cli_log.info(

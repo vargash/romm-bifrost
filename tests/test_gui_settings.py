@@ -213,7 +213,8 @@ def test_controller_buttons_and_stick_become_events(sdl) -> None:  # type: ignor
     assert press(sdl.CONTROLLER_BUTTON_B) == [Event(Action.BACK)]
     assert press(sdl.CONTROLLER_BUTTON_START) == [Event(Action.CONFIRM)]
     assert press(sdl.CONTROLLER_BUTTON_DPAD_UP) == [Event(Action.UP)]
-    assert press(sdl.CONTROLLER_BUTTON_X) == []
+    assert press(sdl.CONTROLLER_BUTTON_X) == [Event(Action.FIND)]
+    assert press(sdl.CONTROLLER_BUTTON_Y) == []
 
     assert not stick.active
     tilt = sdl.event.Event(sdl.CONTROLLERAXISMOTION, axis=sdl.CONTROLLER_AXIS_LEFTY, value=30000)
@@ -340,3 +341,48 @@ def test_action_screens_render_in_every_mode(sdl) -> None:  # type: ignore[no-un
     assert screen.mode == "done"
     app._draw(sdl, surface, fonts, screen, app._Layout())
     assert screen.pan == 0
+
+
+def test_table_browser_renders_filter_rows_detail_and_search(sdl) -> None:  # type: ignore[no-untyped-def]
+    from bifrost.gui import app
+    from bifrost.gui.actions_screen import ActionScreen, Command
+    from bifrost.gui.blocks import Block, Table
+
+    rows = [["asset", "create" if i % 5 == 0 else "ok", f"/home/u/media/x/g{i}.png"] for i in range(80)]
+
+    class Runner:
+        returncode: int | None = 0
+
+        def poll(self) -> list[Block]:
+            return [Table("Ops", ["Category", "Action", "Destination"], rows)]
+
+        def answer(self, prompt_id: int, answer: str) -> None:
+            pass
+
+        def cancel(self) -> None:
+            pass
+
+    surface = sdl.display.set_mode((1280, 720))
+    fonts = app._Fonts(
+        app.UiFont(sdl, 38), app.UiFont(sdl, 28), app.UiFont(sdl, 22), app.UiFont(sdl, 22, monospace=True)
+    )
+    screen = ActionScreen("Sync", (Command("Preview", "x", ("sync",)),), lambda c: Runner())
+    screen.handle(Event(Action.ACCEPT))
+    screen.tick()
+    assert screen.browsable
+    app._draw(sdl, surface, fonts, screen, app._Layout())  # inline, with the browse hint
+
+    screen.handle(Event(Action.ACCEPT))  # open the browser
+    assert screen.table is not None and screen.wants_text is False
+    layout = app._Layout()
+    app._draw(sdl, surface, fonts, screen, layout)
+    assert layout.rows
+
+    screen.handle(Event(Action.FIND))
+    assert screen.wants_text
+    layout = app._Layout()
+    app._draw(sdl, surface, fonts, screen, layout)
+    assert layout.keys
+    screen.handle(Event(Action.BACK))  # cancel the search
+    screen.handle(Event(Action.BACK))  # leave the browser
+    assert screen.table is None
