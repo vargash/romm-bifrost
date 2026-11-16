@@ -18,8 +18,10 @@ from bifrost.api.models import RomSummary
 from bifrost.config import AppConfig
 from bifrost.multidisc import extract_disc_number
 
-# Single-image systems whose folder ROMs are launched through the image inside.
-DEFAULT_INNER_FILE_PLATFORMS: frozenset[str] = frozenset({"ps2", "gc", "wii", "psp", "dreamcast"})
+# Systems whose folder ROMs are launched through the game file inside.
+DEFAULT_INNER_FILE_PLATFORMS: frozenset[str] = frozenset(
+    {"ps2", "gc", "wii", "psp", "dreamcast", "switch"}
+)
 
 # ES-DE systems that only list folder ROMs carrying a specific extension
 # (e.g. ps3 accepts "Game.ps3" but ignores "Game").
