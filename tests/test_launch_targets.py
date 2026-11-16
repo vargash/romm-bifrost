@@ -348,3 +348,11 @@ def test_scan_ignores_file_roms_and_unlisted_platforms(tmp_path: Path):
     ]
     scan = scan_inner_folders(config, roms, {2: "ps2", 9: "dos"})
     assert scan.handled_ids == frozenset()
+
+
+def test_switch_folder_links_the_game_file_and_ignores_update_and_dlc(tmp_path: Path):
+    folder = _folder_rom(tmp_path, ["Cuphead [0100A5C00D162000][v0].nsp"], "Cuphead", "switch")
+    (folder / "update").mkdir()
+    (folder / "dlc").mkdir()
+    entries = launch_entries("switch", "Cuphead", "", folder, DEFAULT_INNER_FILE_PLATFORMS)
+    assert [e.name for e in entries] == ["Cuphead [0100A5C00D162000][v0].nsp"]
