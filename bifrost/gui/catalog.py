@@ -94,6 +94,18 @@ def build_screens(start: Start) -> dict[str, ActionScreen]:
                     takes_config=False,
                 ),
                 Command(
+                    "Add GUI launcher to ES-DE",
+                    "A Bifrost entry in ES-DE that opens this window",
+                    ("gui", "install-launcher"),
+                    confirm=True,
+                ),
+                Command(
+                    "Remove GUI launcher",
+                    "Delete the Bifrost entry from ES-DE",
+                    ("gui", "uninstall-launcher"),
+                    confirm=True,
+                ),
+                Command(
                     "Install ES-DE hooks",
                     "Sync saves when games start and end",
                     ("esde-hooks", "install"),

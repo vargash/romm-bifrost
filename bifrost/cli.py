@@ -208,10 +208,17 @@ def config() -> None:
     """Configuration command group."""
 
 
-@main.command(name="gui", help="Open the settings window (mouse, keyboard or controller).")
+@main.group(
+    name="gui",
+    invoke_without_command=True,
+    help="Open the settings window (mouse, keyboard or controller).",
+)
 @click.option("--fullscreen", is_flag=True, help="Run fullscreen, e.g. when launched from ES-DE.")
 @config_path_option
-def gui(fullscreen: bool, config_path: Path | None) -> None:
+@click.pass_context
+def gui(ctx: click.Context, fullscreen: bool, config_path: Path | None) -> None:
+    if ctx.invoked_subcommand is not None:
+        return
     from bifrost.gui.app import pygame_available, run
 
     console = make_console()
@@ -223,6 +230,60 @@ def gui(fullscreen: bool, config_path: Path | None) -> None:
         raise SystemExit(EXIT_CONFIG_ERROR)
     loaded, resolved_path = load_config_or_exit(console, config_path)
     run(loaded, resolved_path, fullscreen=fullscreen)
+    raise SystemExit(EXIT_OK)
+
+
+_launcher_dir_option = click.option(
+    "--dir",
+    "directory",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Folder ES-DE lists launchers from (default: <esde.roms_path>/emulators).",
+)
+
+
+@gui.command(
+    name="install-launcher",
+    help="Add a Bifrost entry to ES-DE that opens this window fullscreen.",
+)
+@_launcher_dir_option
+@click.option("--bifrost-bin", type=str, default=None, help="Override path to the bifrost binary.")
+@config_path_option
+def gui_install_launcher(
+    directory: Path | None, bifrost_bin: str | None, config_path: Path | None
+) -> None:
+    from bifrost.gui import launcher
+
+    console = make_console()
+    config, _ = load_config_or_exit(console, config_path)
+    target = directory or launcher.default_directory(config)
+    try:
+        written = launcher.install(target, launcher.bifrost_command(bifrost_bin))
+    except launcher.LauncherError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise SystemExit(EXIT_CONFIG_ERROR) from exc
+    console.print(f"[green]written[/green]  {written}")
+    console.print(
+        "\nRestart ES-DE (or reload its game lists) and open the [bold]Bifrost[/bold] entry in "
+        "the emulators system. The GUI needs pygame: pipx inject romm-bifrost pygame"
+    )
+    raise SystemExit(EXIT_OK)
+
+
+@gui.command(name="uninstall-launcher", help="Remove the Bifrost entry from ES-DE.")
+@_launcher_dir_option
+@config_path_option
+def gui_uninstall_launcher(directory: Path | None, config_path: Path | None) -> None:
+    from bifrost.gui import launcher
+
+    console = make_console()
+    config, _ = load_config_or_exit(console, config_path)
+    try:
+        removed = launcher.remove(directory or launcher.default_directory(config))
+    except launcher.LauncherError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise SystemExit(EXIT_CONFIG_ERROR) from exc
+    console.print(f"[red]removed[/red]  {removed}" if removed else "Nothing to remove.")
     raise SystemExit(EXIT_OK)
 
 
@@ -2471,6 +2532,19 @@ def doctor(config_path: Path | None, write_log: bool) -> None:
             f"{system}: {len(names)} link(s) hidden by ES-DE",
             f"{sample}. Add their extensions to the system in es_systems.xml.",
         )
+
+    # ── 3c. GUI launcher ─────────────────────────────────────────────────
+    console.print("\n[bold]GUI launcher[/bold]")
+    from bifrost.gui import launcher as gui_launcher
+    from bifrost.gui.app import pygame_available
+
+    launcher_path = gui_launcher.default_directory(config) / gui_launcher.LAUNCHER_NAME
+    if not pygame_available():
+        _warn("pygame not installed", "Optional for 'bifrost gui': pipx inject romm-bifrost pygame")
+    elif gui_launcher.is_managed(launcher_path):
+        _ok("ES-DE launcher", str(launcher_path))
+    else:
+        _warn("ES-DE launcher not installed", "Run: bifrost gui install-launcher")
 
     # ── 4. Disk space ────────────────────────────────────────────────────
     console.print("\n[bold]Disk space[/bold]")

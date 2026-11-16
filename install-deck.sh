@@ -238,6 +238,17 @@ else
   warn "ES-DE hooks install failed — run 'bifrost esde-hooks install' manually"
 fi
 
+# ── GUI launcher (only with --with-gui) ───────────────────────────────────
+if [[ "$EXTRAS" == *gui* ]]; then
+  echo ""
+  info "Adding the Bifrost GUI entry to ES-DE..."
+  if bifrost gui install-launcher; then
+    success "GUI launcher installed — find 'Bifrost' in the emulators system"
+  else
+    warn "GUI launcher install failed — run 'bifrost gui install-launcher' manually"
+  fi
+fi
+
 # ── log directory ─────────────────────────────────────────────────────────
 mkdir -p "$LOG_DIR"
 

@@ -237,6 +237,20 @@ pipx inject romm-bifrost pygame      # or: pip install 'romm-bifrost[gui]'
 bifrost gui                          # add --fullscreen on a handheld
 ```
 
+### Opening it from ES-DE
+
+```bash
+bifrost gui install-launcher     # writes <esde.roms_path>/emulators/Bifrost.sh
+bifrost gui uninstall-launcher   # removes it again
+```
+
+The script starts `bifrost gui --fullscreen`, so Bifrost shows up as an entry in ES-DE's
+emulators system (the folder EmuDeck already lists `.sh` launchers from) and works with the
+controller in Game Mode. Use `--dir` to put it in another system's folder. A file named
+`Bifrost.sh` that Bifrost did not create is never overwritten or removed. `bifrost doctor` reports
+whether pygame and the launcher are in place, and `./install-deck.sh --with-gui` does both steps.
+The Services screen of the window can also add and remove it.
+
 ### Machine-readable output
 
 With `BIFROST_OUTPUT=jsonl` every command prints one JSON event per line instead of drawing tables,

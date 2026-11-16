@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,8 @@ from bifrost.gui.settings_screen import SettingsScreen
 from bifrost.gui.table_screen import TableScreen
 
 Screen = HomeScreen | SettingsScreen | ActionScreen
+
+os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")  # no banner on import
 
 STICK_DEADZONE = 0.6
 STICK_REPEAT_MS = 180
