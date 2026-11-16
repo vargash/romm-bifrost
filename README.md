@@ -209,7 +209,7 @@ bifrost save debug
 
 ## Settings window (optional)
 
-`bifrost gui` opens a window to browse and edit every config option with the mouse, keyboard or a
+`bifrost gui` opens a window with a home screen and a settings screen to browse and edit every config option with the mouse, keyboard or a
 controller (D-pad/stick to move, A to change, B to go back, Start to confirm). Changes are
 validated and saved as you make them. Text values use an on-screen keyboard, so no physical
 keyboard is needed on a handheld. The list of options is generated from the config models, so new

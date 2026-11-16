@@ -34,6 +34,7 @@ class SettingsScreen:
         self.section = 0
         self.row = 0
         self.error = ""
+        self.saved = False  # last change was written to disk
         self.buffer = ""
         self.osk_row = 0
         self.osk_col = 0
@@ -168,10 +169,12 @@ class SettingsScreen:
             updated, _ = set_config_value(self.config, setting.key, value)
         except ConfigError as exc:
             self.error = _short(str(exc))
+            self.saved = False
             return False
         self.config = updated
         self.error = ""
         self._save(updated)
+        self.saved = True
         return True
 
     # ── mouse helpers ────────────────────────────────────────────────────

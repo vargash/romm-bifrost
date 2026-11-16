@@ -251,11 +251,53 @@ def test_clipboard_text_is_one_clean_line(sdl, monkeypatch) -> None:  # type: ig
 
 
 def test_font_falls_back_for_glyphs_the_bundled_font_lacks(sdl) -> None:  # type: ignore[no-untyped-def]
-    from bifrost.gui import app
+    from bifrost.gui import app, theme
 
     font = app.UiFont(sdl, 24)
 
     assert font._pick("Zelda é ñ") is font._main
     if font._fallback is not None:  # system CJK font present
         assert font._pick("日本語") is font._fallback
-    assert font.render("日本語 ok", app.TEXT).get_width() > 0
+    assert font.render("日本語 ok", theme.TEXT).get_width() > 0
+
+
+def test_home_grid_navigation_and_opening() -> None:
+    from bifrost.gui.home import HomeScreen
+
+    home = HomeScreen()
+    _press(home, Action.LEFT, Action.UP)  # at the top-left corner: nothing moves
+    assert home.index == 0
+    _press(home, Action.RIGHT, Action.RIGHT, Action.RIGHT)  # stays on the first row
+    assert home.index == 2
+    _press(home, Action.DOWN)  # the second row only has two tiles, so column 3 is a dead end
+    assert home.index == 2
+    home.focus(0)
+    _press(home, Action.DOWN)
+    assert home.index == 3
+    home.focus(1)
+    _press(home, Action.ACCEPT)  # "sync" is not available yet
+    assert home.opened is None
+    home.focus(0)
+    _press(home, Action.CONFIRM)
+    assert home.opened == "settings"
+    _press(home, Action.BACK)
+    assert home.done
+
+
+def test_every_screen_renders_and_home_opens_settings(sdl, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    from bifrost.gui import app
+    from bifrost.gui.home import HomeScreen
+
+    surface = sdl.display.set_mode((1280, 720))
+    fonts = app._Fonts(app.UiFont(sdl, 38), app.UiFont(sdl, 28), app.UiFont(sdl, 22))
+    settings = _screen([])
+    screens = [HomeScreen(), settings]
+    _open(settings, "romm.client_token")
+    screens.append(settings)
+    for state in screens:
+        app._draw(sdl, surface, fonts, state, app._Layout())
+    settings.handle(Event(Action.ACCEPT))
+    assert settings.mode == "edit"
+    layout = app._Layout()
+    app._draw(sdl, surface, fonts, settings, layout)
+    assert layout.keys
