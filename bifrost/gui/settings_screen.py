@@ -8,14 +8,11 @@ from typing import Literal
 from bifrost.config import AppConfig, set_config_value
 from bifrost.errors import ConfigError
 from bifrost.gui.inputs import Action, Event
+from bifrost.gui.osk import OnScreenKeyboard
 from bifrost.gui.schema import Setting, build_settings, get_text
 
 Mode = Literal["sections", "rows", "edit"]
 
-OSK_LOWER = ("1234567890", "qwertyuiop", "asdfghjkl-", "zxcvbnm./_", ":,~@+=\\!?&")
-OSK_UPPER = ("1234567890", "QWERTYUIOP", "ASDFGHJKL-", "ZXCVBNM./_", ":,~@+=\\!?&")
-# Last row: shift, space, backspace, done, cancel.
-OSK_ACTIONS = ("shift", "space", "back", "done", "cancel")
 
 
 class SettingsScreen:
@@ -35,10 +32,7 @@ class SettingsScreen:
         self.row = 0
         self.error = ""
         self.saved = False  # last change was written to disk
-        self.buffer = ""
-        self.osk_row = 0
-        self.osk_col = 0
-        self.shift = False
+        self.osk = OnScreenKeyboard()
         self.done = False
 
     def restrict(self, section: str | None) -> None:
@@ -58,11 +52,6 @@ class SettingsScreen:
     @property
     def current(self) -> Setting:
         return self.rows[self.row]
-
-    @property
-    def osk_grid(self) -> tuple[tuple[str, ...], ...]:
-        letters = OSK_UPPER if self.shift else OSK_LOWER
-        return (*(tuple(row) for row in letters), OSK_ACTIONS)
 
     # ── input ────────────────────────────────────────────────────────────
     def handle(self, event: Event) -> None:
@@ -118,60 +107,23 @@ class SettingsScreen:
 
     def _start_edit(self, setting: Setting) -> None:
         self.mode, self.error = "edit", ""
-        self.buffer = "" if setting.kind == "secret" else get_text(self.config, setting)
-        self.osk_row = self.osk_col = 0
-        self.shift = False
+        self.osk.start("" if setting.kind == "secret" else get_text(self.config, setting))
 
     def _handle_edit(self, event: Event) -> None:
-        action = event.action
-        if action is Action.TEXT:
-            self.buffer += event.text
-        elif action is Action.BACKSPACE:
-            self.buffer = self.buffer[:-1]
-        elif action is Action.CONFIRM:
-            self._commit()
-        elif action is Action.BACK:
-            self.mode, self.error = "rows", ""
-        elif action is Action.ACCEPT:
-            self._press_osk()
-        elif action is Action.UP:
-            self.osk_row = (self.osk_row - 1) % len(self.osk_grid)
-            self._clamp_osk()
-        elif action is Action.DOWN:
-            self.osk_row = (self.osk_row + 1) % len(self.osk_grid)
-            self._clamp_osk()
-        elif action is Action.LEFT:
-            self.osk_col = (self.osk_col - 1) % len(self.osk_grid[self.osk_row])
-        elif action is Action.RIGHT:
-            self.osk_col = (self.osk_col + 1) % len(self.osk_grid[self.osk_row])
-
-    def _clamp_osk(self) -> None:
-        self.osk_col = min(self.osk_col, len(self.osk_grid[self.osk_row]) - 1)
+        self._finish_edit(self.osk.handle(event))
 
     def click_osk(self, row: int, col: int) -> None:
         """Mouse click on an on-screen keyboard key."""
-        if 0 <= row < len(self.osk_grid) and 0 <= col < len(self.osk_grid[row]):
-            self.osk_row, self.osk_col = row, col
-            self._press_osk()
+        self._finish_edit(self.osk.click(row, col))
 
-    def _press_osk(self) -> None:
-        key = self.osk_grid[self.osk_row][self.osk_col]
-        if self.osk_row == len(self.osk_grid) - 1:
-            if key == "shift":
-                self.shift = not self.shift
-            elif key == "space":
-                self.buffer += " "
-            elif key == "back":
-                self.buffer = self.buffer[:-1]
-            elif key == "done":
-                self._commit()
-            else:
-                self.mode, self.error = "rows", ""
-        else:
-            self.buffer += key
+    def _finish_edit(self, result: str | None) -> None:
+        if result == "commit":
+            self._commit()
+        elif result == "cancel":
+            self.mode, self.error = "rows", ""
 
     def _commit(self) -> None:
-        if self._apply(self.current, self.buffer):
+        if self._apply(self.current, self.osk.buffer):
             self.mode = "rows"
 
     def _apply(self, setting: Setting, value: str) -> bool:

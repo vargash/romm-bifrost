@@ -9,9 +9,12 @@ from typing import Any
 from bifrost.config import AppConfig, save_config
 from bifrost.gui import theme as t
 from bifrost.gui.actions_screen import ActionScreen, Command
+from bifrost.gui.blocks import Text
 from bifrost.gui.catalog import build_screens
 from bifrost.gui.home import HomeScreen
 from bifrost.gui.inputs import Action, Event
+from bifrost.gui.logview import layout_blocks, wrap
+from bifrost.gui.osk import OnScreenKeyboard
 from bifrost.gui.runner import CommandRunner, cli_argv
 from bifrost.gui.schema import display_text
 from bifrost.gui.settings_screen import SettingsScreen
@@ -36,8 +39,10 @@ _HINTS: dict[str, list[tuple[str, str]]] = {
     "edit": [("A", "Key · Enter"), ("Start", "Save · Enter"), ("B", "Cancel · Esc")],
     "list": [("A", "Run · Enter"), ("B", "Back · Esc")],
     "confirm": [("A", "Run · Enter"), ("B", "Cancel · Esc")],
-    "running": [("Up/Down", "Scroll"), ("B", "Cancel · Esc")],
-    "done": [("Up/Down", "Scroll"), ("B", "Back · Esc")],
+    "running": [("Up/Down", "Scroll"), ("< >", "Pan"), ("B", "Cancel · Esc")],
+    "done": [("Up/Down", "Scroll"), ("< >", "Pan"), ("B", "Back · Esc")],
+    "ask_confirm": [("A", "Yes · Enter"), ("B", "No · Esc")],
+    "ask_choice": [("< >", "Choose"), ("A", "Select · Enter"), ("B", "Default · Esc")],
 }
 
 
@@ -311,6 +316,12 @@ def _mouse(pygame: Any, raw: Any, state: Screen, layout: _Layout) -> list[Event]
                 return [Event(Action.ACCEPT)] if click else []
         return []
     if isinstance(state, ActionScreen):
+        if state.pending is not None:
+            if click and state.pending.kind == "text":
+                for row, col, rect in layout.keys:
+                    if rect.collidepoint(raw.pos):
+                        state.click_osk(row, col)
+            return []
         for index, rect in layout.rows:
             if rect.collidepoint(raw.pos):
                 state.focus_row(index)
@@ -522,13 +533,19 @@ def _draw_actions(
         status = "Done" if ok else f"Failed (exit {state.exit_code})"
         color = t.OK if ok else t.ERROR
     _draw_header(pygame, surface, fonts, crumb, status, color)
-    _draw_footer(pygame, surface, fonts, _HINTS[state.mode])
+    prompt = state.pending
+    hints: str = state.mode
+    if prompt is not None:
+        hints = {"confirm": "ask_confirm", "choice": "ask_choice"}.get(prompt.kind, "edit")
+    _draw_footer(pygame, surface, fonts, _HINTS[hints])
 
     top = t.HEADER_H + t.MARGIN
     if running:
         _draw_log(pygame, surface, fonts, state, pygame.Rect(
             t.MARGIN, top, width - 2 * t.MARGIN, height - t.FOOTER_H - t.MARGIN - top
         ))
+        if prompt is not None:
+            _draw_prompt(pygame, surface, fonts, state, layout)
         return
 
     area = pygame.Rect(t.MARGIN, top, width - 2 * t.MARGIN - 14, height - t.FOOTER_H - top - 20)
@@ -566,26 +583,78 @@ def _scrollbar(pygame: Any, surface: Any, track: Any, visible: int, total: int, 
     pygame.draw.rect(surface, t.FAINT, thumb, border_radius=3)
 
 
-def _draw_confirm(pygame: Any, surface: Any, fonts: _Fonts, label: str, detail: str) -> None:
-    width, height = surface.get_size()
-    shade = pygame.Surface((width, height), pygame.SRCALPHA)
+def _draw_dialog(
+    pygame: Any,
+    surface: Any,
+    fonts: _Fonts,
+    title: str,
+    body: list[str],
+    buttons: list[tuple[str, str]],
+    height: int = 250,
+) -> Any:
+    """Dimmed backdrop with a centred panel; returns the panel rect."""
+    width, full_height = surface.get_size()
+    shade = pygame.Surface((width, full_height), pygame.SRCALPHA)
     shade.fill((0, 0, 0, 150))
     surface.blit(shade, (0, 0))
-    panel = pygame.Rect(0, 0, min(760, width - 2 * t.MARGIN), 250)
-    panel.center = (width // 2, height // 2)
+    panel = pygame.Rect(0, 0, min(760, width - 2 * t.MARGIN), height)
+    panel.center = (width // 2, full_height // 2)
     pygame.draw.rect(surface, t.SURFACE, panel, border_radius=t.RADIUS + 2)
     pygame.draw.rect(surface, t.ACCENT, panel, width=2, border_radius=t.RADIUS + 2)
-    surface.blit(fonts.title.render("Run this?", t.TEXT), (panel.x + 28, panel.y + 24))
-    surface.blit(fonts.body.render(_fit_end(fonts.body, label, panel.width - 56), t.TEXT),
-                 (panel.x + 28, panel.y + 92))
-    surface.blit(fonts.note.render(_fit_end(fonts.note, detail, panel.width - 56), t.MUTED),
-                 (panel.x + 28, panel.y + 134))
-    x = panel.x + 28
-    y = panel.bottom - 36
-    x += _badge(pygame, surface, fonts.note, "A", x, y) + 8
-    x += surface.blit(fonts.note.render("Run", t.TEXT), (x, y - 12)).width + 36
-    x += _badge(pygame, surface, fonts.note, "B", x, y) + 8
-    surface.blit(fonts.note.render("Cancel", t.TEXT), (x, y - 12))
+    surface.blit(fonts.title.render(title, t.TEXT), (panel.x + 28, panel.y + 22))
+    y = panel.y + 88
+    for index, line in enumerate(body):
+        font = fonts.body if index == 0 else fonts.note
+        color = t.TEXT if index == 0 else t.MUTED
+        surface.blit(font.render(_fit_end(font, line, panel.width - 56), color), (panel.x + 28, y))
+        y += font.linesize + 6
+    x, cy = panel.x + 28, panel.bottom - 36
+    for badge, label in buttons:
+        x += _badge(pygame, surface, fonts.note, badge, x, cy) + 8
+        x += surface.blit(fonts.note.render(label, t.TEXT), (x, cy - 12)).width + 36
+    return panel
+
+
+def _draw_confirm(pygame: Any, surface: Any, fonts: _Fonts, label: str, detail: str) -> None:
+    _draw_dialog(
+        pygame, surface, fonts, "Run this?", [label, detail], [("A", "Run"), ("B", "Cancel")]
+    )
+
+
+def _draw_prompt(
+    pygame: Any, surface: Any, fonts: _Fonts, state: ActionScreen, layout: _Layout
+) -> None:
+    """The question the running command is waiting on."""
+    prompt = state.pending
+    if prompt is None:
+        return
+    measure = _measurer(fonts.body)
+    lines = wrap(measure, prompt.question, min(760, surface.get_width() - 2 * t.MARGIN) - 56)
+    if prompt.kind == "text":
+        _draw_text_editor(
+            pygame, surface, fonts, " ".join(lines), state.osk, prompt.secret, "", layout
+        )
+    elif prompt.kind == "confirm":
+        _draw_dialog(
+            pygame, surface, fonts, "Question", lines[:3], [("A", "Yes"), ("B", "No")], 260
+        )
+    else:
+        panel = _draw_dialog(pygame, surface, fonts, "Question", lines[:3], [("A", "Select")], 290)
+        x, y = panel.x + 28, panel.y + 170
+        for index, choice in enumerate(prompt.choices):
+            chip = fonts.body.render(choice, t.TEXT)
+            rect = pygame.Rect(x, y, chip.get_width() + 32, chip.get_height() + 12)
+            focused = index == state.choice
+            fill = t.ACCENT_DIM if focused else t.SURFACE_HI
+            pygame.draw.rect(surface, fill, rect, border_radius=8)
+            if focused:
+                pygame.draw.rect(surface, t.ACCENT, rect, width=2, border_radius=8)
+            surface.blit(chip, (rect.x + 16, rect.y + 6))
+            x = rect.right + 10
+
+
+def _measurer(font: UiFont) -> Any:
+    return lambda text: font.size(text)[0]
 
 
 def _draw_log(pygame: Any, surface: Any, fonts: _Fonts, state: ActionScreen, area: Any) -> None:
@@ -595,37 +664,40 @@ def _draw_log(pygame: Any, surface: Any, fonts: _Fonts, state: ActionScreen, are
     font = fonts.log
     line_h = font.linesize
     visible = max(1, inner.height // line_h)
-    wrapped: list[str] = []
-    for raw in list(state.lines)[-400:]:
-        wrapped.extend(_wrap(font, raw, inner.width - 12))
-    if not wrapped:
-        wrapped = ["Starting..."]
-    state.scroll = min(state.scroll, max(0, len(wrapped) - visible))
-    end = len(wrapped) - state.scroll
-    for position, text in enumerate(wrapped[max(0, end - visible) : end]):
-        surface.blit(font.render(text or " ", t.TEXT), (inner.x, inner.y + position * line_h))
-    if len(wrapped) > visible:
+    lines, widest = layout_blocks(list(state.lines)[-300:], _measurer(font), inner.width - 12)
+    if not lines:
+        lines = layout_blocks([Text("Starting...")], _measurer(font), inner.width)[0]
+    state.scroll = min(state.scroll, max(0, len(lines) - visible))
+    state.pan = min(state.pan, max(0, widest - inner.width))
+    end = len(lines) - state.scroll
+    previous_clip = surface.get_clip()
+    surface.set_clip(inner)
+    for position, line in enumerate(lines[max(0, end - visible) : end]):
+        y = inner.y + position * line_h
+        if line.kind == "text":
+            surface.blit(font.render(line.text or " ", t.TEXT), (inner.x, y))
+        elif line.kind == "title":
+            surface.blit(font.render(line.text, t.TEXT), (inner.x - state.pan, y))
+        elif line.kind in ("head", "row"):
+            _draw_table_line(pygame, surface, font, line, inner.x - state.pan, y, line_h)
+    surface.set_clip(previous_clip)
+    if len(lines) > visible:
         track = pygame.Rect(area.right - 12, inner.y, 6, inner.height)
-        _scrollbar(pygame, surface, track, visible, len(wrapped), max(0, end - visible))
+        _scrollbar(pygame, surface, track, visible, len(lines), max(0, end - visible))
 
 
-def _wrap(font: UiFont, text: str, width: int) -> list[str]:
-    """Split text into pieces that fit width, preferring to break at spaces."""
-    lines: list[str] = []
-    while text and font.size(text)[0] > width:
-        low, high = 1, len(text)
-        while low < high:  # largest prefix that fits
-            mid = (low + high + 1) // 2
-            if font.size(text[:mid])[0] <= width:
-                low = mid
-            else:
-                high = mid - 1
-        cut = text.rfind(" ", 0, low + 1)
-        cut = cut if cut > low // 2 else low
-        lines.append(text[:cut].rstrip())
-        text = text[cut:].lstrip(" ")
-    lines.append(text)
-    return lines
+def _draw_table_line(
+    pygame: Any, surface: Any, font: UiFont, line: Any, x: int, y: int, line_h: int
+) -> None:
+    if line.kind == "head" or line.alt:
+        band = pygame.Rect(x - 6, y, sum(line.widths), line_h)
+        pygame.draw.rect(surface, t.SURFACE_HI if line.kind == "head" else t.BG, band)
+    color = t.ACCENT if line.kind == "head" else t.TEXT
+    for cell, width, right in zip(line.cells, line.widths, line.right, strict=False):
+        text = font.render(cell, color)
+        offset = width - 18 - text.get_width() if right else 0
+        surface.blit(text, (x + offset, y))
+        x += width
 
 
 def _fit(font: UiFont, text: str, max_width: int) -> str:
@@ -649,9 +721,25 @@ def _fit_end(font: UiFont, text: str, max_width: int) -> str:
 def _draw_editor(
     pygame: Any, surface: Any, fonts: _Fonts, state: SettingsScreen, layout: _Layout
 ) -> None:
-    width, height = surface.get_size()
     layout.sections.clear()
     layout.rows.clear()
+    setting = state.current
+    secret = setting.kind == "secret"
+    _draw_text_editor(pygame, surface, fonts, setting.key, state.osk, secret, state.error, layout)
+
+
+def _draw_text_editor(
+    pygame: Any,
+    surface: Any,
+    fonts: _Fonts,
+    label: str,
+    osk: OnScreenKeyboard,
+    secret: bool,
+    error: str,
+    layout: _Layout,
+) -> None:
+    """Dimmed backdrop with the text box and on-screen keyboard."""
+    width, height = surface.get_size()
     shade = pygame.Surface((width, height), pygame.SRCALPHA)
     shade.fill((0, 0, 0, 150))
     surface.blit(shade, (0, 0))
@@ -659,8 +747,11 @@ def _draw_editor(
     panel.center = (width // 2, height // 2)
     pygame.draw.rect(surface, t.SURFACE, panel, border_radius=t.RADIUS + 2)
     pygame.draw.rect(surface, t.BORDER, panel, width=1, border_radius=t.RADIUS + 2)
-    surface.blit(fonts.note.render(state.current.key, t.MUTED), (panel.x + 24, panel.y + 18))
-    shown = "•" * len(state.buffer) if state.current.kind == "secret" else state.buffer
+    surface.blit(
+        fonts.note.render(_fit_end(fonts.note, label, panel.width - 48), t.MUTED),
+        (panel.x + 24, panel.y + 18),
+    )
+    shown = "•" * len(osk.buffer) if secret else osk.buffer
     box = pygame.Rect(panel.x + 24, panel.y + 52, panel.width - 48, 52)
     pygame.draw.rect(surface, t.BG, box, border_radius=t.RADIUS)
     pygame.draw.rect(surface, t.ACCENT, box, width=2, border_radius=t.RADIUS)
@@ -668,11 +759,11 @@ def _draw_editor(
     surface.blit(typed, (box.x + 14, box.y + (box.height - typed.get_height()) // 2))
     caret_x = box.x + 16 + typed.get_width()
     pygame.draw.rect(surface, t.TEXT, pygame.Rect(caret_x, box.y + 12, 2, box.height - 24))
-    if state.error:
-        message = fonts.note.render(_fit_end(fonts.note, state.error, box.width), t.ERROR)
+    if error:
+        message = fonts.note.render(_fit_end(fonts.note, error, box.width), t.ERROR)
         surface.blit(message, (box.x, box.bottom + 8))
 
-    grid = state.osk_grid
+    grid = osk.grid
     gap, key_h = 6, 50
     top = box.bottom + 44
     key_h = min(key_h, (panel.bottom - 24 - top - gap * (len(grid) - 1)) // len(grid))
@@ -682,11 +773,11 @@ def _draw_editor(
             x = panel.x + 24 + col_index * (key_w + gap)
             rect = pygame.Rect(x, top + row_index * (key_h + gap), key_w, key_h)
             layout.keys.append((row_index, col_index, rect))
-            focused = (row_index, col_index) == (state.osk_row, state.osk_col)
+            focused = (row_index, col_index) == (osk.row, osk.col)
             pygame.draw.rect(
                 surface, t.ACCENT_DIM if focused else t.SURFACE_HI, rect, border_radius=8
             )
             if focused:
                 pygame.draw.rect(surface, t.ACCENT, rect, width=2, border_radius=8)
-            label = fonts.body.render(key, t.TEXT)
-            surface.blit(label, label.get_rect(center=rect.center))
+            label_surface = fonts.body.render(key, t.TEXT)
+            surface.blit(label_surface, label_surface.get_rect(center=rect.center))

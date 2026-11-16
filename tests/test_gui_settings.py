@@ -113,13 +113,13 @@ def test_on_screen_keyboard_done_commits_and_cancel_discards() -> None:
     _open(screen, "esde.extras_path")
     _press(screen, Action.ACCEPT)
     _press(screen, Action.DOWN, Action.ACCEPT)  # "q"
-    last = len(screen.osk_grid) - 1
-    screen.click_osk(last, screen.osk_grid[last].index("done"))
+    last = len(screen.osk.grid) - 1
+    screen.click_osk(last, screen.osk.grid[last].index("done"))
     assert screen.config.esde.extras_path == "q"
 
     _press(screen, Action.ACCEPT)
     _type(screen, "zzz")
-    screen.click_osk(last, screen.osk_grid[last].index("cancel"))
+    screen.click_osk(last, screen.osk.grid[last].index("cancel"))
     assert screen.mode == "rows"
     assert screen.config.esde.extras_path == "q"
 
@@ -308,12 +308,17 @@ def test_every_screen_renders_and_home_opens_settings(sdl, tmp_path: Path) -> No
 def test_action_screens_render_in_every_mode(sdl) -> None:  # type: ignore[no-untyped-def]
     from bifrost.gui import app
     from bifrost.gui.actions_screen import ActionScreen, Command
+    from bifrost.gui.blocks import Block, Table, Text
 
     class Done:
         returncode: int | None = 1
 
-        def poll(self) -> list[str]:
-            return ["x" * 300, "second line", "", "tail"]
+        def poll(self) -> list[Block]:
+            table = Table("Preview", ["Path", "N"], [["/a/" + "very-long-name/" * 8, "12"]] * 3)
+            return [Text("x" * 300), Text("second line"), table, Text("tail")]
+
+        def answer(self, prompt_id: int, answer: str) -> None:
+            pass
 
         def cancel(self) -> None:
             pass
@@ -334,4 +339,4 @@ def test_action_screens_render_in_every_mode(sdl) -> None:  # type: ignore[no-un
     screen.tick()  # done, failed
     assert screen.mode == "done"
     app._draw(sdl, surface, fonts, screen, app._Layout())
-    assert app._wrap(fonts.note, "x" * 300, 400)[0] != "x" * 300
+    assert screen.pan == 0

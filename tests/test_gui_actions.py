@@ -8,6 +8,7 @@ from click.testing import CliRunner
 
 from bifrost.cli import main
 from bifrost.gui.actions_screen import ActionScreen, Command, Link
+from bifrost.gui.blocks import Block, Prompt, Table, Text, parse_line
 from bifrost.gui.catalog import build_screens
 from bifrost.gui.inputs import Action, Event
 from bifrost.gui.runner import CommandRunner, cli_argv
@@ -16,12 +17,16 @@ from bifrost.gui.runner import CommandRunner, cli_argv
 class FakeRunner:
     def __init__(self) -> None:
         self.returncode: int | None = None
-        self.pending: list[str] = []
+        self.pending: list[Block] = []
         self.cancelled = False
+        self.answers: list[tuple[int, str]] = []
 
-    def poll(self) -> list[str]:
+    def poll(self) -> list[Block]:
         out, self.pending = self.pending, []
         return out
+
+    def answer(self, prompt_id: int, answer: str) -> None:
+        self.answers.append((prompt_id, answer))
 
     def cancel(self) -> None:
         self.cancelled = True
@@ -53,9 +58,9 @@ def test_command_without_confirmation_runs_streams_and_finishes() -> None:
 
     _press(screen, Action.ACCEPT)
     assert screen.mode == "running" and screen.busy
-    runners[0].pending = ["one", "two"]
+    runners[0].pending = [Text("one"), Text("two")]
     assert screen.tick()
-    assert list(screen.lines) == ["one", "two"]
+    assert list(screen.lines) == [Text("one"), Text("two")]
     assert not screen.tick()  # nothing new
 
     runners[0].returncode = 0
@@ -85,7 +90,7 @@ def test_back_cancels_a_running_command_once() -> None:
     _press(screen, Action.BACK, Action.BACK)
 
     assert runners[0].cancelled and screen.cancelled
-    assert list(screen.lines).count("Cancelling...") == 1
+    assert list(screen.lines).count(Text("Cancelling...")) == 1
     screen.tick()
     assert screen.mode == "done"
 
@@ -114,14 +119,14 @@ def test_runner_streams_output_and_exit_code() -> None:
     runner = CommandRunner(
         [sys.executable, "-c", "import sys; print('\\x1b[31mred\\x1b[0m'); print('err', file=sys.stderr); sys.exit(3)"]
     )
-    lines: list[str] = []
+    lines: list[Block] = []
     deadline = time.monotonic() + 10
     while runner.returncode is None and time.monotonic() < deadline:
         lines += runner.poll()
         time.sleep(0.01)
 
     assert runner.returncode == 3
-    assert lines == ["red", "err"]
+    assert lines == [Text("red"), Text("err")]
 
 
 def test_runner_cancel_stops_the_process() -> None:
@@ -172,3 +177,89 @@ def test_catalog_links_point_to_known_screens() -> None:
     }
 
     assert targets <= {"settings"}
+
+
+def test_parse_line_understands_events_and_falls_back_to_text() -> None:
+    assert parse_line('{"type": "message", "text": "hi"}') == Text("hi")
+    assert parse_line('{"type": "table", "title": null, "columns": ["a"], "rows": [["1"]]}') == Table(
+        None, ["a"], [["1"]]
+    )
+    prompt = parse_line(
+        '{"type": "prompt", "id": 4, "kind": "choice", "question": "Pick",'
+        ' "choices": ["u", "d"], "default": "d", "secret": false}'
+    )
+    assert prompt == Prompt(4, "choice", "Pick", ["u", "d"], "d")
+    assert parse_line("Traceback (most recent call last):") == Text("Traceback (most recent call last):")
+    assert parse_line('{"type": "weird"}') == Text('{"type": "weird"}')
+    assert parse_line("{not json") == Text("{not json")
+
+
+def _ask(screen: ActionScreen, runner: FakeRunner, prompt: Prompt) -> None:
+    runner.pending = [prompt]
+    screen.tick()
+
+
+def test_confirm_prompt_is_answered_with_a_and_b() -> None:
+    runners: list[FakeRunner] = []
+    screen = _screen(runners)
+    _press(screen, Action.ACCEPT)
+    _ask(screen, runners[0], Prompt(1, "confirm", "Remove it?", ["yes", "no"], "no"))
+
+    assert screen.pending is not None
+    _press(screen, Action.ACCEPT)
+    assert runners[0].answers == [(1, "yes")]
+    assert screen.pending is None
+
+    _ask(screen, runners[0], Prompt(2, "confirm", "Again?", ["yes", "no"], "no"))
+    _press(screen, Action.BACK)
+    assert runners[0].answers[-1] == (2, "no")
+    assert screen.mode == "running"  # B answered the question, it did not cancel the command
+
+
+def test_choice_prompt_moves_and_selects() -> None:
+    runners: list[FakeRunner] = []
+    screen = _screen(runners)
+    _press(screen, Action.ACCEPT)
+    _ask(screen, runners[0], Prompt(7, "choice", "Resolve", ["u", "d", "s"], "u"))
+
+    _press(screen, Action.RIGHT, Action.RIGHT, Action.ACCEPT)
+
+    assert runners[0].answers == [(7, "s")]
+
+
+def test_text_prompt_uses_the_keyboard_and_hides_secrets_in_the_log() -> None:
+    runners: list[FakeRunner] = []
+    screen = _screen(runners)
+    _press(screen, Action.ACCEPT)
+    _ask(screen, runners[0], Prompt(3, "text", "Token", [], "", secret=True))
+
+    for char in "rmm_x":
+        screen.handle(Event(Action.TEXT, char))
+    _press(screen, Action.CONFIRM)
+
+    assert runners[0].answers == [(3, "rmm_x")]
+    assert Text("> Token  *****") in screen.lines
+
+
+def test_runner_round_trip_with_a_real_process() -> None:
+    script = (
+        "import json,sys\n"
+        "print(json.dumps({'type':'table','title':'T','columns':['a'],'rows':[['1']]}),flush=True)\n"
+        "print(json.dumps({'type':'prompt','id':1,'kind':'confirm','question':'Go?',"
+        "'choices':['yes','no'],'default':'no','secret':False}),flush=True)\n"
+        "reply=json.loads(sys.stdin.readline())\n"
+        "print(json.dumps({'type':'message','text':'got '+reply['answer']}),flush=True)\n"
+    )
+    runner = CommandRunner([sys.executable, "-c", script])
+    seen: list[Block] = []
+    deadline = time.monotonic() + 10
+    while runner.returncode is None and time.monotonic() < deadline:
+        for block in runner.poll():
+            seen.append(block)
+            if isinstance(block, Prompt):
+                runner.answer(block.id, "yes")
+        time.sleep(0.01)
+
+    assert runner.returncode == 0
+    assert seen[0] == Table("T", ["a"], [["1"]])
+    assert seen[-1] == Text("got yes")
