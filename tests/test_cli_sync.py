@@ -293,9 +293,9 @@ def test_sync_apply_orphan_strategy_remove_no_prompt(monkeypatch, tmp_path: Path
     )
 
     def fail_confirm(*_a, **_k):
-        raise AssertionError("Confirm.ask must not be called for strategy='remove'")
+        raise AssertionError("confirm must not be called for strategy='remove'")
 
-    monkeypatch.setattr(cli, "Confirm", SimpleNamespace(ask=fail_confirm))
+    monkeypatch.setattr(cli, "confirm", fail_confirm)
 
     runner = CliRunner()
     result = runner.invoke(cli.main, ["sync", "--config", str(config_path), "--apply"])
@@ -368,9 +368,9 @@ def test_sync_unsafe_orphan_headless_never_removed(monkeypatch, tmp_path: Path):
     )
 
     def fail_confirm(*_a, **_k):
-        raise AssertionError("Confirm.ask must not be called headlessly")
+        raise AssertionError("confirm must not be called headlessly")
 
-    monkeypatch.setattr(cli, "Confirm", SimpleNamespace(ask=fail_confirm))
+    monkeypatch.setattr(cli, "confirm", fail_confirm)
 
     runner = CliRunner()
     result = runner.invoke(cli.main, ["sync", "--config", str(config_path), "--apply"])

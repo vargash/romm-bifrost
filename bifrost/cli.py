@@ -14,15 +14,12 @@ from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, TypeVar, get_origin
+from typing import Any, TypeVar
 
 import click
-from pydantic import BaseModel
-from pydantic.fields import FieldInfo
 from rich.console import Console
+from rich.markup import escape
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
-from rich.prompt import Confirm, Prompt
-from rich.table import Table
 
 from bifrost import __version__ as _bifrost_version
 from bifrost.api.client import RommApiClient, exchange_pairing_code
@@ -38,8 +35,10 @@ from bifrost.config import (
     RommConfig,
     SyncConfig,
     default_config_path,
+    leaf_field_info,
     load_config,
     save_config,
+    set_config_value,
     unknown_config_keys,
 )
 from bifrost.errors import ApiError, AuthenticationError, ConfigError, NetworkError
@@ -59,6 +58,7 @@ from bifrost.preflight import (
     run_save_preflight,
     run_sync_preflight,
 )
+from bifrost.report import ReportTable, ask, confirm, is_interactive, make_console, row_limit
 from bifrost.save_sync import build_save_sync_preview, execute_save_sync_preview
 from bifrost.saves.profiles import PROFILES, find_compatible_profile, resolve_core_mapping
 from bifrost.symlink_manager import (
@@ -159,7 +159,7 @@ def no_cache_option(f: _F) -> _F:
 
 def _ask_text(prompt: str, default: str) -> str:
     """Prompt for text; rich types the answer as optional, an empty answer keeps the default."""
-    return Prompt.ask(prompt, default=default) or default
+    return ask(prompt, default=default) or default
 
 
 def load_config_or_exit(console: Console, config_path: Path | None) -> tuple[AppConfig, Path]:
@@ -208,6 +208,85 @@ def config() -> None:
     """Configuration command group."""
 
 
+@main.group(
+    name="gui",
+    invoke_without_command=True,
+    help="Open the settings window (mouse, keyboard or controller).",
+)
+@click.option("--fullscreen", is_flag=True, help="Run fullscreen, e.g. when launched from ES-DE.")
+@config_path_option
+@click.pass_context
+def gui(ctx: click.Context, fullscreen: bool, config_path: Path | None) -> None:
+    if ctx.invoked_subcommand is not None:
+        return
+    from bifrost.gui.app import pygame_available, run
+
+    console = make_console()
+    if not pygame_available():
+        console.print(
+            "[red]The GUI needs pygame.[/red] Install it with: "
+            "pipx inject romm-bifrost pygame  (or: pip install 'romm-bifrost[gui]')"
+        )
+        raise SystemExit(EXIT_CONFIG_ERROR)
+    loaded, resolved_path = load_config_or_exit(console, config_path)
+    run(loaded, resolved_path, fullscreen=fullscreen)
+    raise SystemExit(EXIT_OK)
+
+
+_launcher_dir_option = click.option(
+    "--dir",
+    "directory",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Folder ES-DE lists launchers from (default: <esde.roms_path>/emulators).",
+)
+
+
+@gui.command(
+    name="install-launcher",
+    help="Add a Bifrost entry to ES-DE that opens this window fullscreen.",
+)
+@_launcher_dir_option
+@click.option("--bifrost-bin", type=str, default=None, help="Override path to the bifrost binary.")
+@config_path_option
+def gui_install_launcher(
+    directory: Path | None, bifrost_bin: str | None, config_path: Path | None
+) -> None:
+    from bifrost.gui import launcher
+
+    console = make_console()
+    config, _ = load_config_or_exit(console, config_path)
+    target = directory or launcher.default_directory(config)
+    try:
+        written = launcher.install(target, launcher.bifrost_command(bifrost_bin))
+    except launcher.LauncherError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise SystemExit(EXIT_CONFIG_ERROR) from exc
+    console.print(f"[green]written[/green]  {written}")
+    console.print(
+        "\nRestart ES-DE (or reload its game lists) and open the [bold]Bifrost[/bold] entry in "
+        "the emulators system. The GUI needs pygame: pipx inject romm-bifrost pygame"
+    )
+    raise SystemExit(EXIT_OK)
+
+
+@gui.command(name="uninstall-launcher", help="Remove the Bifrost entry from ES-DE.")
+@_launcher_dir_option
+@config_path_option
+def gui_uninstall_launcher(directory: Path | None, config_path: Path | None) -> None:
+    from bifrost.gui import launcher
+
+    console = make_console()
+    config, _ = load_config_or_exit(console, config_path)
+    try:
+        removed = launcher.remove(directory or launcher.default_directory(config))
+    except launcher.LauncherError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise SystemExit(EXIT_CONFIG_ERROR) from exc
+    console.print(f"[red]removed[/red]  {removed}" if removed else "Nothing to remove.")
+    raise SystemExit(EXIT_OK)
+
+
 @main.group(name="cache", help="Manage the Bifrost API response cache.")
 def cache_group() -> None:
     """Cache management command group."""
@@ -226,7 +305,7 @@ def _format_age(age_seconds: float | None) -> str:
 @cache_group.command(name="status", help="Show age and item count for each cached collection.")
 @config_path_option
 def cache_status(config_path: Path | None) -> None:
-    console = Console()
+    console = make_console()
     resolved_path = config_path or default_config_path()
 
     try:
@@ -241,7 +320,7 @@ def cache_status(config_path: Path | None) -> None:
     if not cache_cfg.enabled:
         console.print("[yellow]Cache is disabled in config (cache.enabled = false).[/yellow]")
 
-    table = Table(title="Bifrost Cache Status")
+    table = ReportTable(title="Bifrost Cache Status")
     table.add_column("Key")
     table.add_column("Fetched at")
     table.add_column("Age")
@@ -279,7 +358,7 @@ def cache_status(config_path: Path | None) -> None:
     help="Invalidate only this key. Omit to invalidate all.",
 )
 def cache_invalidate(config_path: Path | None, key: str | None) -> None:
-    console = Console()
+    console = make_console()
     resolved_path = config_path or default_config_path()
 
     try:
@@ -350,7 +429,7 @@ def _resolve_setup_paths(
         default = str(getattr(getattr(base_config, section), field))
         flag_value = flag_values.get(key)
         if prompt:
-            resolved[key] = flag_value if flag_value is not None else Prompt.ask(
+            resolved[key] = flag_value if flag_value is not None else ask(
                 label, default=default
             )
         else:
@@ -426,13 +505,13 @@ def _collect_save_debug_rows(root: Path) -> tuple[list[dict[str, str]], list[dic
 def save_debug(config_path: Path | None, limit: int) -> None:
     """Show the local save path, folder counts and discovered files."""
 
-    console = Console()
+    console = make_console()
     config, resolved_path = load_config_or_exit(console, config_path)
 
     save_root = Path(config.emudeck.saves_path).expanduser()
     folder_rows, file_rows = _collect_save_debug_rows(save_root)
 
-    summary = Table(title="Bifrost Save Debug")
+    summary = ReportTable(title="Bifrost Save Debug")
     summary.add_column("Metric")
     summary.add_column("Value")
     summary.add_row("Config file", str(resolved_path))
@@ -444,7 +523,7 @@ def save_debug(config_path: Path | None, limit: int) -> None:
     console.print(summary)
 
     if folder_rows:
-        folders = Table(title="Top-Level Save Folders")
+        folders = ReportTable(title="Top-Level Save Folders")
         folders.add_column("Folder")
         folders.add_column("Path")
         folders.add_column("Files")
@@ -453,7 +532,7 @@ def save_debug(config_path: Path | None, limit: int) -> None:
         console.print(folders)
 
     if file_rows:
-        files = Table(title="Discovered Save Files")
+        files = ReportTable(title="Discovered Save Files")
         files.add_column("Path")
         files.add_column("Size")
         for row in file_rows[:limit]:
@@ -484,7 +563,7 @@ def config_migrate(config_path: Path | None) -> None:
     --update) where re-running the interactive setup wizard isn't wanted.
     """
 
-    console = Console()
+    console = make_console()
     loaded, resolved_path = load_config_or_exit(console, config_path)
     save_path = save_config(loaded, resolved_path)
     console.print(f"[green]Configuration migrated:[/green] {save_path}")
@@ -496,45 +575,23 @@ def config_migrate(config_path: Path | None) -> None:
 def config_show(config_path: Path | None) -> None:
     """Print loaded config values in a key/value table."""
 
-    console = Console()
+    console = make_console()
     loaded, resolved_path = load_config_or_exit(console, config_path)
 
     flattened: dict[str, str] = {}
     _flatten_config("", loaded.model_dump(mode="python"), flattened)
 
-    table = Table(title="Bifrost Config")
+    table = ReportTable(title="Bifrost Config")
     table.add_column("Key")
     table.add_column("Value")
     table.add_column("Description")
     table.add_row("config.path", str(resolved_path), "Path to the loaded config file.")
     for key in sorted(flattened):
-        field_info = _leaf_field_info(key.split("."))
+        field_info = leaf_field_info(key.split("."))
         description = field_info.description if field_info is not None else ""
         table.add_row(key, flattened[key], description or "")
     console.print(table)
     raise SystemExit(EXIT_OK)
-
-
-def _leaf_field_info(key_path: list[str]) -> FieldInfo | None:
-    """Return the declared pydantic FieldInfo of a dotted AppConfig field, or None.
-
-    Walks nested pydantic models (AppConfig -> SyncConfig -> ... ) following
-    key_path. Callers read .annotation (config set: decide how to parse a
-    plain string value, e.g. list[str] fields need comma-splitting) or
-    .description (config show: one-liner explanation of the field) off the
-    result.
-    """
-    current: Any = AppConfig
-    field_info: FieldInfo | None = None
-    for part in key_path:
-        if not (isinstance(current, type) and issubclass(current, BaseModel)):
-            return None
-        fields = current.model_fields
-        if part not in fields:
-            return None
-        field_info = fields[part]
-        current = field_info.annotation
-    return field_info
 
 
 @config.command(
@@ -558,53 +615,13 @@ def _leaf_field_info(key_path: list[str]) -> FieldInfo | None:
 def config_set(key: str, value: str, config_path: Path | None) -> None:
     """Set a config value and persist it to disk."""
 
-    console = Console()
+    console = make_console()
     loaded, resolved_path = load_config_or_exit(console, config_path)
 
-    key_path = [part for part in key.strip().split(".") if part]
-    if len(key_path) < 2:
-        console.print(
-            "[red]Configuration error:[/red] key must use dot notation (for example romm.url)."
-        )
-        raise SystemExit(EXIT_CONFIG_ERROR)
-
-    if key == "sync.core_mappings":
-        console.print(
-            "[red]Configuration error:[/red] sync.core_mappings is a list of structured "
-            "entries and can't be set with a plain comma-separated value. Use "
-            "'bifrost config add-core-mapping' / 'remove-core-mapping' instead."
-        )
-        raise SystemExit(EXIT_CONFIG_ERROR)
-
-    dumped = loaded.model_dump(mode="python")
-    cursor: Any = dumped
-    for part in key_path[:-1]:
-        if not isinstance(cursor, dict) or part not in cursor:
-            console.print(f"[red]Configuration error:[/red] Unknown key: {key}")
-            raise SystemExit(EXIT_CONFIG_ERROR)
-        cursor = cursor[part]
-
-    leaf = key_path[-1]
-    if not isinstance(cursor, dict) or leaf not in cursor:
-        console.print(f"[red]Configuration error:[/red] Unknown key: {key}")
-        raise SystemExit(EXIT_CONFIG_ERROR)
-
-    normalized_value: Any = value
-    leaf_field = _leaf_field_info(key_path)
-    if get_origin(leaf_field.annotation if leaf_field is not None else None) is list:
-        normalized_value = [item.strip() for item in value.split(",") if item.strip()]
-    if key == "romm.url":
-        normalized_value = value.strip().rstrip("/")
-    if key == "romm.client_token" and not value.startswith("rmm_"):
-        console.print("[red]Configuration error:[/red] RomM token must start with 'rmm_'.")
-        raise SystemExit(EXIT_CONFIG_ERROR)
-
-    cursor[leaf] = normalized_value
-
     try:
-        updated = AppConfig.model_validate(dumped)
-    except Exception as exc:
-        console.print(f"[red]Configuration error:[/red] Invalid value for {key}: {exc}")
+        updated, normalized_value = set_config_value(loaded, key, value)
+    except ConfigError as exc:
+        console.print(f"[red]Configuration error:[/red] {exc}")
         raise SystemExit(EXIT_CONFIG_ERROR) from exc
 
     save_path = save_config(updated, resolved_path)
@@ -641,15 +658,15 @@ def config_add_core_mapping(
 ) -> None:
     """Add or replace a sync.core_mappings entry."""
 
-    console = Console()
+    console = make_console()
     loaded, resolved_path = load_config_or_exit(console, config_path)
 
     if remote_core is None:
         known_platforms = sorted({p.platform for p in PROFILES if p.platform != "multi"})
         console.print(f"Known platforms: {', '.join(known_platforms)} (or any other slug).")
-        platform_ = platform_ or Prompt.ask("Platform this mapping applies to")
+        platform_ = platform_ or ask("Platform this mapping applies to")
 
-        remote_core = Prompt.ask(
+        remote_core = ask(
             "Remote/source core slug, as reported by RomM (e.g. mednafen_psx_hw)"
         )
         curated = find_compatible_profile(remote_core)
@@ -671,7 +688,7 @@ def config_add_core_mapping(
         )
         if candidates:
             console.print(f"Local profiles for platform {platform_!r}: {', '.join(candidates)}")
-        local_emulator = local_emulator or Prompt.ask(
+        local_emulator = local_emulator or ask(
             "Local emulator to route these saves to", default=default_target
         )
         if not local_emulator:
@@ -679,7 +696,7 @@ def config_add_core_mapping(
             raise SystemExit(EXIT_CONFIG_ERROR)
 
         if expected_size_bytes is None and curated is None:
-            size_answer = Prompt.ask(
+            size_answer = ask(
                 "Expected raw save size in bytes, to truncate downloads to (blank to skip)",
                 default="",
             )
@@ -726,7 +743,7 @@ def config_add_core_mapping(
             "You are responsible for confirming these save formats are truly "
             "compatible before it overwrites real saves."
         )
-        if not yes and not Confirm.ask("Add this unverified mapping anyway?", default=False):
+        if not yes and not confirm("Add this unverified mapping anyway?", default=False):
             console.print("Aborted — no changes made.")
             raise SystemExit(EXIT_OK)
 
@@ -773,7 +790,7 @@ def config_remove_core_mapping(
 ) -> None:
     """Remove matching sync.core_mappings entries."""
 
-    console = Console()
+    console = make_console()
     loaded, resolved_path = load_config_or_exit(console, config_path)
 
     remaining = [
@@ -802,10 +819,10 @@ def config_remove_core_mapping(
 def config_list_core_mappings(config_path: Path | None) -> None:
     """Show curated compatible_remote_cores alongside configured sync.core_mappings."""
 
-    console = Console()
+    console = make_console()
     loaded, _resolved_path = load_config_or_exit(console, config_path)
 
-    table = Table(title="Cross-Core Save Mappings")
+    table = ReportTable(title="Cross-Core Save Mappings")
     table.add_column("Source")
     table.add_column("Platform")
     table.add_column("Remote core")
@@ -856,7 +873,7 @@ def config_list_core_mappings(config_path: Path | None) -> None:
 def status(config_path: Path | None) -> None:
     """Validate current configuration and API reachability."""
 
-    console = Console()
+    console = make_console()
     config, resolved_path = load_config_or_exit(console, config_path)
 
     with (
@@ -866,7 +883,7 @@ def status(config_path: Path | None) -> None:
         heartbeat = client.heartbeat()
         stats = client.stats(include_platform_stats=False)
 
-    table = Table(title="Bifrost Status")
+    table = ReportTable(title="Bifrost Status")
     table.add_column("Check")
     table.add_column("Value")
     table.add_row("Config file", str(resolved_path))
@@ -890,7 +907,7 @@ def status(config_path: Path | None) -> None:
 def scan(config_path: Path | None) -> None:
     """Display a lightweight RomM anomaly report."""
 
-    console = Console()
+    console = make_console()
     config, _resolved_path = load_config_or_exit(console, config_path)
 
     with (
@@ -902,7 +919,7 @@ def scan(config_path: Path | None) -> None:
         missing_roms = client.roms_count(missing=True)
         duplicate_roms = client.roms_count(duplicate=True)
 
-    table = Table(title="Bifrost Scan")
+    table = ReportTable(title="Bifrost Scan")
     table.add_column("Check")
     table.add_column("Value")
     table.add_row("RomM URL", config.romm.url)
@@ -927,7 +944,7 @@ def scan(config_path: Path | None) -> None:
 def gamelist(config_path: Path | None, apply: bool, no_cache: bool) -> None:
     """Generate merge-safe gamelist.xml plans or files."""
 
-    console = Console()
+    console = make_console()
     config, _resolved_path = load_config_or_exit(console, config_path)
     rows: list[dict[str, Any]] = []
 
@@ -980,7 +997,7 @@ def gamelist(config_path: Path | None, apply: bool, no_cache: bool) -> None:
     total_written = sum(1 for row in rows if bool(row["written"]))
 
     mode_label = "apply" if apply else "dry-run"
-    summary = Table(title=f"Bifrost Gamelist ({mode_label})")
+    summary = ReportTable(title=f"Bifrost Gamelist ({mode_label})")
     summary.add_column("Metric")
     summary.add_column("Value")
     summary.add_row("Platforms", str(total_platforms))
@@ -993,7 +1010,7 @@ def gamelist(config_path: Path | None, apply: bool, no_cache: bool) -> None:
         summary.add_row("Files written", str(total_written))
     console.print(summary)
 
-    details = Table(title="Gamelist Platform Summary")
+    details = ReportTable(title="Gamelist Platform Summary")
     details.add_column("Platform")
     details.add_column("ROMs")
     details.add_column("New")
@@ -1004,7 +1021,7 @@ def gamelist(config_path: Path | None, apply: bool, no_cache: bool) -> None:
     if apply:
         details.add_column("Written")
 
-    max_rows = 25
+    max_rows = row_limit()
     for row in rows[:max_rows]:
         detail_values = [
             str(row["platform"]),
@@ -1021,7 +1038,7 @@ def gamelist(config_path: Path | None, apply: bool, no_cache: bool) -> None:
 
     if rows:
         console.print(details)
-        if len(rows) > max_rows:
+        if max_rows is not None and len(rows) > max_rows:
             console.print(
                 f"[yellow]Showing first {max_rows} platforms out of {len(rows)}.[/yellow]"
             )
@@ -1109,7 +1126,7 @@ def _print_sync_summary(
         if result.action == "error":
             error_by_category[category] = error_by_category.get(category, 0) + 1
 
-    summary = Table(title=f"Bifrost Sync ({mode_label})")
+    summary = ReportTable(title=f"Bifrost Sync ({mode_label})")
     summary.add_column("Metric")
     summary.add_column("Value")
     summary.add_row("Total operations", str(len(results)))
@@ -1135,8 +1152,8 @@ def _print_sync_summary(
         "broken": 5, "missing-target": 6, "ok": 7, "skip": 8,
     }
     preview_results = sorted(results, key=lambda r: _SYNC_ACTION_PRIORITY.get(r.action, 9))
-    max_rows = 25
-    details = Table(title="Sync Operation Preview")
+    max_rows = row_limit()
+    details = ReportTable(title="Sync Operation Preview")
     details.add_column("Category")
     details.add_column("Action")
     details.add_column("Destination")
@@ -1146,19 +1163,19 @@ def _print_sync_summary(
         details.add_row(
             result.operation.category,
             result.action,
-            str(result.operation.destination),
-            str(result.operation.target),
-            result.detail,
+            escape(str(result.operation.destination)),
+            escape(str(result.operation.target)),
+            escape(result.detail),
         )
     if results:
         console.print(details)
-        if len(results) > max_rows:
+        if max_rows is not None and len(results) > max_rows:
             console.print(
                 f"[yellow]Showing first {max_rows} operations out of {len(results)}.[/yellow]"
             )
 
     if error_by_category:
-        error_table = Table(title="Sync Errors by Category")
+        error_table = ReportTable(title="Sync Errors by Category")
         error_table.add_column("Category")
         error_table.add_column("Errors")
         for category in sorted(error_by_category):
@@ -1220,9 +1237,9 @@ def sync(
 ) -> None:
     """Create a dry-run plan or apply symlink operations."""
 
-    console = Console()
+    console = make_console()
     _sync_log = logging.getLogger("bifrost.cli.sync")
-    is_interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    interactive = is_interactive()
 
     if incremental and check_stale:
         console.print("[red]--incremental and --check-stale are mutually exclusive.[/red]")
@@ -1454,9 +1471,9 @@ def sync(
             to_remove = [OrphanRemovalOperation(destination=o.path) for o in safe_orphans]
         elif strategy == "remove":
             to_remove = [OrphanRemovalOperation(destination=o.path) for o in safe_orphans]
-        elif is_interactive:  # strategy == "ask" (or unrecognized -> safest, treat as ask)
+        elif interactive:  # strategy == "ask" (or unrecognized -> safest, treat as ask)
             for o in safe_orphans:
-                if Confirm.ask(
+                if confirm(
                     f"  Remove orphan platform folder [bold]{o.path}[/bold]?", default=False
                 ):
                     to_remove.append(OrphanRemovalOperation(destination=o.path))
@@ -1470,13 +1487,13 @@ def sync(
     # removed automatically, regardless of strategy. Interactively, review contents
     # and let the user explicitly override on a per-folder basis.
     if unsafe_orphans and should_prune and apply:
-        if is_interactive:
+        if interactive:
             for o in unsafe_orphans:
                 contents = list_orphan_folder_contents(o.path, nas_root)
                 preview = ", ".join(contents[:5])
                 if len(contents) > 5:
                     preview += f", … (+{len(contents) - 5} more)"
-                if Confirm.ask(
+                if confirm(
                     f"  Orphan folder [bold]{o.path}[/bold] contains real content "
                     f"({preview}). Remove anyway?",
                     default=False,
@@ -1620,7 +1637,7 @@ def save_sync(
     if rom_path:
         rom_path = re.sub(r"\\(.)", r"\1", rom_path)
 
-    console = Console()
+    console = make_console()
     setup_file_logging()
     _cli_log = logging.getLogger("bifrost.cli.save_sync")
 
@@ -1629,11 +1646,11 @@ def save_sync(
     if apply:
         _abort_on_preflight(run_save_preflight(config), console)
 
-    is_interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    interactive = is_interactive()
     _cli_log.info(
         "save sync started: apply=%s interactive=%s filters=%s on_event=%s",
         apply,
-        is_interactive,
+        interactive,
         list(only_files),
         on_event,
     )
@@ -1718,7 +1735,7 @@ def save_sync(
                         for op in preview.operations
                         if op.action == "conflict"
                     }
-                elif apply and is_interactive and config.sync.conflict_strategy == "ask":
+                elif apply and interactive and config.sync.conflict_strategy == "ask":
                     conflict_ops = [op for op in preview.operations if op.action == "conflict"]
                     if conflict_ops:
                         console.print(
@@ -1728,7 +1745,7 @@ def save_sync(
                         console.print(
                             f"  [bold]{op.file_name}[/bold] (rom_id={op.rom_id}): {op.reason}"
                         )
-                        choice = Prompt.ask(
+                        choice = ask(
                             "  Resolve as [u]pload (local wins),"
                             " [d]ownload (server wins), or [s]kip?",
                             choices=["u", "d", "s"],
@@ -1749,7 +1766,7 @@ def save_sync(
                                 client,
                                 preview,
                                 file_filters=effective_filters if effective_filters else None,
-                                is_interactive=is_interactive,
+                                is_interactive=interactive,
                                 conflict_overrides=conflict_overrides or None,
                             )
                     except SaveSyncLockError as exc:
@@ -1797,7 +1814,7 @@ def save_sync(
         ]
 
     conflict_count = sum(1 for op in selected_operations if op.action == "conflict")
-    summary = Table(title="Bifrost Save Sync (preview)")
+    summary = ReportTable(title="Bifrost Save Sync (preview)")
     summary.add_column("Metric")
     summary.add_column("Value")
     summary.add_row("Config file", str(resolved_path))
@@ -1817,7 +1834,7 @@ def save_sync(
         summary.add_row("Mode", "forced resync (server negotiate bypassed)")
     console.print(summary)
 
-    operations_table = Table(title="Sync Operations")
+    operations_table = ReportTable(title="Sync Operations")
     operations_table.add_column("Action")
     operations_table.add_column("ROM")
     operations_table.add_column("Save")
@@ -1825,37 +1842,37 @@ def save_sync(
     _SAVE_ACTION_PRIORITY = {"conflict": 0, "download": 1, "upload": 2, "skip": 3}
     for operation in sorted(
         selected_operations, key=lambda o: _SAVE_ACTION_PRIORITY.get(o.action, 9)
-    )[:25]:
+    )[:row_limit()]:
         operations_table.add_row(
             operation.action,
             str(operation.rom_id),
-            operation.file_name,
-            operation.reason,
+            escape(operation.file_name),
+            escape(operation.reason),
         )
 
     if selected_operations:
         console.print(operations_table)
-        if len(selected_operations) > 25:
+        if row_limit() is not None and len(selected_operations) > 25:
             console.print("[yellow]Showing first 25 operations only.[/yellow]")
 
     if preview.skipped_paths:
-        skipped = Table(title="Unmapped Local Saves")
+        skipped = ReportTable(title="Unmapped Local Saves")
         skipped.add_column("Path")
-        for path in preview.skipped_paths[:25]:
-            skipped.add_row(str(path))
+        for path in preview.skipped_paths[:row_limit()]:
+            skipped.add_row(escape(str(path)))
         console.print(skipped)
-        if len(preview.skipped_paths) > 25:
+        if row_limit() is not None and len(preview.skipped_paths) > 25:
             console.print("[yellow]Showing first 25 unmapped saves only.[/yellow]")
 
     if preview.cross_core_warnings:
         console.print("[yellow]Cross-core save notices:[/yellow]")
-        for notice in preview.cross_core_warnings[:25]:
+        for notice in preview.cross_core_warnings[:row_limit()]:
             console.print(f"  [yellow]![/yellow] {notice}")
-        if len(preview.cross_core_warnings) > 25:
+        if row_limit() is not None and len(preview.cross_core_warnings) > 25:
             console.print("[yellow]Showing first 25 notices only.[/yellow]")
 
     if apply and execution is not None:
-        result_table = Table(title="Save Sync Execution")
+        result_table = ReportTable(title="Save Sync Execution")
         result_table.add_column("Metric")
         result_table.add_column("Value")
         result_table.add_row("Executed", str(execution.executed))
@@ -1863,15 +1880,15 @@ def save_sync(
         result_table.add_row("Skipped", str(execution.skipped))
         console.print(result_table)
 
-        details = Table(title="Execution Details")
+        details = ReportTable(title="Execution Details")
         details.add_column("Action")
         details.add_column("Save")
         details.add_column("Result")
-        for action, file_name, result in execution.details[:25]:
-            details.add_row(action, file_name, result)
+        for action, file_name, result in execution.details[:row_limit()]:
+            details.add_row(action, escape(file_name), escape(result))
         if execution.details:
             console.print(details)
-            if len(execution.details) > 25:
+            if row_limit() is not None and len(execution.details) > 25:
                 console.print("[yellow]Showing first 25 execution rows only.[/yellow]")
 
         _cli_log.info(
@@ -1906,7 +1923,7 @@ def save_sync(
 def save_untrack(save_id: int, config_path: Path | None, device_id: str | None) -> None:
     """Mark a save as untracked for this device via POST /api/saves/{id}/untrack."""
 
-    console = Console()
+    console = make_console()
     config, _resolved_path = load_config_or_exit(console, config_path)
 
     resolved_device_id = (device_id or config.romm.device_id).strip()
@@ -2014,7 +2031,7 @@ def _enroll_device(
     )
     save_config(updated_config, resolved_path)
 
-    table = Table(title="Bifrost Device Enrollment")
+    table = ReportTable(title="Bifrost Device Enrollment")
     table.add_column("Field")
     table.add_column("Value")
     table.add_row("Config file", str(resolved_path))
@@ -2097,7 +2114,7 @@ def device_enroll(
 ) -> None:
     """Register this machine in RomM and persist the returned device ID."""
 
-    console = Console()
+    console = make_console()
     config, resolved_path = load_config_or_exit(console, config_path)
 
     _enroll_device(
@@ -2194,7 +2211,7 @@ def setup(
 ) -> None:
     """Run setup using wizard defaults or CLI options."""
 
-    console = Console()
+    console = make_console()
     resolved_path = config_path or default_config_path()
 
     existing_config: AppConfig | None = None
@@ -2232,11 +2249,11 @@ def setup(
 
     if use_interactive_wizard:
         console.print("[bold cyan]Bifrost Setup[/bold cyan]")
-        url_value = Prompt.ask("RomM URL", default=default_url).strip().rstrip("/")
+        url_value = ask("RomM URL", default=default_url).strip().rstrip("/")
 
-        use_pairing = Confirm.ask("Use Device Pairing code", default=False)
+        use_pairing = confirm("Use Device Pairing code", default=False)
         if use_pairing:
-            code_value = Prompt.ask("RomM Pairing Code (8 digits)").strip()
+            code_value = ask("RomM Pairing Code (8 digits)").strip()
             if not PAIRING_CODE_PATTERN.fullmatch(code_value):
                 console.print(
                     "[red]Configuration error:[/red] Pairing code must be 8 alphanumeric"
@@ -2254,16 +2271,16 @@ def setup(
             existing_token = (
                 existing_config.romm.client_token if existing_config is not None else ""
             )
-            keep_existing_token = bool(existing_token) and Confirm.ask(
+            keep_existing_token = bool(existing_token) and confirm(
                 "Keep existing RomM Client Token",
                 default=True,
             )
             if keep_existing_token:
                 token_value = existing_token
             else:
-                token_value = Prompt.ask("RomM Client Token", password=True).strip()
+                token_value = ask("RomM Client Token", password=True).strip()
 
-        should_prompt_paths = Confirm.ask(
+        should_prompt_paths = confirm(
             "Update NAS/ES-DE/EmuDeck paths",
             default=existing_config is None,
         )
@@ -2271,7 +2288,7 @@ def setup(
             base_config, prompt=should_prompt_paths, flag_values={}
         )
 
-        save_sync_enabled_value = Confirm.ask(
+        save_sync_enabled_value = confirm(
             "Configure save sync with RomM",
             default=base_config.sync.save_sync_enabled,
         )
@@ -2287,7 +2304,7 @@ def setup(
             raise SystemExit(EXIT_CONFIG_ERROR)
 
         if pair:
-            code_value = (pair_code or Prompt.ask("RomM Pairing Code (8 digits)")).strip()
+            code_value = (pair_code or ask("RomM Pairing Code (8 digits)")).strip()
             if not PAIRING_CODE_PATTERN.fullmatch(code_value):
                 console.print(
                     "[red]Configuration error:[/red] Pairing code must be 8 alphanumeric"
@@ -2304,7 +2321,7 @@ def setup(
         else:
             token_value = (
                 client_token
-                or Prompt.ask(
+                or ask(
                     "RomM Client Token",
                     password=True,
                 )
@@ -2385,7 +2402,7 @@ def setup(
 
     if not config.romm.device_id:
         if use_interactive_wizard:
-            should_enroll = Confirm.ask(
+            should_enroll = confirm(
                 "Enroll this device with RomM now (required for save sync)",
                 default=True,
             )
@@ -2429,7 +2446,7 @@ def doctor(config_path: Path | None, write_log: bool) -> None:
 
     from bifrost.logging_setup import _log_dir, setup_file_logging
 
-    console = Console()
+    console = make_console()
     resolved_path = config_path or default_config_path()
     has_errors = False
 
@@ -2516,6 +2533,19 @@ def doctor(config_path: Path | None, write_log: bool) -> None:
             f"{sample}. Add their extensions to the system in es_systems.xml.",
         )
 
+    # ── 3c. GUI launcher ─────────────────────────────────────────────────
+    console.print("\n[bold]GUI launcher[/bold]")
+    from bifrost.gui import launcher as gui_launcher
+    from bifrost.gui.app import pygame_available
+
+    launcher_path = gui_launcher.default_directory(config) / gui_launcher.LAUNCHER_NAME
+    if not pygame_available():
+        _warn("pygame not installed", "Optional for 'bifrost gui': pipx inject romm-bifrost pygame")
+    elif gui_launcher.is_managed(launcher_path):
+        _ok("ES-DE launcher", str(launcher_path))
+    else:
+        _warn("ES-DE launcher not installed", "Run: bifrost gui install-launcher")
+
     # ── 4. Disk space ────────────────────────────────────────────────────
     console.print("\n[bold]Disk space[/bold]")
     try:
@@ -2598,7 +2628,7 @@ def watch_saves(config_path: Path | None) -> None:
     logging.getLogger("bifrost.cli.save_watch").info(
         "bifrost save-watch starting, version=%s", _bifrost_version
     )
-    console = Console()
+    console = make_console()
     cfg, _resolved_path = load_config_or_exit(console, config_path)
 
     saves_path = Path(cfg.emudeck.saves_path).expanduser()
@@ -2740,7 +2770,7 @@ def systemd_install(
 ) -> None:
     import subprocess
 
-    console = Console()
+    console = make_console()
     src_dir = _systemd_data_dir()
     dst_dir = _systemd_user_dir()
 
@@ -2776,7 +2806,7 @@ def systemd_install(
 
         if nas_mount_unit:
             console.print(f"[green]Detected NAS mount unit:[/green] {nas_mount_unit}")
-        elif sys.stdin.isatty():
+        elif is_interactive():
             console.print(
                 "[yellow]Could not auto-detect NAS mount unit.[/yellow]\n"
                 "  Service files will use network-online.target only.\n"
@@ -2929,8 +2959,8 @@ def systemd_install(
 def systemd_status() -> None:
     import subprocess
 
-    console = Console()
-    table = Table(title="Bifrost Systemd Units")
+    console = make_console()
+    table = ReportTable(title="Bifrost Systemd Units")
     table.add_column("Unit")
     table.add_column("Loaded")
     table.add_column("Active")
@@ -2973,11 +3003,11 @@ def systemd_status() -> None:
 def systemd_uninstall(yes: bool) -> None:
     import subprocess
 
-    console = Console()
+    console = make_console()
     dst_dir = _systemd_user_dir()
 
     if not yes:
-        if not Confirm.ask("This will stop and remove all Bifrost systemd units. Continue?"):
+        if not confirm("This will stop and remove all Bifrost systemd units. Continue?"):
             console.print("Aborted.")
             raise SystemExit(EXIT_OK)
 
@@ -3087,7 +3117,7 @@ def esde_hooks_install(
     bifrost_bin: str | None,
     dry_run: bool,
 ) -> None:
-    console = Console()
+    console = make_console()
     dst_root = scripts_path or _esde_scripts_dir()
 
     resolved_bin = bifrost_bin or shutil.which("bifrost") or (sys.executable + " -m bifrost")
@@ -3129,10 +3159,10 @@ def esde_hooks_install(
     help="Override ES-DE scripts root (default: ~/ES-DE/scripts/).",
 )
 def esde_hooks_status(scripts_path: Path | None) -> None:
-    console = Console()
+    console = make_console()
     dst_root = scripts_path or _esde_scripts_dir()
 
-    table = Table(title="Bifrost ES-DE Hooks")
+    table = ReportTable(title="Bifrost ES-DE Hooks")
     table.add_column("Event")
     table.add_column("Script")
     table.add_column("Exists")
@@ -3167,11 +3197,11 @@ def esde_hooks_status(scripts_path: Path | None) -> None:
 )
 @click.option("--yes", is_flag=True, help="Skip confirmation prompt.")
 def esde_hooks_uninstall(scripts_path: Path | None, yes: bool) -> None:
-    console = Console()
+    console = make_console()
     dst_root = scripts_path or _esde_scripts_dir()
 
     if not yes:
-        if not Confirm.ask("Remove all Bifrost ES-DE event scripts?"):
+        if not confirm("Remove all Bifrost ES-DE event scripts?"):
             console.print("Aborted.")
             raise SystemExit(EXIT_OK)
 

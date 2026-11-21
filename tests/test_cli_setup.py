@@ -414,8 +414,8 @@ def test_setup_wizard_reuses_existing_defaults(
     def fake_prompt(_message: str, default: str | None = None, **_: Any) -> str:
         return default or ""
 
-    monkeypatch.setattr("bifrost.cli.Confirm.ask", fake_confirm)
-    monkeypatch.setattr("bifrost.cli.Prompt.ask", fake_prompt)
+    monkeypatch.setattr("bifrost.cli.confirm", fake_confirm)
+    monkeypatch.setattr("bifrost.cli.ask", fake_prompt)
 
     runner = CliRunner()
     result = runner.invoke(main, ["setup", "--config", str(config_file)])
@@ -473,8 +473,8 @@ def test_setup_wizard_can_change_selected_values(
             return "/new/library"
         return default or ""
 
-    monkeypatch.setattr("bifrost.cli.Confirm.ask", fake_confirm)
-    monkeypatch.setattr("bifrost.cli.Prompt.ask", fake_prompt)
+    monkeypatch.setattr("bifrost.cli.confirm", fake_confirm)
+    monkeypatch.setattr("bifrost.cli.ask", fake_prompt)
 
     runner = CliRunner()
     result = runner.invoke(main, ["setup", "--config", str(config_file)])
@@ -529,8 +529,8 @@ def test_setup_wizard_enrolls_device_when_confirmed(
             return "rmm_test_token"
         return default or ""
 
-    monkeypatch.setattr("bifrost.cli.Confirm.ask", fake_confirm)
-    monkeypatch.setattr("bifrost.cli.Prompt.ask", fake_prompt)
+    monkeypatch.setattr("bifrost.cli.confirm", fake_confirm)
+    monkeypatch.setattr("bifrost.cli.ask", fake_prompt)
 
     runner = CliRunner()
     result = runner.invoke(main, ["setup", "--config", str(config_file)])
@@ -571,7 +571,7 @@ def test_setup_flag_mode_enrolls_device_with_flag(
     def fake_prompt(_message: str, default: str | None = None, **_: Any) -> str:
         return default or ""
 
-    monkeypatch.setattr("bifrost.cli.Prompt.ask", fake_prompt)
+    monkeypatch.setattr("bifrost.cli.ask", fake_prompt)
 
     runner = CliRunner()
     result = runner.invoke(

@@ -207,6 +207,63 @@ bifrost save debug
 
 ---
 
+## Settings window (optional)
+
+`bifrost gui` opens a window you can drive with the mouse, keyboard or a controller (D-pad/stick to
+move, A to select, B to go back, Start to confirm). The home screen leads to:
+
+- **Settings:** browse and edit every config option. Changes are validated and saved as you make
+  them; text values use an on-screen keyboard (or paste with Ctrl+V). The list of options is
+  generated from the config models, so new options appear without GUI changes.
+- **Setup:** edit the RomM connection, check it, and enroll this device.
+- **Sync:** preview or apply the library sync, gamelists and save sync.
+- **Services:** install, check or remove the systemd timers and the ES-DE hooks.
+- **Maintenance:** diagnostics, cache status/clear and library scan.
+
+Actions run the same `bifrost` commands you would type in a terminal. Their tables are drawn
+natively (aligned columns, Left/Right to pan). Long tables (such as the sync preview, which lists
+every operation rather than the first 25) open in a browser with a filter on the status column,
+search across all columns, paging, the directory prefix shared by long paths factored out, and the
+full selected row shown below. Their questions
+(confirmations, conflict choices, text such as a token) appear as dialogs, with the on-screen
+keyboard for text. Commands that change files or services ask for confirmation first, and B cancels
+a running command.
+
+It needs pygame, which is not installed by default:
+
+```bash
+pipx inject romm-bifrost pygame      # or: pip install 'romm-bifrost[gui]'
+./install-deck.sh --with-gui         # on a Steam Deck, at install or --update time
+bifrost gui                          # add --fullscreen on a handheld
+```
+
+### Opening it from ES-DE
+
+```bash
+bifrost gui install-launcher     # writes <esde.roms_path>/emulators/Bifrost.sh
+bifrost gui uninstall-launcher   # removes it again
+```
+
+The script starts `bifrost gui --fullscreen`, so Bifrost shows up as an entry in ES-DE's
+emulators system (the folder EmuDeck already lists `.sh` launchers from) and works with the
+controller in Game Mode. Use `--dir` to put it in another system's folder. A file named
+`Bifrost.sh` that Bifrost did not create is never overwritten or removed. `bifrost doctor` reports
+whether pygame and the launcher are in place, and `./install-deck.sh --with-gui` does both steps.
+The Services screen of the window can also add and remove it.
+
+### Machine-readable output
+
+With `BIFROST_OUTPUT=jsonl` every command prints one JSON event per line instead of drawing tables,
+and reads answers to its questions from stdin. This is what the GUI uses:
+
+```
+{"type": "message", "text": "..."}
+{"type": "table", "title": "...", "columns": ["..."], "rows": [["..."]]}
+{"type": "prompt", "id": 1, "kind": "confirm|choice|text", "question": "...", "choices": [], "default": "", "secret": false}
+```
+
+Answer a prompt with `{"id": 1, "answer": "..."}` on stdin; with no answer the default is taken.
+
 ## Automation
 
 Bifrost ships with five systemd **user** services (no root required) that make sync fully automatic on a console-style device.

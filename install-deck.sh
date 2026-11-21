@@ -4,6 +4,7 @@
 # Usage:
 #   ./install-deck.sh            # interactive (recommended for first install)
 #   ./install-deck.sh --update   # reinstall / upgrade, keep existing config
+#   ./install-deck.sh --with-gui # also install pygame for 'bifrost gui' (re-pass on --update)
 #   ./install-deck.sh --uninstall
 #
 # The script is idempotent: safe to run multiple times.
@@ -27,12 +28,14 @@ die()     { error "$*"; exit 1; }
 
 # ── parse args ─────────────────────────────────────────────────────────────
 MODE=install
+EXTRAS="watch"
 for arg in "$@"; do
   case "$arg" in
     --update)    MODE=update ;;
     --uninstall) MODE=uninstall ;;
+    --with-gui)  EXTRAS="watch,gui" ;;
     --help|-h)
-      echo "Usage: $0 [--update|--uninstall]"
+      echo "Usage: $0 [--update|--uninstall] [--with-gui]"
       exit 0
       ;;
   esac
@@ -144,15 +147,15 @@ fi
 info "Release wheel: $(basename "$WHEEL_URL")"
 
 # ── install / update bifrost ───────────────────────────────────────────────
-info "Installing bifrost[watch] via pipx..."
+info "Installing bifrost[${EXTRAS}] via pipx..."
 if [[ "$MODE" == "update" ]]; then
-  pipx install "romm-bifrost[watch] @ ${WHEEL_URL}" --force --quiet
+  pipx install "romm-bifrost[${EXTRAS}] @ ${WHEEL_URL}" --force --quiet
 else
   if pipx list 2>/dev/null | grep -q "package romm-bifrost"; then
     warn "bifrost already installed — reinstalling from latest release..."
-    pipx install "romm-bifrost[watch] @ ${WHEEL_URL}" --force --quiet
+    pipx install "romm-bifrost[${EXTRAS}] @ ${WHEEL_URL}" --force --quiet
   else
-    pipx install "romm-bifrost[watch] @ ${WHEEL_URL}" --quiet
+    pipx install "romm-bifrost[${EXTRAS}] @ ${WHEEL_URL}" --quiet
   fi
 fi
 
@@ -233,6 +236,17 @@ if bifrost esde-hooks install; then
   success "ES-DE hooks installed"
 else
   warn "ES-DE hooks install failed — run 'bifrost esde-hooks install' manually"
+fi
+
+# ── GUI launcher (only with --with-gui) ───────────────────────────────────
+if [[ "$EXTRAS" == *gui* ]]; then
+  echo ""
+  info "Adding the Bifrost GUI entry to ES-DE..."
+  if bifrost gui install-launcher; then
+    success "GUI launcher installed — find 'Bifrost' in the emulators system"
+  else
+    warn "GUI launcher install failed — run 'bifrost gui install-launcher' manually"
+  fi
 fi
 
 # ── log directory ─────────────────────────────────────────────────────────
